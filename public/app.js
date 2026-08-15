@@ -892,3 +892,16 @@ function enhanceContactCards(){
 }
 const renderWithContactCards=render;
 render=()=>{renderWithContactCards();enhanceContactCards()};
+
+// Make unread conversations unmistakable in the inbox list.
+const renderWithUnreadState=render;
+render=()=>{
+  renderWithUnreadState();
+  root.querySelectorAll("[data-chat]").forEach(button=>{
+    const chat=s.chats.find(item=>item.id===button.dataset.chat);
+    const unread=Number(chat?.unreadCount)||0;
+    button.classList.toggle("has-unread",unread>0);
+    const name=button.querySelector("span > b")?.textContent||"Conversation";
+    button.setAttribute("aria-label",unread?`${name}, ${unread} unread messages`:`${name}, no unread messages`);
+  });
+};
