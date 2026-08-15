@@ -2,7 +2,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
@@ -12,6 +12,7 @@ const publicPort = Number(process.env.GAKAI_PUBLIC_PORT || port);
 const publicUrl = process.env.GAKAI_PUBLIC_URL || `http://${publicHost}${publicPort === 80 ? '' : `:${publicPort}`}`;
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
 const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
+const providerWebhookSecret=process.env.GAKAI_PROVIDER_WEBHOOK_SECRET || "";
 const publicDir = join(process.cwd(), 'public');
 const dataDir=process.env.HOME_DATA_DIR || join(process.cwd(),'data');
 const dataFile=join(dataDir,'home.json');
@@ -19,17 +20,19 @@ await mkdir(dataDir,{recursive:true});
 let store={username:null,password:null,keys:[]};try{store=JSON.parse(await readFile(dataFile,'utf8'))}catch{}
 const persist=()=>writeFile(dataFile,JSON.stringify(store,null,2),'utf8');
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
+if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
 const sessions=new Map();
 const hash=value=>createHash('sha256').update(value).digest('hex');
+const equalHex=(left,right)=>{try{const a=Buffer.from(left||"","hex"),b=Buffer.from(right||"","hex");return a.length===b.length&&timingSafeEqual(a,b)}catch{return false}};
 const passwordHash=value=>{const salt=randomBytes(16).toString('hex');return `${salt}:${scryptSync(value,salt,64).toString('hex')}`};
 const passwordMatches=value=>{const [salt,expected]=store.password.split(':');return timingSafeEqual(Buffer.from(expected,'hex'),scryptSync(value,salt,64))};
 const cookie=req=>Object.fromEntries((req.headers.cookie||'').split(';').map(x=>x.trim().split('=').map(decodeURIComponent)).filter(x=>x.length===2));
 const admin=req=>sessions.has(cookie(req).home_session);
 const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8' };
 const send = (res, status, data) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'}); res.end(JSON.stringify(data)); };
-async function readBody(req) { let value=''; for await (const chunk of req) value += chunk; return value ? JSON.parse(value) : {}; }
+async function readBody(req) { let value=''; for await (const chunk of req) value += chunk; req.rawBody=value; return value ? JSON.parse(value) : {}; }
 async function providerRequest(path, options={}) {
   const headers = { accept:'application/json', ...(options.headers || {}) };
   if (providerApiKey) headers['x-api-key'] = providerApiKey;
@@ -109,6 +112,17 @@ async function resolveContact(session,rawId){
     const value={id:contactId,name:contact.name||contact.pushName||contact.shortName||contact.verifiedName||null,picture:picture?.profilePictureURL||picture?.url||null};contactCache.set(key,value);return value;
   }catch{const value={id:contactId,name:null,picture:null};contactCache.set(key,value);return value}
 }
+const automationSummary=subscription=>({id:subscription.id,accountId:subscription.accountId,name:subscription.name,url:subscription.url,enabled:subscription.enabled,events:subscription.events,createdAt:subscription.createdAt,lastDelivery:subscription.lastDelivery||null});
+async function deliverAutomation(subscription,event){
+  const started=Date.now();
+  try{const response=await fetch(subscription.url,{method:"POST",headers:{"content-type":"application/json","x-gakai-secret":subscription.secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});subscription.lastDelivery={at:new Date().toISOString(),ok:response.ok,status:response.status,durationMs:Date.now()-started};if(!response.ok)throw new Error(`Webhook returned ${response.status}`)}
+  catch(error){subscription.lastDelivery={at:new Date().toISOString(),ok:false,error:error.message||"Delivery failed",durationMs:Date.now()-started};throw error}
+  finally{await persist()}
+}
+async function dispatchAutomationEvent(payload){
+  if(payload?.event!=="message"||payload?.payload?.fromMe)return;const accountId=String(payload.session||"");if(!accountId)return;const message=messageView(payload.payload||{}),chatId=payload.payload?.from||payload.payload?.chatId||null,event={id:`evt_${payload.payload?.id||randomBytes(12).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat:{id:chatId,kind:String(chatId||"").endsWith("@g.us")?"group":"direct"},message,source:"whatsapp"};await Promise.allSettled(store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)).map(subscription=>deliverAutomation(subscription,event)));
+}
+
 async function api(req, res, url) {
 function normalizedPreviewImage(value){
   const source=value&&typeof value==='object'?(value.url||value.data||value.base64||null):value;
@@ -119,6 +133,7 @@ function normalizedPreviewImage(value){
 }
 
   const parts = url.pathname.split('/').filter(Boolean);
+  if(req.method==="POST"&&url.pathname==="/api/app/provider-events"){const payload=await readBody(req);const signature=req.headers["x-webhook-hmac"];const expected=providerWebhookSecret?createHmac("sha512",providerWebhookSecret).update(req.rawBody||"").digest("hex"):"";if(!providerWebhookSecret||!signature||!equalHex(signature,expected))return send(res,401,{message:"Invalid provider webhook"});dispatchAutomationEvent(payload).catch(error=>console.error("Automation dispatch failed",error));return send(res,202,{ok:true});}
   if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, {ok:true, service:'gakai'});
   if (req.method === 'GET' && url.pathname === '/readyz') {
     try { await providerRequest('/api/sessions'); return send(res, 200, {ok:true, service:'gakai', provider:true}); }
@@ -156,6 +171,8 @@ async function enrichMessage(session,message){
   if(req.method==='GET'&&url.pathname==='/api/app/link-image'){const image=await safePublicUrl(url.searchParams.get('url')||'');if(!image)return send(res,400,{message:'Invalid public image URL'});const response=await fetch(image,{redirect:'manual',headers:{'user-agent':'Mozilla/5.0 (compatible; Gakai/1.0)'},signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:'Preview image unavailable'});const type=response.headers.get('content-type')||'image/jpeg';if(!type.startsWith('image/'))return send(res,502,{message:'Invalid preview image'});const body=Buffer.from(await response.arrayBuffer());if(body.length>5*1024*1024)return send(res,413,{message:'Preview image is too large'});res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});return res.end(body);}
   if(url.pathname==='/api/app/auth/setup'&&req.method==='POST'){if(store.password)return send(res,409,{message:'Administrator already configured'});const {username,password}=await readBody(req);const name=String(username||'').trim();if(name.length<3||name.length>40)return send(res,400,{message:'Use a username between 3 and 40 characters'});if(!password||password.length<10)return send(res,400,{message:'Use a password with at least 10 characters'});store.username=name;store.password=passwordHash(password);await persist();const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(201,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==='/api/app/auth/login'&&req.method==='POST'){const {username,password}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||'').trim()!==expectedUsername)||!passwordMatches(password||''))return send(res,401,{message:'Incorrect username or password'});const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(200,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
+  if(url.pathname==="/api/app/auth/profile"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{username:store.username||null});}
+  if(url.pathname==="/api/app/auth/profile"&&req.method==="PATCH"){if(!admin(req))return send(res,401,{message:"Sign in required"});const input=await readBody(req),username=String(input.username||"").trim(),currentPassword=String(input.currentPassword||"");if(!currentPassword||!passwordMatches(currentPassword))return send(res,401,{message:"Current password is incorrect"});if(username&&(username.length<3||username.length>40))return send(res,400,{message:"Use a username between 3 and 40 characters"});if(input.newPassword&&String(input.newPassword).length<10)return send(res,400,{message:"Use a password with at least 10 characters"});if(username)store.username=username;if(input.newPassword)store.password=passwordHash(String(input.newPassword));await persist();return send(res,200,{ok:true,username:store.username});}
   if(!admin(req))return send(res,401,{message:'Sign in required'});
   if(req.method==='GET'&&url.pathname==='/api/app/media'){const path=url.searchParams.get('path')||'';const range=req.headers.range;if(range){const file=await providerFile(path,{range});const body=Buffer.from(await file.arrayBuffer());const headers={'content-type':file.headers.get('content-type')||'application/octet-stream','cache-control':'private, max-age=86400','accept-ranges':file.headers.get('accept-ranges')||'bytes','content-length':String(body.length)};const contentRange=file.headers.get('content-range');if(contentRange)headers['content-range']=contentRange;res.writeHead(file.status,headers);return res.end(body)}const file=await cachedMedia(path);res.writeHead(200,{'content-type':file.type,'cache-control':'private, max-age=86400','accept-ranges':'bytes','content-length':String(file.buffer.length)});return res.end(file.buffer);}
   if (req.method==='GET' && url.pathname==='/api/app/accounts') {const sessions=await providerRequest('/api/sessions');const deleting=new Set(store.deletingAccounts||[]);const visible=sessions.filter(session=>!deleting.has(session.name));const live=new Set(sessions.map(session=>session.name));const next=(store.deletingAccounts||[]).filter(id=>live.has(id));if(next.length!==store.deletingAccounts.length){store.deletingAccounts=next;await persist()}return send(res,200,{accounts:await Promise.all(visible.map(accountView))});}
@@ -219,12 +236,17 @@ async function enrichMessage(session,message){
   if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req);const session=await providerRequest(`/api/sessions/${encodeURIComponent(id)}`);const next={...(session.config||{}),metadata:{...(session.config?.metadata||{}),'gakai.label':String(input.label||'WhatsApp account').slice(0,80)}};await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({config:next})});return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='GET')return send(res,200,{keys:store.keys.filter(k=>k.accountId===id).map(({hash,...key})=>key)});
   if(parts[4]==='integration-keys'&&req.method==='POST'){const input=await readBody(req);const token=`wh_live_${randomBytes(24).toString('base64url')}`;const key={id:randomBytes(8).toString('hex'),accountId:id,name:String(input.name||'Integration').slice(0,80),scopes:Array.isArray(input.scopes)?input.scopes:['messages:read','messages:send'],createdAt:new Date().toISOString(),lastUsedAt:null,hash:hash(token)};store.keys.push(key);await persist();return send(res,201,{key:{...key,hash:undefined},token});}
+  if(parts[4]==="automations"&&req.method==="GET")return send(res,200,{subscriptions:store.automationSubscriptions.filter(subscription=>subscription.accountId===id).map(automationSummary)});
+  if(parts[4]==="automations"&&req.method==="POST"){const input=await readBody(req);const url=await safePublicUrl(input.url||"");if(!url||url.protocol!=="https:")return send(res,400,{message:"Use a public HTTPS n8n production webhook URL"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:url.href,enabled:true,events:["message.received"],secret:randomBytes(24).toString("base64url"),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}
+  if(parts[4]==="automations"&&parts[5]&&req.method==="PATCH"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req);if(typeof input.enabled==="boolean")subscription.enabled=input.enabled;await persist();return send(res,200,{subscription:automationSummary(subscription)});}
+  if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@c.us",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{await deliverAutomation(subscription,event);return send(res,200,{ok:true,subscription:automationSummary(subscription)})}catch(error){return send(res,502,{message:error.message,subscription:automationSummary(subscription)})}}
+  if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
   return send(res,404,{message:'Not found'});
 }
 http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.headers.host}`); try {
   if (url.pathname === '/healthz' || url.pathname === '/readyz' || url.pathname.startsWith('/api/')) return await api(req,res,url);
-  const requested=url.pathname==='/'?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
+  const requested=(url.pathname==='/'||url.pathname.startsWith('/accounts/'))?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
   if (!file.startsWith(publicDir)) return send(res,403,{message:'Forbidden'});
   const content=await readFile(file); res.writeHead(200,{'content-type':types[extname(file)]||'application/octet-stream','cache-control':'no-cache'}); res.end(content);
 } catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai is ready at ${publicUrl}`));
