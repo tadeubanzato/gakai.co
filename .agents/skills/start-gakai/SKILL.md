@@ -14,7 +14,7 @@ Do not describe Gakai as WAHA Home. Use Gakai in visible copy, images, container
 ## Read this first
 
 - Work from `/home/tbanzato/gakai`, not the legacy `/home/tbanzato/waha` directory.
-- The current branch may be a feature branch. Check `git branch --show-current` and `git status --short` before editing.
+- Before reading code or taking any project action, synchronize the current branch: run `git status --short`, `git fetch origin --prune`, then—only if the working tree is clean—`git pull --ff-only origin $(git branch --show-current)`. Never switch branches, merge, rebase, stash, or overwrite local work automatically. If fast-forwarding is impossible or the tree is dirty, report it and wait for direction.
 - Read `server.mjs`, `public/app.js`, `public/styles.css`, `docker-compose.yml`, and the relevant tests or fixtures before making a change.
 - Read `references/provider-api.md` during startup for the current official provider links, verified payload notes, and adapter boundary rules.
 - Treat `src/` as the target architecture. It currently contains scaffolding; do not claim the planned modules already implement production behavior.
@@ -81,7 +81,7 @@ The future public release must let users pull Gakai only. Internally it may cont
 
 ## Engineering workflow
 
-1. Inspect the exact current code path and check the working tree before changing files.
+1. Synchronize the current branch using the required safe fast-forward workflow, then inspect the exact current code path before changing files.
 2. Make the smallest coherent implementation. Preserve unrelated user changes.
 3. Add or update sanitized fixtures/tests for behavior that depends on provider payloads.
 4. Validate browser JavaScript inside the application image because the host may not have Node: `docker compose run --rm --no-deps home node --check /app/public/app.js`.
