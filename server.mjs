@@ -7,7 +7,11 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
 const port = Number(process.env.PORT || 3000);
-const coreUrl = (process.env.WAHA_INTERNAL_URL || 'http://waha:3000').replace(/\/$/, '');
+const publicHost = process.env.GAKAI_PUBLIC_HOST || 'gakai.localhost';
+const publicPort = Number(process.env.GAKAI_PUBLIC_PORT || port);
+const publicUrl = process.env.GAKAI_PUBLIC_URL || `http://${publicHost}${publicPort === 80 ? '' : `:${publicPort}`}`;
+const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
+const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
 const publicDir = join(process.cwd(), 'public');
 const dataDir=process.env.HOME_DATA_DIR || join(process.cwd(),'data');
 const dataFile=join(dataDir,'home.json');
@@ -15,7 +19,8 @@ await mkdir(dataDir,{recursive:true});
 let store={username:null,password:null,keys:[]};try{store=JSON.parse(await readFile(dataFile,'utf8'))}catch{}
 const persist=()=>writeFile(dataFile,JSON.stringify(store,null,2),'utf8');
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
-const legacyAdminUsername=process.env.WAHA_DASHBOARD_USERNAME || null;
+const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
+if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
 const sessions=new Map();
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const passwordHash=value=>{const salt=randomBytes(16).toString('hex');return `${salt}:${scryptSync(value,salt,64).toString('hex')}`};
@@ -25,28 +30,28 @@ const admin=req=>sessions.has(cookie(req).home_session);
 const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8' };
 const send = (res, status, data) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'}); res.end(JSON.stringify(data)); };
 async function readBody(req) { let value=''; for await (const chunk of req) value += chunk; return value ? JSON.parse(value) : {}; }
-async function waha(path, options={}) {
+async function providerRequest(path, options={}) {
   const headers = { accept:'application/json', ...(options.headers || {}) };
-  if (process.env.WAHA_API_KEY) headers['x-api-key'] = process.env.WAHA_API_KEY;
-  const response = await fetch(`${coreUrl}${path}`, {...options, headers});
+  if (providerApiKey) headers['x-api-key'] = providerApiKey;
+  const response = await fetch(`${providerUrl}${path}`, {...options, headers});
   const text = await response.text(); let data;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!response.ok) throw Object.assign(new Error(data?.message || data || 'WAHA request failed'), {status:response.status});
+  if (!response.ok) throw Object.assign(new Error(data?.message || data || 'Provider request failed'), {status:response.status});
   return data;
 }
-async function wahaFile(path, extraHeaders={}) {
-  // WAHA's media links point at its own localhost. Relay only managed files.
+async function providerFile(path, extraHeaders={}) {
+  // The provider runtime's media links point at its own localhost. Relay only managed files.
   if (!path.startsWith('/api/files/')) throw Object.assign(new Error('Invalid media path'), {status:400});
   const headers = {...extraHeaders};
-  if (process.env.WAHA_API_KEY) headers['x-api-key'] = process.env.WAHA_API_KEY;
-  const response = await fetch(`${coreUrl}${path}`, {headers});
+  if (providerApiKey) headers['x-api-key'] = providerApiKey;
+  const response = await fetch(`${providerUrl}${path}`, {headers});
   if (!response.ok) throw Object.assign(new Error('Media is unavailable'), {status:response.status});
   return response;
 }
 const mediaCache=new Map();
 async function cachedMedia(path){
   const cached=mediaCache.get(path);if(cached)return cached;
-  const response=await wahaFile(path);const value={buffer:Buffer.from(await response.arrayBuffer()),type:response.headers.get('content-type')||'application/octet-stream'};
+  const response=await providerFile(path);const value={buffer:Buffer.from(await response.arrayBuffer()),type:response.headers.get('content-type')||'application/octet-stream'};
   if(value.buffer.length<=3*1024*1024){mediaCache.set(path,value);if(mediaCache.size>24)mediaCache.delete(mediaCache.keys().next().value)}
   return value;
 }
@@ -56,7 +61,7 @@ const safeInstagramImage=value=>{try{const url=new URL(value);return url.protoco
 const htmlMeta=(html,key)=>{const match=html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${key}["'][^>]+content=["']([^"']+)["']`,'i'))||html.match(new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${key}["']`,'i'));return match?.[1]?.replace(/&amp;/g,'&')||null};
 async function instagramPreview(value){const url=safeInstagramPage(value);if(!url)throw Object.assign(new Error('Invalid Instagram URL'),{status:400});const cached=instagramPreviewCache.get(url.href);if(cached)return cached;const response=await fetch(url,{headers:{'user-agent':'Mozilla/5.0 (compatible; Gakai/1.0)',accept:'text/html,application/xhtml+xml'},signal:AbortSignal.timeout(8000)});if(!response.ok)throw Object.assign(new Error('Instagram preview unavailable'),{status:502});const html=await response.text();const image=htmlMeta(html,'og:image'),result={title:htmlMeta(html,'og:title'),description:htmlMeta(html,'og:description'),image:safeInstagramImage(image)?.href||null};instagramPreviewCache.set(url.href,result);if(instagramPreviewCache.size>40)instagramPreviewCache.delete(instagramPreviewCache.keys().next().value);return result;}
 
-function account(s) { const rawStatus=s.status; return { id:s.name, label:s.config?.metadata?.['waha-home.label'] || s.me?.pushName || s.name, status:['WORKING','CONNECTED','READY'].includes(rawStatus)?'WORKING':rawStatus, phone:s.me?.id?.split('@')[0] || null, profile:s.me?.pushName || null }; }
+function account(s) { const rawStatus=s.status; return { id:s.name, label:s.config?.metadata?.['gakai.label'] || s.config?.metadata?.['waha-home.label'] || s.me?.pushName || s.name, status:['WORKING','CONNECTED','READY'].includes(rawStatus)?'WORKING':rawStatus, phone:s.me?.id?.split('@')[0] || null, profile:s.me?.pushName || null }; }
 async function accountView(session){
   const view=account(session);if(!session.me?.id)return view;
 const externalPreviewCache=new Map();
@@ -64,13 +69,13 @@ const privateAddress=address=>address==='::1'||address==='0.0.0.0'||address.star
 async function safePublicUrl(value){try{const url=new URL(value);if(!/^https?:$/.test(url.protocol)||url.hostname==='localhost'||url.hostname.endsWith('.local'))return null;const direct=isIP(url.hostname);const addresses=direct?[{address:url.hostname}]:await lookup(url.hostname,{all:true,verbatim:true});return addresses.length&&addresses.every(item=>!privateAddress(item.address))?url:null}catch{return null}}
 async function openGraphPreview(value){const url=await safePublicUrl(value);if(!url)throw Object.assign(new Error('Invalid public URL'),{status:400});const cached=externalPreviewCache.get(url.href);if(cached)return cached;const response=await fetch(url,{redirect:'manual',headers:{'user-agent':'Mozilla/5.0 (compatible; Gakai/1.0)',accept:'text/html,application/xhtml+xml'},signal:AbortSignal.timeout(8000)});if(!response.ok||response.status>=300)throw Object.assign(new Error('Link preview unavailable'),{status:502});const html=(await response.text()).slice(0,1024*1024),image=await safePublicUrl(htmlMeta(html,'og:image'));const result={title:htmlMeta(html,'og:title'),description:htmlMeta(html,'og:description'),image:image?.href||null};externalPreviewCache.set(url.href,result);if(externalPreviewCache.size>80)externalPreviewCache.delete(externalPreviewCache.keys().next().value);return result;}
 
-  try{const contacts=await waha(`/api/contacts/all?session=${encodeURIComponent(session.name)}`);const self=(Array.isArray(contacts)?contacts:[]).find(contact=>contact.id===session.me.id||contact.number===session.me.id.split("@")[0])||{};const photo=await waha(`/api/contacts/profile-picture?contactId=${encodeURIComponent(session.me.id)}&session=${encodeURIComponent(session.name)}`);view.picture=photo?.profilePictureURL||photo?.url||null;view.mentionNames=[view.label,view.profile,self.name,self.pushName,self.shortName,view.phone].filter(Boolean)}catch{view.picture=null;view.mentionNames=[view.label,view.profile,view.phone].filter(Boolean)}
+  try{const contacts=await providerRequest(`/api/contacts/all?session=${encodeURIComponent(session.name)}`);const self=(Array.isArray(contacts)?contacts:[]).find(contact=>contact.id===session.me.id||contact.number===session.me.id.split("@")[0])||{};const photo=await providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(session.me.id)}&session=${encodeURIComponent(session.name)}`);view.picture=photo?.profilePictureURL||photo?.url||null;view.mentionNames=[view.label,view.profile,self.name,self.pushName,self.shortName,view.phone].filter(Boolean)}catch{view.picture=null;view.mentionNames=[view.label,view.profile,view.phone].filter(Boolean)}
   return view;
 }
 function normalizedTimestamp(value){const numeric=Number(value);if(Number.isFinite(numeric)&&numeric>0)return numeric>1e12?Math.floor(numeric/1000):numeric;const parsed=Date.parse(value);return Number.isFinite(parsed)?Math.floor(parsed/1000):0;}
-const config = label => label ? ({metadata:{'waha-home.label':label}}) : {};
+const config = label => label ? ({metadata:{'gakai.label':label}}) : {};
 function chatOverview(chat) {
-  return { id:chat.id, name:chat.name, picture:chat.picture || null, unreadCount:chat.unreadCount || 0,
+  return { id:chat.id, name:chat.name, picture:chat.picture || null, unreadCount:Number(chat.unreadCount ?? chat.unreadMessagesCount ?? chat._chat?.unreadCount ?? 0) || 0,
     timestamp:normalizedTimestamp(chat.timestamp || chat.lastMessage?.timestamp || 0),
     lastMessage:chat.lastMessage ? {body:chat.lastMessage.body || '', text:chat.lastMessage.text || '', timestamp:chat.lastMessage.timestamp || 0, hasMedia:Boolean(chat.lastMessage.hasMedia)} : null };
 }
@@ -86,7 +91,7 @@ function messageView(message) {
 const contactsListCache=new Map();
 async function contactsFor(session){
   const cached=contactsListCache.get(session);if(cached)return await cached;
-  const task=waha(`/api/contacts/all?session=${encodeURIComponent(session)}`).catch(error=>{contactsListCache.delete(session);throw error});contactsListCache.set(session,task);return await task;
+  const task=providerRequest(`/api/contacts/all?session=${encodeURIComponent(session)}`).catch(error=>{contactsListCache.delete(session);throw error});contactsListCache.set(session,task);return await task;
 }
 const contactCache=new Map();
 async function resolveContact(session,rawId){
@@ -94,13 +99,13 @@ async function resolveContact(session,rawId){
   let contactId=String(rawId||'');
   try{
     if(contactId.endsWith('@lid')){
-      const lid=await waha(`/api/${encodeURIComponent(session)}/lids/${encodeURIComponent(contactId)}`);
+      const lid=await providerRequest(`/api/${encodeURIComponent(session)}/lids/${encodeURIComponent(contactId)}`);
       const mapped=typeof lid==='string'?lid:(lid.phoneNumber||lid.phone||lid.pn||lid.id||lid.chatId||lid.data?.phoneNumber||lid.data?.id||null);
       if(mapped){contactId=String(mapped);if(!contactId.includes('@'))contactId+='@c.us'}
     }
     const contacts=await contactsFor(session);
     const contact=(Array.isArray(contacts)?contacts:[]).find(item=>item.id===contactId||item.number===contactId.replace(/@.*$/,'')||item.lid===rawId)||{};
-    const picture=await waha(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`).catch(()=>null);
+    const picture=await providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`).catch(()=>null);
     const value={id:contactId,name:contact.name||contact.pushName||contact.shortName||contact.verifiedName||null,picture:picture?.profilePictureURL||picture?.url||null};contactCache.set(key,value);return value;
   }catch{const value={id:contactId,name:null,picture:null};contactCache.set(key,value);return value}
 }
@@ -114,6 +119,11 @@ function normalizedPreviewImage(value){
 }
 
   const parts = url.pathname.split('/').filter(Boolean);
+  if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, {ok:true, service:'gakai'});
+  if (req.method === 'GET' && url.pathname === '/readyz') {
+    try { await providerRequest('/api/sessions'); return send(res, 200, {ok:true, service:'gakai', provider:true}); }
+    catch { return send(res, 503, {ok:false, service:'gakai', provider:false}); }
+  }
 async function enrichMessage(session,message){
   const view=messageView(message);
   if(view.sender?.id){
@@ -135,53 +145,54 @@ async function enrichMessage(session,message){
     const token=(req.headers.authorization||'').replace(/^Bearer\s+/i,'');const key=store.keys.find(k=>k.hash===hash(token));
     if(!key)return send(res,401,{message:'Invalid integration key'});key.lastUsedAt=new Date().toISOString();persist();
     const endpoint=url.pathname.slice('/api/integrations/v1/'.length);
-    if(req.method==='GET'&&endpoint==='chats'&&key.scopes.includes('messages:read')){const chats=await waha(`/api/${encodeURIComponent(key.accountId)}/chats/overview?limit=35`);return send(res,200,{accountId:key.accountId,chats:chats.map(chatOverview).sort((a,b)=>b.timestamp-a.timestamp)});}
-    if(req.method==='GET'&&endpoint==='messages'&&key.scopes.includes('messages:read')){const chatId=url.searchParams.get('chatId');if(!chatId)return send(res,400,{message:'chatId is required'});const messages=await waha(`/api/${encodeURIComponent(key.accountId)}/chats/${encodeURIComponent(chatId)}/messages?limit=30&downloadMedia=false`);return send(res,200,{messages:messages.map(messageView).sort((a,b)=>a.timestamp-b.timestamp)});}
-    if(req.method==='POST'&&endpoint==='messages'&&key.scopes.includes('messages:send')){const input=await readBody(req);if(!input.chatId||!input.text)return send(res,400,{message:'chatId and text are required'});const sent=await waha('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:key.accountId,chatId:input.chatId,text:input.text})});return send(res,200,{message:messageView(sent||{})});}
+    if(req.method==='GET'&&endpoint==='chats'&&key.scopes.includes('messages:read')){const chats=await providerRequest(`/api/${encodeURIComponent(key.accountId)}/chats/overview?limit=35`);return send(res,200,{accountId:key.accountId,chats:chats.map(chatOverview).sort((a,b)=>b.timestamp-a.timestamp)});}
+    if(req.method==='GET'&&endpoint==='messages'&&key.scopes.includes('messages:read')){const chatId=url.searchParams.get('chatId');if(!chatId)return send(res,400,{message:'chatId is required'});const messages=await providerRequest(`/api/${encodeURIComponent(key.accountId)}/chats/${encodeURIComponent(chatId)}/messages?limit=30&downloadMedia=false`);return send(res,200,{messages:messages.map(messageView).sort((a,b)=>a.timestamp-b.timestamp)});}
+    if(req.method==='POST'&&endpoint==='messages'&&key.scopes.includes('messages:send')){const input=await readBody(req);if(!input.chatId||!input.text)return send(res,400,{message:'chatId and text are required'});const sent=await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:key.accountId,chatId:input.chatId,text:input.text})});return send(res,200,{message:messageView(sent||{})});}
     return send(res,403,{message:'This integration key does not have permission for that action'});
 
   }
-  if(url.pathname==='/api/app/auth/state'&&req.method==='GET')return send(res,200,{setup:!store.password,hasUsername:Boolean(store.username||legacyAdminUsername),authenticated:admin(req)});
+  if(url.pathname==='/api/app/auth/state'&&req.method==='GET')return send(res,200,{setup:!store.password,hasUsername:Boolean(store.username),authenticated:admin(req)});
   if(req.method==='GET'&&url.pathname==='/api/app/link-preview'){return send(res,200,await openGraphPreview(url.searchParams.get('url')||''));}
   if(req.method==='GET'&&url.pathname==='/api/app/link-image'){const image=await safePublicUrl(url.searchParams.get('url')||'');if(!image)return send(res,400,{message:'Invalid public image URL'});const response=await fetch(image,{redirect:'manual',headers:{'user-agent':'Mozilla/5.0 (compatible; Gakai/1.0)'},signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:'Preview image unavailable'});const type=response.headers.get('content-type')||'image/jpeg';if(!type.startsWith('image/'))return send(res,502,{message:'Invalid preview image'});const body=Buffer.from(await response.arrayBuffer());if(body.length>5*1024*1024)return send(res,413,{message:'Preview image is too large'});res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});return res.end(body);}
   if(url.pathname==='/api/app/auth/setup'&&req.method==='POST'){if(store.password)return send(res,409,{message:'Administrator already configured'});const {username,password}=await readBody(req);const name=String(username||'').trim();if(name.length<3||name.length>40)return send(res,400,{message:'Use a username between 3 and 40 characters'});if(!password||password.length<10)return send(res,400,{message:'Use a password with at least 10 characters'});store.username=name;store.password=passwordHash(password);await persist();const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(201,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
-  if(url.pathname==='/api/app/auth/login'&&req.method==='POST'){const {username,password}=await readBody(req);const expectedUsername=store.username||legacyAdminUsername;if(!store.password||(expectedUsername&&String(username||'').trim()!==expectedUsername)||!passwordMatches(password||''))return send(res,401,{message:'Incorrect username or password'});const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(200,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
+  if(url.pathname==='/api/app/auth/login'&&req.method==='POST'){const {username,password}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||'').trim()!==expectedUsername)||!passwordMatches(password||''))return send(res,401,{message:'Incorrect username or password'});const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(200,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
   if(!admin(req))return send(res,401,{message:'Sign in required'});
-  if(req.method==='GET'&&url.pathname==='/api/app/media'){const path=url.searchParams.get('path')||'';const range=req.headers.range;if(range){const file=await wahaFile(path,{range});const body=Buffer.from(await file.arrayBuffer());const headers={'content-type':file.headers.get('content-type')||'application/octet-stream','cache-control':'private, max-age=86400','accept-ranges':file.headers.get('accept-ranges')||'bytes','content-length':String(body.length)};const contentRange=file.headers.get('content-range');if(contentRange)headers['content-range']=contentRange;res.writeHead(file.status,headers);return res.end(body)}const file=await cachedMedia(path);res.writeHead(200,{'content-type':file.type,'cache-control':'private, max-age=86400','accept-ranges':'bytes','content-length':String(file.buffer.length)});return res.end(file.buffer);}
-  if (req.method==='GET' && url.pathname==='/api/app/accounts') {const sessions=await waha('/api/sessions');const deleting=new Set(store.deletingAccounts||[]);const visible=sessions.filter(session=>!deleting.has(session.name));const live=new Set(sessions.map(session=>session.name));const next=(store.deletingAccounts||[]).filter(id=>live.has(id));if(next.length!==store.deletingAccounts.length){store.deletingAccounts=next;await persist()}return send(res,200,{accounts:await Promise.all(visible.map(accountView))});}
+  if(req.method==='GET'&&url.pathname==='/api/app/media'){const path=url.searchParams.get('path')||'';const range=req.headers.range;if(range){const file=await providerFile(path,{range});const body=Buffer.from(await file.arrayBuffer());const headers={'content-type':file.headers.get('content-type')||'application/octet-stream','cache-control':'private, max-age=86400','accept-ranges':file.headers.get('accept-ranges')||'bytes','content-length':String(body.length)};const contentRange=file.headers.get('content-range');if(contentRange)headers['content-range']=contentRange;res.writeHead(file.status,headers);return res.end(body)}const file=await cachedMedia(path);res.writeHead(200,{'content-type':file.type,'cache-control':'private, max-age=86400','accept-ranges':'bytes','content-length':String(file.buffer.length)});return res.end(file.buffer);}
+  if (req.method==='GET' && url.pathname==='/api/app/accounts') {const sessions=await providerRequest('/api/sessions');const deleting=new Set(store.deletingAccounts||[]);const visible=sessions.filter(session=>!deleting.has(session.name));const live=new Set(sessions.map(session=>session.name));const next=(store.deletingAccounts||[]).filter(id=>live.has(id));if(next.length!==store.deletingAccounts.length){store.deletingAccounts=next;await persist()}return send(res,200,{accounts:await Promise.all(visible.map(accountView))});}
   if(req.method==='GET'&&url.pathname==='/api/app/instagram-preview'){return send(res,200,await instagramPreview(url.searchParams.get('url')||''));}
   if(req.method==='GET'&&url.pathname==='/api/app/instagram-image'){const image=safeInstagramImage(url.searchParams.get('url')||'');if(!image)return send(res,400,{message:'Invalid Instagram image URL'});const response=await fetch(image,{headers:{'user-agent':'Mozilla/5.0 (compatible; Gakai/1.0)'},signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:'Instagram image unavailable'});const type=response.headers.get('content-type')||'image/jpeg';if(!type.startsWith('image/'))return send(res,502,{message:'Invalid Instagram image'});const body=Buffer.from(await response.arrayBuffer());if(body.length>5*1024*1024)return send(res,413,{message:'Instagram image is too large'});res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});return res.end(body);}
-  if (req.method==='GET' && url.pathname==='/api/app/accounts') {const sessions=await waha('/api/sessions');return send(res,200,{accounts:await Promise.all(sessions.map(accountView))});}
+  if (req.method==='GET' && url.pathname==='/api/app/accounts') {const sessions=await providerRequest('/api/sessions');return send(res,200,{accounts:await Promise.all(sessions.map(accountView))});}
   if (req.method==='POST' && url.pathname==='/api/app/accounts') {
     const input=await readBody(req), id=`account-${Date.now().toString(36)}`;
-    const created=await waha('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:id,config:config(input.label)})});
+    const created=await providerRequest('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:id,config:config(input.label)})});
     return send(res,201,{account:account(created || {name:id,status:'STARTING',config:config(input.label)})});
   }
   const id=decodeURIComponent(parts[3] || '');
-  if (req.method==='DELETE' && parts.length===4) {if(!store.deletingAccounts.includes(id)){store.deletingAccounts.push(id);await persist()}await waha(`/api/sessions/${encodeURIComponent(id)}`,{method:'DELETE'});return send(res,200,{ok:true});}
-  if (req.method==="DELETE" && parts.length===4) {await waha(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"});return send(res,200,{ok:true});}
-  if (req.method==='GET' && parts[4]==='qr') return send(res,200,await waha(`/api/${encodeURIComponent(id)}/auth/qr`));
-  if (req.method==='POST' && parts[4]==='start') return send(res,200,(await waha(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
-  if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await waha(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
-  if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){await waha(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}`,{method:'DELETE'});return send(res,200,{ok:true});}
+  if (req.method==='DELETE' && parts.length===4) {if(!store.deletingAccounts.includes(id)){store.deletingAccounts.push(id);await persist()}await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:'DELETE'});return send(res,200,{ok:true});}
+  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"});return send(res,200,{ok:true});}
+  if (req.method==='GET' && parts[4]==='qr') return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/auth/qr`));
+  if (req.method==='POST' && parts[4]==='start') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
+  if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}/messages/read`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});return send(res,200,{ok:true});}
+  if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}`,{method:'DELETE'});return send(res,200,{ok:true});}
   // Presence stays behind the dashboard proxy so the browser never receives
-  // direct WAHA access or its API key.
+  // direct provider access or its API key.
   if (parts[4]==='presence') {
     const chatId=url.searchParams.get('chatId');
     if (!chatId) return send(res,400,{message:'chatId is required'});
     if (req.method==='GET') {
-      await waha(`/api/${encodeURIComponent(id)}/presence/${encodeURIComponent(chatId)}/subscribe`,{method:'POST'});
-      return send(res,200,await waha(`/api/${encodeURIComponent(id)}/presence/${encodeURIComponent(chatId)}`));
+      await providerRequest(`/api/${encodeURIComponent(id)}/presence/${encodeURIComponent(chatId)}/subscribe`,{method:'POST'});
+      return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/presence/${encodeURIComponent(chatId)}`));
     }
     if (req.method==='POST') {
       const {presence}=await readBody(req);
       if (!['typing','recording','paused'].includes(presence)) return send(res,400,{message:'Invalid presence state'});
-      await waha(`/api/${encodeURIComponent(id)}/presence`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chatId,presence})});
+      await providerRequest(`/api/${encodeURIComponent(id)}/presence`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chatId,presence})});
       return send(res,200,{ok:true});
     }
   }
   if (req.method==='GET' && parts[4]==='chats') {
-    const chats=await waha(`/api/${encodeURIComponent(id)}/chats/overview?limit=35`);
+    const chats=await providerRequest(`/api/${encodeURIComponent(id)}/chats/overview?limit=35`);
     return send(res,200,chats.map(chatOverview).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
@@ -190,30 +201,30 @@ async function enrichMessage(session,message){
     const limit=Math.min(Math.max(Number(url.searchParams.get('limit')) || 15, 1), 60);
     const offset=Math.max(Number(url.searchParams.get('offset')) || 0, 0);
     // The first screen must be fast. Media download is intentionally opt-in,
-    // because WAHA may need to retrieve every attachment before replying.
+    // because the provider may need to retrieve every attachment before replying.
     const downloadMedia=url.searchParams.get('media') === '1';
-    const messages=await waha(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}&offset=${offset}&downloadMedia=${downloadMedia}`);
+    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}&offset=${offset}&downloadMedia=${downloadMedia}`);
     return send(res,200,(await Promise.all(messages.map(message=>enrichMessage(id,message)))).sort((a,b) => a.timestamp - b.timestamp));
   }
   if (req.method==='GET' && parts[4]==='message-media') {
     const chatId=url.searchParams.get('chatId'),messageId=url.searchParams.get('messageId');
     if(!chatId||!messageId)return send(res,400,{message:'chatId and messageId are required'});
-    return send(res,200,{message:await enrichMessage(id,await waha(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}?downloadMedia=true`))});
+    return send(res,200,{message:await enrichMessage(id,await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}?downloadMedia=true`))});
   }
   if (req.method==='POST' && parts[4]==='messages') {
     const input=await readBody(req); if (!input.chatId || !input.text?.trim()) return send(res,400,{message:'Recipient and message are required'});
-    const sent=await waha('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,chatId:input.chatId,text:input.text.trim()})});
+    const sent=await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,chatId:input.chatId,text:input.text.trim()})});
     return send(res,200,{message:messageView(sent || {})});
   }
-  if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req);const session=await waha(`/api/sessions/${encodeURIComponent(id)}`);const next={...(session.config||{}),metadata:{...(session.config?.metadata||{}),'waha-home.label':String(input.label||'WhatsApp account').slice(0,80)}};await waha(`/api/sessions/${encodeURIComponent(id)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({config:next})});return send(res,200,{ok:true});}
+  if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req);const session=await providerRequest(`/api/sessions/${encodeURIComponent(id)}`);const next={...(session.config||{}),metadata:{...(session.config?.metadata||{}),'gakai.label':String(input.label||'WhatsApp account').slice(0,80)}};await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({config:next})});return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='GET')return send(res,200,{keys:store.keys.filter(k=>k.accountId===id).map(({hash,...key})=>key)});
   if(parts[4]==='integration-keys'&&req.method==='POST'){const input=await readBody(req);const token=`wh_live_${randomBytes(24).toString('base64url')}`;const key={id:randomBytes(8).toString('hex'),accountId:id,name:String(input.name||'Integration').slice(0,80),scopes:Array.isArray(input.scopes)?input.scopes:['messages:read','messages:send'],createdAt:new Date().toISOString(),lastUsedAt:null,hash:hash(token)};store.keys.push(key);await persist();return send(res,201,{key:{...key,hash:undefined},token});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
   return send(res,404,{message:'Not found'});
 }
 http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.headers.host}`); try {
-  if (url.pathname.startsWith('/api/')) return await api(req,res,url);
+  if (url.pathname === '/healthz' || url.pathname === '/readyz' || url.pathname.startsWith('/api/')) return await api(req,res,url);
   const requested=url.pathname==='/'?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
   if (!file.startsWith(publicDir)) return send(res,403,{message:'Forbidden'});
   const content=await readFile(file); res.writeHead(200,{'content-type':types[extname(file)]||'application/octet-stream','cache-control':'no-cache'}); res.end(content);
-} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai listening on ${port}`));
+} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai is ready at ${publicUrl}`));

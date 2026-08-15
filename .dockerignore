@@ -1,0 +1,10 @@
+.env
+.git
+.agents
+.claude
+node_modules
+sessions
+home-data
+data
+*.log
+README.md
