@@ -1,0 +1,4 @@
+interface:
+  display_name: "Start Gakai"
+  short_description: "Load Gakai product and engineering context"
+  default_prompt: "Use $start-gakai to work on Gakai with the project standards and long-term product architecture in mind."
