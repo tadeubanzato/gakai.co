@@ -16,6 +16,7 @@ Do not describe Gakai as WAHA Home. Use Gakai in visible copy, images, container
 - Work from `/home/tbanzato/gakai`, not the legacy `/home/tbanzato/waha` directory.
 - The current branch may be a feature branch. Check `git branch --show-current` and `git status --short` before editing.
 - Read `server.mjs`, `public/app.js`, `public/styles.css`, `docker-compose.yml`, and the relevant tests or fixtures before making a change.
+- Read `references/provider-api.md` during startup for the current official provider links, verified payload notes, and adapter boundary rules.
 - Treat `src/` as the target architecture. It currently contains scaffolding; do not claim the planned modules already implement production behavior.
 - Read this skill completely before making product-wide decisions.
 
@@ -25,7 +26,7 @@ Do not describe Gakai as WAHA Home. Use Gakai in visible copy, images, container
 - Compose project: `/home/tbanzato/gakai/docker-compose.yml`.
 - Public application container: `gakai`.
 - Private provider container: `gakai-provider`; it has no host port. The current provider image is upstream WAHA and remains internal during the transition.
-- Persisted local runtime state: `.env`, `sessions/`, and `home-data/`. These are intentionally ignored by Git and must never be committed, copied to fixtures, logged, or exposed in browser code.
+- Persisted local runtime state: automatically generated `.env`, `sessions/`, and `home-data/`. These are intentionally ignored by Git and must never be committed, copied to fixtures, logged, or exposed in browser code.
 - `/home/tbanzato/waha` is a rollback backup only. Do not start, delete, or edit it unless the user explicitly requests a controlled rollback or retirement.
 
 ## Current codebase
@@ -61,6 +62,12 @@ The inbox is the active product focus. Maintain fast and clear conversation scan
 - Avoid automatic request fan-out; provider calls can cause browser-backed engines to become slow.
 - Support text, media, documents, link previews, contact cards, group senders, mentions, and safe fallbacks. Add fixtures before extending structured rendering.
 
+## Provider API references
+
+- For any provider integration, payload, event, capability, engine, or version work, read `references/provider-api.md` before changing code.
+- Treat those links and payload notes as internal adapter material only. Keep Gakai browser endpoints, UI copy, customer documentation, and configuration provider-neutral.
+- Re-check the official documentation at implementation time: provider capabilities vary by engine and may change between releases.
+
 ## Planned foundations
 
 Implement in this order unless the user explicitly reprioritizes:
@@ -86,7 +93,7 @@ The future public release must let users pull Gakai only. Internally it may cont
 
 - Repository: `git@github.com:tadeubanzato/gakai-zap.git`.
 - Default branch: `main`. Use focused `feature/...` branches for work.
-- Never stage `.env`, `sessions/`, `home-data/`, generated media, credentials, or real payload captures.
+- Never stage the automatically generated `.env`, `sessions/`, `home-data/`, generated media, credentials, or real payload captures.
 - Use concise imperative commit messages, for example `Highlight unread conversations`.
 - Do not merge, tag, publish a public image, or alter release automation unless the user explicitly asks.
 

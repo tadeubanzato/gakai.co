@@ -4,7 +4,12 @@ services:
     image: devlikeapro/waha
     container_name: gakai-provider
     restart: unless-stopped
-    env_file: .env
+    environment:
+      WAHA_API_KEY: ${GAKAI_PROVIDER_API_KEY:-gakai-internal-only}
+      WAHA_DASHBOARD_ENABLED: "False"
+      WHATSAPP_SWAGGER_ENABLED: "False"
+      WAHA_PRINT_QR: "False"
+      WHATSAPP_DEFAULT_ENGINE: ${GAKAI_PROVIDER_ENGINE:-WEBJS}
     volumes:
       - ./sessions:/app/.sessions
 
@@ -14,12 +19,15 @@ services:
     restart: unless-stopped
     environment:
       GAKAI_PROVIDER_URL: http://provider:3000
-      GAKAI_PROVIDER_API_KEY: ${WAHA_API_KEY}
-      GAKAI_PROVIDER_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME}
+      GAKAI_PROVIDER_API_KEY: ${GAKAI_PROVIDER_API_KEY:-gakai-internal-only}
+      GAKAI_LEGACY_ADMIN_USERNAME: ${WAHA_DASHBOARD_USERNAME:-}
+      GAKAI_PUBLIC_HOST: ${GAKAI_PUBLIC_HOST:-gakai.localhost}
+      GAKAI_PUBLIC_PORT: ${GAKAI_PORT:-3000}
+      GAKAI_PUBLIC_URL: ${GAKAI_PUBLIC_URL:-}
       HOME_DATA_DIR: /data
     volumes:
       - ./home-data:/data
     ports:
-      - "0.0.0.0:3000:3000"
+      - "${GAKAI_BIND_ADDRESS:-0.0.0.0}:${GAKAI_PORT:-3000}:3000"
     depends_on:
       - provider

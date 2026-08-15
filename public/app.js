@@ -905,3 +905,34 @@ render=()=>{
     button.setAttribute("aria-label",unread?`${name}, ${unread} unread messages`:`${name}, no unread messages`);
   });
 };
+
+// Refresh inbox metadata without rebuilding the active conversation when nothing changed.
+const refreshWithInboxUnreadPolling=refresh;
+const unreadChatFingerprint=chats=>JSON.stringify(chats.map(chat=>[chat.id,chat.timestamp,chat.lastMessage?.timestamp,chat.lastMessage?.body,chat.lastMessage?.text,chat.unreadCount]));
+async function refreshInboxUnreadState(){
+  if(!s.account||s.account.status!=="WORKING"||s.view!=="inbox"||s.adding)return;
+  try{
+    const response=await api(`/api/app/accounts/${encodeURIComponent(current())}/chats`);
+    const chats=(Array.isArray(response)?response:response.chats||[]).sort((left,right)=>chatOrderTimestamp(right.timestamp||right.lastMessage?.timestamp)-chatOrderTimestamp(left.timestamp||left.lastMessage?.timestamp));
+    if(unreadChatFingerprint(chats)===unreadChatFingerprint(s.chats))return;
+    s.chats=chats;
+    if(s.chat)s.chat=s.chats.find(chat=>chat.id===s.chat.id)||null;
+    render();
+  }catch(error){console.warn("Inbox refresh deferred",error)}
+}
+refresh=async()=>{
+  await refreshWithInboxUnreadPolling();
+  await refreshInboxUnreadState();
+};
+
+// Mark a conversation as read only after the user intentionally opens it.
+const openChatWithGakaiReadReceipt=openChat;
+openChat=async id=>{
+  const chat=s.chats.find(item=>item.id===id);
+  if(chat?.unreadCount){
+    chat.unreadCount=0;render();
+    try{await api("/api/app/accounts/"+encodeURIComponent(current())+"/chats/"+encodeURIComponent(id)+"/read",{method:"POST"})}
+    catch(error){console.warn("Could not mark conversation as read",error)}
+  }
+  return openChatWithGakaiReadReceipt(id);
+};

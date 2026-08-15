@@ -7,8 +7,11 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
 const port = Number(process.env.PORT || 3000);
+const publicHost = process.env.GAKAI_PUBLIC_HOST || 'gakai.localhost';
+const publicPort = Number(process.env.GAKAI_PUBLIC_PORT || port);
+const publicUrl = process.env.GAKAI_PUBLIC_URL || `http://${publicHost}${publicPort === 80 ? '' : `:${publicPort}`}`;
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
-const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY||process.env.WAHA_API_KEY||"";
+const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
 const publicDir = join(process.cwd(), 'public');
 const dataDir=process.env.HOME_DATA_DIR || join(process.cwd(),'data');
 const dataFile=join(dataDir,'home.json');
@@ -16,7 +19,8 @@ await mkdir(dataDir,{recursive:true});
 let store={username:null,password:null,keys:[]};try{store=JSON.parse(await readFile(dataFile,'utf8'))}catch{}
 const persist=()=>writeFile(dataFile,JSON.stringify(store,null,2),'utf8');
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
-const legacyAdminUsername=process.env.GAKAI_PROVIDER_DASHBOARD_USERNAME || process.env.WAHA_DASHBOARD_USERNAME || null;
+const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
+if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
 const sessions=new Map();
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const passwordHash=value=>{const salt=randomBytes(16).toString('hex');return `${salt}:${scryptSync(value,salt,64).toString('hex')}`};
@@ -71,7 +75,7 @@ async function openGraphPreview(value){const url=await safePublicUrl(value);if(!
 function normalizedTimestamp(value){const numeric=Number(value);if(Number.isFinite(numeric)&&numeric>0)return numeric>1e12?Math.floor(numeric/1000):numeric;const parsed=Date.parse(value);return Number.isFinite(parsed)?Math.floor(parsed/1000):0;}
 const config = label => label ? ({metadata:{'gakai.label':label}}) : {};
 function chatOverview(chat) {
-  return { id:chat.id, name:chat.name, picture:chat.picture || null, unreadCount:chat.unreadCount || 0,
+  return { id:chat.id, name:chat.name, picture:chat.picture || null, unreadCount:Number(chat.unreadCount ?? chat.unreadMessagesCount ?? chat._chat?.unreadCount ?? 0) || 0,
     timestamp:normalizedTimestamp(chat.timestamp || chat.lastMessage?.timestamp || 0),
     lastMessage:chat.lastMessage ? {body:chat.lastMessage.body || '', text:chat.lastMessage.text || '', timestamp:chat.lastMessage.timestamp || 0, hasMedia:Boolean(chat.lastMessage.hasMedia)} : null };
 }
@@ -115,6 +119,11 @@ function normalizedPreviewImage(value){
 }
 
   const parts = url.pathname.split('/').filter(Boolean);
+  if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, {ok:true, service:'gakai'});
+  if (req.method === 'GET' && url.pathname === '/readyz') {
+    try { await providerRequest('/api/sessions'); return send(res, 200, {ok:true, service:'gakai', provider:true}); }
+    catch { return send(res, 503, {ok:false, service:'gakai', provider:false}); }
+  }
 async function enrichMessage(session,message){
   const view=messageView(message);
   if(view.sender?.id){
@@ -142,11 +151,11 @@ async function enrichMessage(session,message){
     return send(res,403,{message:'This integration key does not have permission for that action'});
 
   }
-  if(url.pathname==='/api/app/auth/state'&&req.method==='GET')return send(res,200,{setup:!store.password,hasUsername:Boolean(store.username||legacyAdminUsername),authenticated:admin(req)});
+  if(url.pathname==='/api/app/auth/state'&&req.method==='GET')return send(res,200,{setup:!store.password,hasUsername:Boolean(store.username),authenticated:admin(req)});
   if(req.method==='GET'&&url.pathname==='/api/app/link-preview'){return send(res,200,await openGraphPreview(url.searchParams.get('url')||''));}
   if(req.method==='GET'&&url.pathname==='/api/app/link-image'){const image=await safePublicUrl(url.searchParams.get('url')||'');if(!image)return send(res,400,{message:'Invalid public image URL'});const response=await fetch(image,{redirect:'manual',headers:{'user-agent':'Mozilla/5.0 (compatible; Gakai/1.0)'},signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:'Preview image unavailable'});const type=response.headers.get('content-type')||'image/jpeg';if(!type.startsWith('image/'))return send(res,502,{message:'Invalid preview image'});const body=Buffer.from(await response.arrayBuffer());if(body.length>5*1024*1024)return send(res,413,{message:'Preview image is too large'});res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});return res.end(body);}
   if(url.pathname==='/api/app/auth/setup'&&req.method==='POST'){if(store.password)return send(res,409,{message:'Administrator already configured'});const {username,password}=await readBody(req);const name=String(username||'').trim();if(name.length<3||name.length>40)return send(res,400,{message:'Use a username between 3 and 40 characters'});if(!password||password.length<10)return send(res,400,{message:'Use a password with at least 10 characters'});store.username=name;store.password=passwordHash(password);await persist();const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(201,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
-  if(url.pathname==='/api/app/auth/login'&&req.method==='POST'){const {username,password}=await readBody(req);const expectedUsername=store.username||legacyAdminUsername;if(!store.password||(expectedUsername&&String(username||'').trim()!==expectedUsername)||!passwordMatches(password||''))return send(res,401,{message:'Incorrect username or password'});const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(200,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
+  if(url.pathname==='/api/app/auth/login'&&req.method==='POST'){const {username,password}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||'').trim()!==expectedUsername)||!passwordMatches(password||''))return send(res,401,{message:'Incorrect username or password'});const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(200,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
   if(!admin(req))return send(res,401,{message:'Sign in required'});
   if(req.method==='GET'&&url.pathname==='/api/app/media'){const path=url.searchParams.get('path')||'';const range=req.headers.range;if(range){const file=await providerFile(path,{range});const body=Buffer.from(await file.arrayBuffer());const headers={'content-type':file.headers.get('content-type')||'application/octet-stream','cache-control':'private, max-age=86400','accept-ranges':file.headers.get('accept-ranges')||'bytes','content-length':String(body.length)};const contentRange=file.headers.get('content-range');if(contentRange)headers['content-range']=contentRange;res.writeHead(file.status,headers);return res.end(body)}const file=await cachedMedia(path);res.writeHead(200,{'content-type':file.type,'cache-control':'private, max-age=86400','accept-ranges':'bytes','content-length':String(file.buffer.length)});return res.end(file.buffer);}
   if (req.method==='GET' && url.pathname==='/api/app/accounts') {const sessions=await providerRequest('/api/sessions');const deleting=new Set(store.deletingAccounts||[]);const visible=sessions.filter(session=>!deleting.has(session.name));const live=new Set(sessions.map(session=>session.name));const next=(store.deletingAccounts||[]).filter(id=>live.has(id));if(next.length!==store.deletingAccounts.length){store.deletingAccounts=next;await persist()}return send(res,200,{accounts:await Promise.all(visible.map(accountView))});}
@@ -164,6 +173,7 @@ async function enrichMessage(session,message){
   if (req.method==='GET' && parts[4]==='qr') return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/auth/qr`));
   if (req.method==='POST' && parts[4]==='start') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
   if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}/messages/read`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});return send(res,200,{ok:true});}
   if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}`,{method:'DELETE'});return send(res,200,{ok:true});}
   // Presence stays behind the dashboard proxy so the browser never receives
   // direct provider access or its API key.
@@ -213,8 +223,8 @@ async function enrichMessage(session,message){
   return send(res,404,{message:'Not found'});
 }
 http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.headers.host}`); try {
-  if (url.pathname.startsWith('/api/')) return await api(req,res,url);
+  if (url.pathname === '/healthz' || url.pathname === '/readyz' || url.pathname.startsWith('/api/')) return await api(req,res,url);
   const requested=url.pathname==='/'?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
   if (!file.startsWith(publicDir)) return send(res,403,{message:'Forbidden'});
   const content=await readFile(file); res.writeHead(200,{'content-type':types[extname(file)]||'application/octet-stream','cache-control':'no-cache'}); res.end(content);
-} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai listening on ${port}`));
+} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai is ready at ${publicUrl}`));

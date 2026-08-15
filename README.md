@@ -1,31 +1,52 @@
 # Gakai
 
-Gakai is a simplified, private WhatsApp workspace built around a private provider runtime.
-Open `http://gakai.localhost:3000` after starting the stack.
+Gakai starts with no manual configuration. It opens an administrator registration page on first visit, then guides the user through WhatsApp QR pairing.
 
-The public service is **Gakai**. It owns the user interface, account
-onboarding, QR pairing and inbox. The provider runtime stays on Docker's
-private network; its API key is only used server-to-server and is never shown
-in the browser.
+## Start
 
-Existing WhatsApp authentication persists in `./sessions`, so updates and
-rebuilds do not require a QR scan unless WhatsApp invalidates the linked device.
+From the Gakai directory, run:
 
-## Start or update
-
-Run `docker compose up -d --build` from this directory, then visit the URL
-above. On a fresh install, the application detects that no account exists and
-opens the QR pairing flow automatically. Existing accounts appear directly in
-The untracked `.env` contains private provider-runtime credentials. Keep it out of Git and browser code. Existing local development installations can continue using their current provider configuration while Gakai packaging is completed.
+```sh
+./scripts/gakai-up.sh
 ```
 
-Do not expose the private provider runtime directly or add its credential to browser
-code.
+The launcher creates a private `.env` automatically when needed, generates its internal provider credential, builds the services, and prints the address to open. It never asks the user to edit `.env`.
 
-## First-run onboarding
+Open [http://gakai.localhost:3000](http://gakai.localhost:3000). On the first visit, create the Gakai administrator username and password. The password is stored only as a salted hash in `home-data/home.json`, not in `.env`.
 
-On a fresh installation, Gakai asks the user to create an administrator
-username and password. These credentials are stored as a password hash in
-`home-data/home.json`; they are not written into `.env`.
+If port 3000 is already in use:
 
-Provider-runtime dashboard credentials remain private and separate from Gakai browser authentication. Existing local deployments remain compatible during the transition.
+```sh
+GAKAI_PORT=8080 ./scripts/gakai-up.sh
+```
+
+Then open `http://gakai.localhost:8080`.
+
+## Access from another device
+
+The default bind address accepts LAN connections. Use the server IP address and the selected port, for example `http://192.168.1.20:3000`.
+
+For a stable LAN name such as `gakai.local`, configure it through your network DNS or mDNS service. Docker cannot create that DNS name consistently on every operating system. For internet-facing use, place Gakai behind an HTTPS reverse proxy and restrict access appropriately.
+
+To bind only to the local machine:
+
+```sh
+GAKAI_BIND_ADDRESS=127.0.0.1 ./scripts/gakai-up.sh
+```
+
+## Operations
+
+```sh
+docker compose ps
+docker compose logs -f home
+curl http://gakai.localhost:3000/healthz
+curl http://gakai.localhost:3000/readyz
+```
+
+`/healthz` confirms Gakai is running. `/readyz` also confirms that its private provider runtime is reachable.
+
+## Private data
+
+`.env`, `sessions/`, and `home-data/` are private local state and are excluded from Git and the Docker build context. Do not share or commit them. The browser never receives the internal provider credential.
+
+The current Compose bundle is the migration path toward a public Gakai-only release. Replacing the private provider runtime with a Gakai-owned transport is planned work; it is not represented as complete in this repository yet.
