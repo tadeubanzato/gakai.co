@@ -16,7 +16,7 @@ Do not describe Gakai as WAHA Home. Use Gakai in visible copy, images, container
 - Work from `/home/tbanzato/gakai`, not the legacy `/home/tbanzato/waha` directory.
 - Before reading code or taking any project action, synchronize the current branch: run `git status --short`, `git fetch origin --prune`, then—only if the working tree is clean—`git pull --ff-only origin $(git branch --show-current)`. Never switch branches, merge, rebase, stash, or overwrite local work automatically. If fast-forwarding is impossible or the tree is dirty, report it and wait for direction.
 - Read `server.mjs`, `public/app.js`, `public/styles.css`, `docker-compose.yml`, and the relevant tests or fixtures before making a change.
-- Read `references/provider-api.md` during startup for the current official provider links, verified payload notes, and adapter boundary rules.
+- During startup, read `references/provider-api.md` when it exists for the current official provider links, verified payload notes, and adapter boundary rules. Its absence is never a startup blocker: note it briefly, continue with the checked-in code and compose configuration, and create or repair the sanitized reference before any provider-integration change. Do not use a compound inspection command that fails just because this optional file is absent.
 - Treat `src/` as the target architecture. It currently contains scaffolding; do not claim the planned modules already implement production behavior.
 - Read this skill completely before making product-wide decisions.
 
@@ -64,7 +64,7 @@ The inbox is the active product focus. Maintain fast and clear conversation scan
 
 ## Provider API references
 
-- For any provider integration, payload, event, capability, engine, or version work, read `references/provider-api.md` before changing code.
+- For any provider integration, payload, event, capability, engine, or version work, read `references/provider-api.md` before changing code. If it is missing, first create a concise sanitized replacement that links to official provider documentation and records the adapter boundary; then verify the exact capability in the official documentation at implementation time.
 - Treat those links and payload notes as internal adapter material only. Keep Gakai browser endpoints, UI copy, customer documentation, and configuration provider-neutral.
 - Re-check the official documentation at implementation time: provider capabilities vary by engine and may change between releases.
 
