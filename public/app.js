@@ -37,17 +37,17 @@ function touchChat(chatId,text){const chat=s.chats.find(c=>c.id===chatId);if(!ch
 const previousSend=send;
 send=async e=>{e.preventDefault();const text=document.querySelector('#text').value.trim();if(!text)return;touchChat(s.chat.id,text);const pending={id:`pending-${Date.now()}`,body:text,fromMe:true,timestamp:Math.floor(Date.now()/1000),ackName:'PENDING'};s.messages.push(pending);render();try{const d=await api(`/api/app/accounts/${encodeURIComponent(current())}/messages`,{method:'POST',body:JSON.stringify({chatId:s.chat.id,text})});const i=s.messages.findIndex(m=>m.id===pending.id);if(i>=0)s.messages[i]={...pending,...d.message};render()}catch(error){s.messages=s.messages.filter(m=>m.id!==pending.id);render();notice(error.message)}};
 const storedChoose=choose,storedOpen=openChat,storedRefresh=refresh;
-choose=async id=>{sessionStorage.setItem('waha-home.account',id);sessionStorage.setItem('waha-home.view','inbox');await storedChoose(id)};
-openChat=async id=>{sessionStorage.setItem(`waha-home.chat.${current()}`,id);await storedOpen(id)};
+choose=async id=>{sessionStorage.setItem('gakai.account',id);sessionStorage.setItem('gakai.view','inbox');await storedChoose(id)};
+openChat=async id=>{sessionStorage.setItem(`gakai.chat.${current()}`,id);await storedOpen(id)};
 let restoredWorkspace=false;
-refresh=async()=>{await storedRefresh();if(restoredWorkspace||!s.accounts.length||s.adding)return;restoredWorkspace=true;const accountId=sessionStorage.getItem('waha-home.account');const account=s.accounts.find(a=>a.id===accountId)||s.account;if(!account||account.status!=='WORKING')return;await storedChoose(account.id);const chatId=sessionStorage.getItem(`waha-home.chat.${account.id}`);if(chatId&&s.chats.some(c=>c.id===chatId))await storedOpen(chatId)};
-function authScreen(setup){root.innerHTML=`<main class="pairing"><section class="pair-card"><span class="eyebrow">GAKAI</span><h1>${setup?'Create your administrator login':'Welcome back'}</h1><p>${setup?'This protects connected accounts and integration keys.':'Sign in to manage your WhatsApp workspace.'}</p><form id="auth"><label>Password<input id="password" type="password" minlength="10" required autocomplete="current-password"></label><button class="primary wide">${setup?'Create secure login':'Sign in'}</button></form></section></main>`;document.querySelector('#auth').onsubmit=async e=>{e.preventDefault();try{await api(`/api/app/auth/${setup?'setup':'login'}`,{method:'POST',body:JSON.stringify({password:document.querySelector('#password').value})});if(setup)sessionStorage.setItem('waha-home.first-pairing','1');location.reload()}catch(error){notice(error.message)}}}
+refresh=async()=>{await storedRefresh();if(restoredWorkspace||!s.accounts.length||s.adding)return;restoredWorkspace=true;const accountId=sessionStorage.getItem('gakai.account');const account=s.accounts.find(a=>a.id===accountId)||s.account;if(!account||account.status!=='WORKING')return;await storedChoose(account.id);const chatId=sessionStorage.getItem(`gakai.chat.${account.id}`);if(chatId&&s.chats.some(c=>c.id===chatId))await storedOpen(chatId)};
+function authScreen(setup){root.innerHTML=`<main class="pairing"><section class="pair-card"><span class="eyebrow">GAKAI</span><h1>${setup?'Create your administrator login':'Welcome back'}</h1><p>${setup?'This protects connected accounts and integration keys.':'Sign in to manage your WhatsApp workspace.'}</p><form id="auth"><label>Password<input id="password" type="password" minlength="10" required autocomplete="current-password"></label><button class="primary wide">${setup?'Create secure login':'Sign in'}</button></form></section></main>`;document.querySelector('#auth').onsubmit=async e=>{e.preventDefault();try{await api(`/api/app/auth/${setup?'setup':'login'}`,{method:'POST',body:JSON.stringify({password:document.querySelector('#password').value})});if(setup)sessionStorage.setItem('gakai.first-pairing','1');location.reload()}catch(error){notice(error.message)}}}
 async function settings(account){let keys=[];try{keys=(await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys`)).keys}catch(error){notice(error.message)}const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;background:#0009;z-index:9;display:grid;place-items:center;padding:18px';overlay.innerHTML=`<section class="pair-card" style="max-height:90vh;overflow:auto;text-align:left"><button id="close" class="secondary" style="float:right">Close</button><span class="eyebrow">ACCOUNT SETTINGS</span><h1>${esc(account.label)}</h1><p>${esc(account.phone||'WhatsApp profile')} · ${esc(status(account.status))}</p><label>Personal account name<input id="label" value="${esc(account.label)}"></label><button id="save-label" class="primary">Save name</button><hr style="border-color:#293840;margin:24px 0"><h3>Integrations</h3><p>Create a key for an agent or external app. It is shown once and is restricted to this account.</p><label>Integration name<input id="key-name" placeholder="Claude agent"></label><button id="create-key" class="primary">Create integration key</button><div id="new-key"></div><div style="margin-top:18px">${keys.map(k=>`<p><b>${esc(k.name)}</b><br><small>${esc((k.scopes||[]).join(', '))} · ${k.lastUsedAt?'Last used '+esc(k.lastUsedAt):'Never used'}</small> <button class="secondary revoke" data-key="${esc(k.id)}">Revoke</button></p>`).join('')||'<small>No integration keys yet.</small>'}</div></section>`;document.body.append(overlay);overlay.querySelector('#close').onclick=()=>overlay.remove();overlay.querySelector('#save-label').onclick=async()=>{try{await api(`/api/app/accounts/${encodeURIComponent(account.id)}/label`,{method:'PATCH',body:JSON.stringify({label:overlay.querySelector('#label').value})});overlay.remove();await refresh()}catch(error){notice(error.message)}};overlay.querySelector('#create-key').onclick=async()=>{try{const d=await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys`,{method:'POST',body:JSON.stringify({name:overlay.querySelector('#key-name').value,scopes:['messages:read','messages:send']})});overlay.querySelector('#new-key').innerHTML=`<p><b>Copy this key now — it will not be shown again.</b><br><code style="word-break:break-all">${esc(d.token)}</code></p><p><small>Use it as: Authorization: Bearer your-key<br>Endpoints: /api/integrations/v1/chats, /messages</small></p>`}catch(error){notice(error.message)}};overlay.querySelectorAll('.revoke').forEach(button=>button.onclick=async()=>{await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys/${button.dataset.key}`,{method:'DELETE'});overlay.remove();settings(account)})}
 const settingsRender=render;render=()=>{settingsRender();document.querySelectorAll('.account').forEach(row=>{const id=row.dataset.account;if(!id)return;const cog=document.createElement('span');cog.className='account-cog';cog.textContent='⚙';cog.setAttribute('role','button');cog.setAttribute('tabindex','0');cog.setAttribute('aria-label','Account settings');cog.onclick=e=>{e.preventDefault();e.stopPropagation();settings(s.accounts.find(a=>a.id===id))};cog.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();settings(s.accounts.find(a=>a.id===id))}};row.append(cog)})};
 async function boot(){const state=await (await fetch('/api/app/auth/state')).json();if(!state.authenticated)return authScreen(state.setup,state.setup||state.hasUsername);await refresh();if(!s.accounts.length)await create();setInterval(refresh,10000)}
 boot();
 
-// Resource-safe chat loading: never fan out background WAHA requests. WEBJS
+// Resource-safe chat loading: never fan out background provider requests. WEBJS
 // runs Chromium, so automatic history/media hydration can make the host feel
 // unresponsive on a small server. Older history and media are intentionally
 // deferred until an explicit UI action is added.
@@ -125,12 +125,12 @@ render=()=>{
 // selected chat here as well. This is what refresh restoration reads.
 const openChatWithWorkspaceRestore=openChat;
 openChat=async id=>{
-  if(current())sessionStorage.setItem(`waha-home.chat.${current()}`,id);
+  if(current())sessionStorage.setItem(`gakai.chat.${current()}`,id);
   return openChatWithWorkspaceRestore(id);
 };
 
 // Fetch attachment details only for messages the user is currently viewing.
-// WAHA returns the initial history quickly without the binary/media URL data.
+// The provider returns the initial history quickly without the binary/media URL data.
 async function loadVisiblePreviews(chatId){
   const messages=s.messages.filter(message=>message.hasMedia&&!message.media?.url&&!message.mediaUrl).slice(0,10);
   for(const message of messages){
@@ -195,7 +195,7 @@ const openChatWithIdentityResolution=openChat;
 openChat=async id=>{await openChatWithIdentityResolution(id);if(s.chat?.id===id)resolveVisibleGroupIdentities(id)};
 
 // Keep a per-account, per-chat reading position across a full browser refresh.
-function messageScrollKey(){return s.account&&s.chat?`waha-home.scroll.${s.account.id}.${s.chat.id}`:null}
+function messageScrollKey(){return s.account&&s.chat?`gakai.scroll.${s.account.id}.${s.chat.id}`:null}
 function saveMessageScroll(pane){
   const key=messageScrollKey();if(!key)return;
   sessionStorage.setItem(key,JSON.stringify({top:pane.scrollTop,atBottom:pane.scrollTop+pane.clientHeight>=pane.scrollHeight-4}));
@@ -214,7 +214,7 @@ render=()=>{
 
 // Workspace controls: collapsible account rail, resilient QR pairing, and
 // focused account settings actions.
-let sidebarCollapsed=sessionStorage.getItem('waha-home.sidebar')==='collapsed';
+let sidebarCollapsed=sessionStorage.getItem('gakai.sidebar')==='collapsed';
 sidebar=()=>`<aside class="sidebar ${sidebarCollapsed?'collapsed':''}"><div class="logo"><b>G</b><span>Gakai</span><button id="sidebar-toggle" class="icon-button" aria-label="${sidebarCollapsed?'Expand':'Collapse'} sidebar" title="${sidebarCollapsed?'Expand sidebar':'Collapse sidebar'}">${sidebarCollapsed?'›':'‹'}</button></div><div class="account-switch">${s.accounts.map(account=>`<button data-account="${esc(account.id)}" title="${esc(account.label)}" class="account ${account.id===current()?'selected':''}"><i class="${account.status==='WORKING'?'good':''}"></i>${avatar(account)}<span><b>${esc(account.label)}</b><small>${status(account.status)}</small></span></button>`).join('')}</div></aside>`;
 pairing=()=>{const account=s.account;return `<main class="pairing"><section class="pair-card"><button id="cancel-pair" class="modal-close" aria-label="Close">×</button><span class="eyebrow">GAKAI</span><h1>${account?'Reconnect this account':'Connect your WhatsApp'}</h1><p>${account?'Scan this new QR code to relink WhatsApp.':'Give this account a name, then scan the QR code from WhatsApp.'}</p>${account?.status==='SCAN_QR_CODE'&&s.qr?`<img class="qr" src="${s.qr}" alt="WhatsApp pairing QR code">`:account?'<div class="qr loading">Preparing a fresh QR code…</div>':`<label>Account label <input id="account-name" placeholder="Personal WhatsApp" autofocus></label>`}<ol><li>Open WhatsApp on your phone</li><li>Choose <b>Linked devices</b></li><li>Tap <b>Link a device</b> and scan</li></ol><div class="pair-status"><i></i>${account?.status==='SCAN_QR_CODE'?'Waiting for scan…':account?'Starting secure connection…':'No API keys or technical setup required.'}</div>${!account?'<button class="primary wide" id="create">Continue to QR code</button>':''}<button class="secondary wide" id="cancel-pair-bottom">Cancel</button></section></main>`};
 async function pollForQr(){for(let attempt=0;attempt<15&&s.view==='pairing';attempt++){await new Promise(resolve=>setTimeout(resolve,700));await refresh();if(s.account?.status==='SCAN_QR_CODE'&&s.qr)return}}
@@ -223,7 +223,7 @@ function leavePairing(){s.adding=false;s.qr='';const account=s.accounts.find(ite
 let closeSettingsOverlay=null;
 settings=async account=>{let keys=[];try{keys=(await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys`)).keys||[]}catch(error){notice(error.message)}const overlay=document.createElement('div');overlay.className='settings-overlay';overlay.innerHTML=`<section class="pair-card settings-card"><button class="modal-close" id="settings-close" aria-label="Close">×</button><span class="eyebrow">ACCOUNT SETTINGS</span><h1>${esc(account.label)}</h1><p>${esc(account.phone||'WhatsApp profile')} · ${esc(status(account.status))}</p><label>Personal account name<input id="label" value="${esc(account.label)}"></label><button id="save-label" class="primary">Save name</button><hr><h3>Connection</h3><p>Generate a fresh QR code to relink this WhatsApp account.</p><button id="relink" class="secondary">↻ Generate new QR code</button><hr><h3>Integrations</h3><label>Integration name<input id="key-name" placeholder="Claude agent"></label><button id="create-key" class="primary">Create integration key</button><div id="new-key"></div><div class="key-list">${keys.map(key=>`<p><b>${esc(key.name)}</b><br><small>${esc((key.scopes||[]).join(', '))} · ${key.lastUsedAt?'Last used '+esc(key.lastUsedAt):'Never used'}</small> <button class="secondary revoke" data-key="${esc(key.id)}">Revoke</button></p>`).join('')||'<small>No integration keys yet.</small>'}</div><hr><button id="delete-account" class="danger">Delete account</button></section>`;document.body.append(overlay);const close=()=>{overlay.remove();if(closeSettingsOverlay===close)closeSettingsOverlay=null};closeSettingsOverlay=close;overlay.querySelector('#settings-close').onclick=close;overlay.onclick=event=>{if(event.target===overlay)close()};overlay.querySelector('#save-label').onclick=async()=>{try{await api(`/api/app/accounts/${encodeURIComponent(account.id)}/label`,{method:'PATCH',body:JSON.stringify({label:overlay.querySelector('#label').value})});close();await refresh()}catch(error){notice(error.message)}};overlay.querySelector('#relink').onclick=async()=>{close();s.adding=false;s.account=account;s.view='pairing';s.qr='';render();await restart(account.id);pollForQr()};overlay.querySelector('#create-key').onclick=async()=>{try{const data=await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys`,{method:'POST',body:JSON.stringify({name:overlay.querySelector('#key-name').value,scopes:['messages:read','messages:send']})});overlay.querySelector('#new-key').innerHTML=`<div class="new-key"><code>${esc(data.token)}</code><button id="copy-key" class="icon-button" aria-label="Copy API key" title="Copy API key">⧉</button></div><small>Copy this key now — it will not be shown again.</small>`;overlay.querySelector('#copy-key').onclick=async()=>{try{await navigator.clipboard.writeText(data.token);notice('API key copied')}catch{notice('Copy failed; select the key manually')}}}catch(error){notice(error.message)}};overlay.querySelectorAll('.revoke').forEach(button=>button.onclick=async()=>{await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys/${button.dataset.key}`,{method:'DELETE'});close();settings(account)});overlay.querySelector('#delete-account').onclick=async()=>{if(!confirm(`Delete ${account.label}? This removes the account from Gakai.`))return;try{await api(`/api/app/accounts/${encodeURIComponent(account.id)}`,{method:'DELETE'});close();s.accounts=s.accounts.filter(item=>item.id!==account.id);s.account=s.accounts[0]||null;s.chat=null;s.view='inbox';render();await refresh()}catch(error){notice(error.message)}}};
 const renderWithWorkspaceControls=render;
-render=()=>{renderWithWorkspaceControls();const app=document.querySelector('.app');app?.classList.toggle('sidebar-collapsed',sidebarCollapsed);document.querySelector('#sidebar-toggle')?.addEventListener('click',()=>{sidebarCollapsed=!sidebarCollapsed;sessionStorage.setItem('waha-home.sidebar',sidebarCollapsed?'collapsed':'expanded');render()});document.querySelector('#cancel-pair')?.addEventListener('click',leavePairing);document.querySelector('#cancel-pair-bottom')?.addEventListener('click',leavePairing)};
+render=()=>{renderWithWorkspaceControls();const app=document.querySelector('.app');app?.classList.toggle('sidebar-collapsed',sidebarCollapsed);document.querySelector('#sidebar-toggle')?.addEventListener('click',()=>{sidebarCollapsed=!sidebarCollapsed;sessionStorage.setItem('gakai.sidebar',sidebarCollapsed?'collapsed':'expanded');render()});document.querySelector('#cancel-pair')?.addEventListener('click',leavePairing);document.querySelector('#cancel-pair-bottom')?.addEventListener('click',leavePairing)};
 document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;if(closeSettingsOverlay){closeSettingsOverlay();return}if(s.view==='pairing'&&s.accounts.length)leavePairing()});
 
 function highlightOwnMentions(){
@@ -244,10 +244,10 @@ document.addEventListener('click',event=>{
   const account=event.target.closest('.sidebar.collapsed [data-account]');
   if(!account)return;
   event.preventDefault();event.stopImmediatePropagation();
-  sidebarCollapsed=false;sessionStorage.setItem('waha-home.sidebar','expanded');render();
+  sidebarCollapsed=false;sessionStorage.setItem('gakai.sidebar','expanded');render();
 },true);
 
-// Presence is scoped to the open chat. WAHA maintains the subscription; this
+// Presence is scoped to the open chat. The provider maintains the subscription; this
 // lightweight poll avoids exposing a public webhook endpoint for the dashboard.
 let activePresence=null;
 let presencePoll=null;
@@ -331,9 +331,9 @@ onMessageScroll=async event=>{
   try{const data=await api(`/api/app/accounts/${encodeURIComponent(current())}/messages?chatId=${encodeURIComponent(chatId)}&limit=30&offset=${historyState.offset}`);if(s.chat?.id!==chatId)return;const older=Array.isArray(data)?data:data.messages||[];historyState.offset+=older.length;historyState.exhausted=older.length<30;if(!older.length)return;s.messages=[...new Map([...older,...s.messages].map(message=>[message.id,message])).values()].sort((a,b)=>(a.timestamp||0)-(b.timestamp||0));preserveMessagePosition=false;render();requestAnimationFrame(()=>{const next=document.querySelector('.messages');if(next)next.scrollTop=topBefore+(next.scrollHeight-heightBefore)})}catch(error){console.warn('Older history could not be loaded',error)}finally{historyState.loading=false;requestAnimationFrame(()=>{preserveMessagePosition=true})}
 };
 
-// The compact rail uses the WAHA mark itself as the expand control—no chevron.
+// The compact rail uses the Gakai mark itself as the expand control—no chevron.
 sidebar=()=>`<aside class="sidebar ${sidebarCollapsed?'collapsed':''}"><div class="logo" title="${sidebarCollapsed?'Expand sidebar':'Gakai'}"><b>G</b><span>Gakai</span></div><div class="account-switch">${s.accounts.map(account=>`<button data-account="${esc(account.id)}" title="${esc(account.label)}" class="account ${account.id===current()?'selected':''}"><i class="${account.status==='WORKING'?'good':''}"></i>${avatar(account)}<span><b>${esc(account.label)}</b><small>${status(account.status)}</small></span></button>`).join('')}</div></aside>`;
-document.addEventListener('click',event=>{if(!event.target.closest('.sidebar.collapsed .logo'))return;event.preventDefault();sidebarCollapsed=false;sessionStorage.setItem('waha-home.sidebar','expanded');render()},true);
+document.addEventListener('click',event=>{if(!event.target.closest('.sidebar.collapsed .logo'))return;event.preventDefault();sidebarCollapsed=false;sessionStorage.setItem('gakai.sidebar','expanded');render()},true);
 
 // Show a collapse control only while expanded; the compact mark remains clean.
 sidebar=()=>`<aside class="sidebar ${sidebarCollapsed?'collapsed':''}"><div class="logo" title="${sidebarCollapsed?'Expand sidebar':'Gakai'}"><b>G</b><span>Gakai</span>${sidebarCollapsed?'':'<button id="sidebar-toggle" class="icon-button" aria-label="Collapse sidebar" title="Collapse sidebar">‹</button>'}</div><div class="account-switch">${s.accounts.map(account=>`<button data-account="${esc(account.id)}" title="${esc(account.label)}" class="account ${account.id===current()?'selected':''}"><i class="${account.status==='WORKING'?'good':''}"></i>${avatar(account)}<span><b>${esc(account.label)}</b><small>${status(account.status)}</small></span></button>`).join('')}</div></aside>`;
@@ -374,7 +374,7 @@ pollForQr=async()=>{
       s.accounts=data.accounts;s.account=account;
       if(account.status==='WORKING'){
         s.adding=false;pairingAccountId=null;s.qr='';s.view='inbox';
-        sessionStorage.setItem('waha-home.account',account.id);
+        sessionStorage.setItem('gakai.account',account.id);
         render();
         loadChats().then(()=>{if(s.view==='inbox'&&s.account?.id===account.id)render()});return;
       }
@@ -395,7 +395,7 @@ settings=async account=>{
   button.onclick=async()=>{
     if(!confirm(`Delete ${account.label}? This removes the account from Gakai.`))return;
     closeSettingsOverlay?.();
-    sessionStorage.setItem('waha-home.pending-delete',account.id);
+    sessionStorage.setItem('gakai.pending-delete',account.id);
     s.accounts=s.accounts.filter(item=>item.id!==account.id);
     s.account=s.accounts.find(item=>item.status==='WORKING')||s.accounts[0]||null;
     s.chat=null;s.view='inbox';render();
@@ -426,8 +426,8 @@ refresh=async()=>{
   await refreshWithEmptyAccountRecovery();
   if(s.accounts.length)return;
   pairingAccountId=null;s.adding=false;s.account=null;s.chat=null;s.messages=[];s.qr='';s.view='pairing';
-  sessionStorage.removeItem('waha-home.account');
-  Object.keys(sessionStorage).filter(key=>key.startsWith('waha-home.chat.')).forEach(key=>sessionStorage.removeItem(key));
+  sessionStorage.removeItem('gakai.account');
+  Object.keys(sessionStorage).filter(key=>key.startsWith('gakai.chat.')).forEach(key=>sessionStorage.removeItem(key));
   render();
 };
 window.addEventListener('unhandledrejection',event=>{
@@ -474,18 +474,18 @@ render=()=>{
 // First-run registration asks for an administrator username and password.
 authScreen=(setup,showUsername=true)=>{
   root.innerHTML=`<main class="pairing"><section class="pair-card"><span class="eyebrow">GAKAI</span><h1>${setup?'Create your workspace':'Welcome back'}</h1><p>${setup?'Create an administrator account, then link WhatsApp with a QR code.':'Sign in to manage your WhatsApp workspace.'}</p><form id="auth"><label class="username-field" ${showUsername?'':'hidden'}>Username<input id="username" minlength="3" maxlength="40" ${showUsername?'required':''} autocomplete="username"></label><label>Password<input id="password" type="password" minlength="10" required autocomplete="${setup?'new-password':'current-password'}"></label><button class="primary wide">${setup?'Create workspace':'Sign in'}</button></form></section></main>`;
-  document.querySelector('#auth').onsubmit=async event=>{event.preventDefault();try{await api(`/api/app/auth/${setup?'setup':'login'}`,{method:'POST',body:JSON.stringify({username:document.querySelector('#username')?.value||'',password:document.querySelector('#password').value})});if(setup)sessionStorage.setItem('waha-home.first-pairing','1');location.reload()}catch(error){notice(error.message)}};
+  document.querySelector('#auth').onsubmit=async event=>{event.preventDefault();try{await api(`/api/app/auth/${setup?'setup':'login'}`,{method:'POST',body:JSON.stringify({username:document.querySelector('#username')?.value||'',password:document.querySelector('#password').value})});if(setup)sessionStorage.setItem('gakai.first-pairing','1');location.reload()}catch(error){notice(error.message)}};
 };
 
 // Keep a session being deleted out of the UI even if the browser refreshes
-// before WAHA Core finishes its asynchronous teardown.
+// before Gakai provider runtime finishes its asynchronous teardown.
 const refreshWithDeletionGuard=refresh;
 refresh=async()=>{
   await refreshWithDeletionGuard();
-  const deleting=sessionStorage.getItem('waha-home.pending-delete');
+  const deleting=sessionStorage.getItem('gakai.pending-delete');
   if(!deleting)return;
   if(!s.accounts.some(account=>account.id===deleting)){
-    sessionStorage.removeItem('waha-home.pending-delete');
+    sessionStorage.removeItem('gakai.pending-delete');
     return;
   }
   s.accounts=s.accounts.filter(account=>account.id!==deleting);
@@ -503,7 +503,7 @@ refresh=()=>{
   return task;
 };
 
-// WAHA's first post-link overview can take time. Never issue it twice in
+// Gakai provider's first post-link overview can take time. Never issue it twice in
 // parallel; a single shared request prevents duplicate 60–90 second syncs.
 const loadChatsWithoutDuplicates=loadChats;
 let chatListRequest=null;
@@ -522,7 +522,7 @@ addLinkCards=()=>{
 };
 
 // Unread counts are visible on the conversation list and clear immediately
-// when the user opens that chat, then reconcile with WAHA on refresh.
+// when the user opens that chat, then reconcile with the provider on refresh.
 const renderWithUnreadPills=render;
 render=()=>{
   renderWithUnreadPills();
@@ -556,7 +556,7 @@ loadChats=async()=>{
   render();
 };
 
-// Permanent chat deletion: WAHA Core removes the chat and its stored history.
+// Permanent chat deletion: Gakai provider runtime removes the chat and its stored history.
 const renderWithChatDelete=render;
 render=()=>{
   renderWithChatDelete();
@@ -589,7 +589,7 @@ document.addEventListener('click',event=>{
   create();
 },true);
 
-// Cancelling a newly created pairing session removes that provisional WAHA
+// Cancelling a newly created pairing session removes that provisional provider
 // account. Relinking an existing account remains a non-destructive cancel.
 async function cancelNewPairing(){
   const accountId=pairingAccountId;
@@ -853,7 +853,7 @@ document.addEventListener('touchmove',event=>{
 document.addEventListener('load',event=>{if(event.target.matches?.('.messages img,.messages video'))restoreHistoryLayoutAnchor()},{capture:true});
 document.addEventListener('loadedmetadata',event=>{if(event.target.matches?.('.messages audio,.messages video'))restoreHistoryLayoutAnchor()},{capture:true});
 
-// Contact shares arrive from WAHA as RFC vCard data. Render a useful card and
+// Contact shares arrive from the provider as RFC vCard data. Render a useful card and
 // keep the raw interchange body out of the conversation UI.
 function unescapeVcard(value=''){return String(value).replace(/\\n/gi,'\n').replace(/\\,/g,',').replace(/\\;/g,';').replace(/\\\\/g,'\\')}
 function parseVcard(raw){

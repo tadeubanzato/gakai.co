@@ -1,5 +1,5 @@
 services:
-  # WAHA stays private. WAHA Home is the only browser-facing service.
+  # The provider runtime stays private. Gakai is the only browser-facing service.
   provider:
     image: devlikeapro/waha
     container_name: gakai-provider
@@ -12,9 +12,10 @@ services:
     build: .
     container_name: gakai
     restart: unless-stopped
-    env_file: .env
     environment:
-      WAHA_INTERNAL_URL: http://provider:3000
+      GAKAI_PROVIDER_URL: http://provider:3000
+      GAKAI_PROVIDER_API_KEY: ${WAHA_API_KEY}
+      GAKAI_PROVIDER_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME}
       HOME_DATA_DIR: /data
     volumes:
       - ./home-data:/data
