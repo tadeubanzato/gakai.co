@@ -22,3 +22,12 @@ data/
 credentials/
 secrets/
 
+# Conversation/PII exports and local database formats
+*.json
+!package.json
+!package-lock.json
+!test/fixtures/**/*.json
+*.jsonl
+*.ndjson
+*.sqlite
+*.sqlite3
