@@ -14,6 +14,7 @@ const publicUrl = process.env.GAKAI_PUBLIC_URL || `http://${publicHost}${publicP
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
 const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
 const providerWebhookSecret=process.env.GAKAI_PROVIDER_WEBHOOK_SECRET || "";
+const publicDir = join(process.cwd(), "public");
 const dataDir=process.env.HOME_DATA_DIR || join(process.cwd(),"data");
 const dataFile=join(dataDir,"home.json");
 const dbFile=join(dataDir,"gakai.db");
