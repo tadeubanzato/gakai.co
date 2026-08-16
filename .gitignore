@@ -1,6 +1,9 @@
 .env
 sessions/
 home-data/
+*.db
+*.db-wal
+*.db-shm
 node_modules/
 coverage/
 *.log
