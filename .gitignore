@@ -9,3 +9,16 @@ coverage/
 *.log
 .DS_Store
 
+# Local credentials, runtime state, and tunnel material
+.env*
+!.env.example
+data/
+.cloudflared/
+*.pem
+*.key
+*.p12
+*.pfx
+*.token
+credentials/
+secrets/
+
