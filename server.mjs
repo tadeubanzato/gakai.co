@@ -1,8 +1,9 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
@@ -13,14 +14,20 @@ const publicUrl = process.env.GAKAI_PUBLIC_URL || `http://${publicHost}${publicP
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
 const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
 const providerWebhookSecret=process.env.GAKAI_PROVIDER_WEBHOOK_SECRET || "";
-const publicDir = join(process.cwd(), 'public');
-const dataDir=process.env.HOME_DATA_DIR || join(process.cwd(),'data');
-const dataFile=join(dataDir,'home.json');
+const publicDir = join(process.cwd(), "public");
+const dataDir=process.env.HOME_DATA_DIR || join(process.cwd(),"data");
+const dataFile=join(dataDir,"home.json");
+const dbFile=join(dataDir,"gakai.db");
 await mkdir(dataDir,{recursive:true});
-let store={username:null,password:null,keys:[]};try{store=JSON.parse(await readFile(dataFile,'utf8'))}catch{}
-const persist=()=>writeFile(dataFile,JSON.stringify(store,null,2),'utf8');
+const db=new DatabaseSync(dbFile);
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK (id=1), data TEXT NOT NULL);");
+let legacy={username:null,password:null,keys:[]};try{legacy=JSON.parse(await readFile(dataFile,"utf8"))}catch{}
+const savedState=db.prepare("SELECT data FROM app_state WHERE id=1").get();
+let store=savedState?JSON.parse(savedState.data):legacy;
+const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
 if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
+if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.automationSubscriptions?.length||legacy.deletingAccounts?.length))persist();
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
 const sessions=new Map();
