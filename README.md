@@ -131,13 +131,17 @@ Check readiness: http://gakai.localhost:3000/readyz
 3. Enter a username (3–40 characters) and password (10+ characters)
 4. Your password is stored as a **salted scrypt hash** — never in plaintext
 
-### Custom port
+### Custom port (optional)
+
+By default Gakai runs on port **3000**. If that port is already in use on your machine, you can pick any other port:
 
 ```sh
 GAKAI_PORT=8080 ./scripts/gakai-up.sh
 ```
 
-### Bind to localhost only
+Then open `http://gakai.localhost:8080` instead.
+
+### Bind to localhost only (optional)
 
 ```sh
 GAKAI_BIND_ADDRESS=127.0.0.1 ./scripts/gakai-up.sh
