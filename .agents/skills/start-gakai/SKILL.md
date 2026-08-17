@@ -66,6 +66,25 @@ The inbox is the active product focus. Maintain fast and clear conversation scan
 - Treat those links and payload notes as internal adapter material only. Keep Gakai browser endpoints, UI copy, customer documentation, and configuration provider-neutral.
 - Re-check the official documentation at implementation time: provider capabilities vary by engine and may change between releases.
 
+## Deployment model — current and future
+
+### Current (two-container, approved for now)
+
+`docker compose up` starts two containers:
+
+- `gakai` — built from this repo's Dockerfile; the only browser-facing service
+- `gakai-provider` — pulls `devlikeapro/waha` from Docker Hub; handles the WhatsApp protocol, sessions, and QR lifecycle; has no host port and is never exposed to the browser
+
+This is the approved distribution model for the current phase. Users clone the repo and run `./scripts/gakai-up.sh`. Docker Compose pulls the WAHA provider image automatically alongside the Gakai build. This is intentional and correct right now.
+
+Do not treat the WAHA provider image as something to hide or remove. It is a declared, versioned dependency, the same way a Node app declares npm packages.
+
+### Future (single-image target)
+
+The end state is one public image: `docker pull gakai`. Customers configure only Gakai; the WhatsApp engine is bundled inside. This requires either embedding the provider runtime into the Gakai image or replacing it with a fully open WhatsApp library (e.g. `@whiskeysockets/baileys`). The `src/providers/waha` adapter boundary exists specifically to make this swap possible without changing the Gakai API or UI.
+
+Do not attempt the single-image migration unless the user explicitly requests it.
+
 ## Planned foundations
 
 Implement in this order unless the user explicitly reprioritizes:
@@ -73,9 +92,7 @@ Implement in this order unless the user explicitly reprioritizes:
 1. Complete the provider-neutral message/event model and fixture-based rendering tests.
 2. Add signed provider webhook ingestion, idempotency, durable event/message storage, and normalized update handling.
 3. Deliver live browser updates from the stored event stream through Gakai-controlled SSE or WebSocket endpoints.
-4. Later: production Postgres/object storage/queue topology, one-image or one-version Gakai distribution, CI, signed releases, and an agentic compatibility-review workflow that proposes reviewed changes rather than silently publishing them.
-
-The future public release must let users pull Gakai only. Internally it may contain provider components, but customers must not configure or expose them separately.
+4. Later: production Postgres/object storage/queue topology, single-image Gakai distribution (provider bundled in), CI, signed releases, and an agentic compatibility-review workflow that proposes reviewed changes rather than silently publishing them.
 
 ## Engineering workflow
 
