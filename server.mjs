@@ -295,6 +295,10 @@ async function enrichMessage(session,message){
     try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
     if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
     if(!n8nApiKey)return send(res,400,{message:'n8n API key is required'});
+    // Fix #2: validate that Gakai's own public URL is reachable from outside (not localhost)
+    const publicUrlParsed=new URL(publicUrl);
+    if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='gakai.localhost'||publicUrlParsed.hostname.endsWith('.local')||publicUrlParsed.hostname==='127.0.0.1')
+      return send(res,400,{message:`Gakai's public URL (${publicUrl}) is not reachable from n8n. Set GAKAI_PUBLIC_URL to your server's public address before connecting.`});
     try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
     const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
     const integrationToken='wh_n8n_'+randomBytes(24).toString('base64url');
@@ -318,7 +322,10 @@ async function enrichMessage(session,message){
     catch(err){return send(res,502,{message:'Failed to create workflow in n8n: '+err.message});}
     if(!workflow?.nodes?.length)return send(res,502,{message:'n8n created the workflow but nodes were not saved. Please try again.'});
     const workflowId=String(workflow.id);
-    try{await n8nRequest(n8nBaseUrl,n8nApiKey,`/workflows/${workflowId}/activate`,{method:'POST'});}catch{}
+    // Fix #1: surface activation failures so user knows if the workflow needs manual activation
+    let activationWarning=null;
+    try{await n8nRequest(n8nBaseUrl,n8nApiKey,`/workflows/${workflowId}/activate`,{method:'POST'});}
+    catch(err){activationWarning=err.message||'Workflow activation failed';console.error('n8n workflow activation failed:',err.message);}
     const webhookUrl=`${n8nBaseUrl}/webhook/${webhookPath}`;
     const connectedAt=new Date().toISOString();
     // Remove old n8n auto-connect key for this account
@@ -331,7 +338,7 @@ async function enrichMessage(session,message){
     store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
     store.n8nConnections.push({accountId:id,n8nUrl:n8nBaseUrl,n8nApiKeyHash:hash(n8nApiKey),workflowId,workflowName,inboundCredentialId:String(inboundCred.id),outboundCredentialId:String(outboundCred.id),inboundSecret,integrationToken,connectedAt});
     await persist();
-    return send(res,201,{ok:true,workflowId,workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${workflowId}`,webhookUrl,connectedAt});
+    return send(res,201,{ok:true,workflowId,workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${workflowId}`,webhookUrl,connectedAt,activationWarning});
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='GET'){
     const connection=store.n8nConnections.find(c=>c.accountId===id);
