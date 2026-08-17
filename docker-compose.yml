@@ -5,14 +5,14 @@ services:
     container_name: gakai-provider
     restart: unless-stopped
     environment:
-      WAHA_API_KEY: ${GAKAI_PROVIDER_API_KEY:-gakai-internal-only}
+      WAHA_API_KEY: ${GAKAI_PROVIDER_API_KEY:?Run ./scripts/gakai-up.sh to generate secrets}
       WAHA_DASHBOARD_ENABLED: "False"
       WHATSAPP_SWAGGER_ENABLED: "False"
       WAHA_PRINT_QR: "False"
       WHATSAPP_DEFAULT_ENGINE: ${GAKAI_PROVIDER_ENGINE:-WEBJS}
       WHATSAPP_HOOK_URL: http://home:3000/api/app/provider-events
       WHATSAPP_HOOK_EVENTS: message
-      WHATSAPP_HOOK_HMAC_KEY: ${GAKAI_PROVIDER_WEBHOOK_SECRET:-gakai-provider-webhook-secret}
+      WHATSAPP_HOOK_HMAC_KEY: ${GAKAI_PROVIDER_WEBHOOK_SECRET:?Run ./scripts/gakai-up.sh to generate secrets}
     volumes:
       - ./sessions:/app/.sessions
 
@@ -22,8 +22,8 @@ services:
     restart: unless-stopped
     environment:
       GAKAI_PROVIDER_URL: http://provider:3000
-      GAKAI_PROVIDER_API_KEY: ${GAKAI_PROVIDER_API_KEY:-gakai-internal-only}
-      GAKAI_PROVIDER_WEBHOOK_SECRET: ${GAKAI_PROVIDER_WEBHOOK_SECRET:-gakai-provider-webhook-secret}
+      GAKAI_PROVIDER_API_KEY: ${GAKAI_PROVIDER_API_KEY:?Run ./scripts/gakai-up.sh to generate secrets}
+      GAKAI_PROVIDER_WEBHOOK_SECRET: ${GAKAI_PROVIDER_WEBHOOK_SECRET:?Run ./scripts/gakai-up.sh to generate secrets}
       GAKAI_LEGACY_ADMIN_USERNAME: ${WAHA_DASHBOARD_USERNAME:-}
       GAKAI_PUBLIC_HOST: ${GAKAI_PUBLIC_HOST:-gakai.localhost}
       GAKAI_PUBLIC_PORT: ${GAKAI_PORT:-3000}
