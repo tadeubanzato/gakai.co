@@ -28,6 +28,7 @@ const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CON
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
 if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
 if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
+if(!Array.isArray(store.llmConfigs))store.llmConfigs=[];
 if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.automationSubscriptions?.length||legacy.deletingAccounts?.length))persist();
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
@@ -140,7 +141,10 @@ async function dispatchAutomationEvent(payload){
   const chat={id:chatId,kind,name:payload.payload?.chatName||payload.payload?._data?.chatName||payload.payload?._data?.notifyName||null};
   if(message.sender?.id){const contact=await resolveContact(accountId,message.sender.id);message.sender={...message.sender,phone:contact.phone||null,name:message.sender.name||contact.name||null};if(kind==="direct")chat.phone=contact.phone||null;}
   const event={id:`evt_${payload.payload?.id||randomBytes(12).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
-  await Promise.allSettled(store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)).map(subscription=>deliverAutomation(subscription,event)));
+  await Promise.allSettled([
+    ...store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)).map(subscription=>deliverAutomation(subscription,event)),
+    dispatchLLMReply(accountId,event)
+  ]);
 }
 
 function ensureN8nKey(accountId){
@@ -164,6 +168,23 @@ async function n8nRequest(n8nUrl, n8nApiKey, path, options={}) {
 function makeUUID() {
   const b = randomBytes(16).toString('hex');
   return `${b.slice(0,8)}-${b.slice(8,12)}-${b.slice(12,16)}-${b.slice(16,20)}-${b.slice(20,32)}`;
+}
+function llmConfig(accountId){return store.llmConfigs.find(c=>c.accountId===accountId)||null;}
+async function llmChat(config,messages){
+  const response=await fetch(`${config.baseUrl.replace(/\/+$/,'')}/chat/completions`,{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify({model:config.model,messages}),signal:AbortSignal.timeout(30000)});
+  const text=await response.text();let data;try{data=JSON.parse(text)}catch{throw new Error('LLM proxy returned invalid JSON')}
+  if(!response.ok)throw new Error(data?.error?.message||data?.message||`LLM proxy error ${response.status}`);
+  return data?.choices?.[0]?.message?.content||'';
+}
+async function dispatchLLMReply(accountId,event){
+  const config=llmConfig(accountId);if(!config||!config.nativeEnabled)return;
+  const chatId=event.chat?.id;const userText=event.message?.body||event.message?.text||'';if(!chatId||!userText)return;
+  const systemPrompt=config.systemPrompt||'You are a helpful WhatsApp assistant. Reply concisely and helpfully.';
+  try{
+    const reply=await llmChat(config,[{role:'system',content:systemPrompt},{role:'user',content:userText}]);
+    if(!reply.trim())return;
+    await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:accountId,chatId,text:reply.trim()})});
+  }catch(err){console.error('Native LLM reply failed:',err.message);}
 }
 async function api(req, res, url) {
 function normalizedPreviewImage(value){
@@ -285,6 +306,34 @@ async function enrichMessage(session,message){
   if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@c.us`:"demo@c.us",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};try{const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});const response=await fetch(destination,{method:"POST",headers:{"content-type":"application/json","x-gakai-secret":subscription.secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true,subscription:automationSummary(subscription)})}catch(error){return send(res,502,{message:error.message||"Test delivery failed",subscription:automationSummary(subscription)})}}
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
+  // LLM proxy config endpoints
+  if(parts[4]==='llm'&&req.method==='GET'){const cfg=llmConfig(id);return send(res,200,cfg?{configured:true,baseUrl:cfg.baseUrl,model:cfg.model,systemPrompt:cfg.systemPrompt||'',nativeEnabled:cfg.nativeEnabled||false}:{configured:false});}
+  if(parts[4]==='llm'&&req.method==='POST'){
+    const input=await readBody(req);
+    const baseUrl=String(input.baseUrl||'').trim().replace(/\/+$/,'');
+    const existing=llmConfig(id);
+    // __keep__ means "don't change the stored API key" (used by the skill/settings update form)
+    const apiKey=String(input.apiKey||'')==='__keep__'?(existing?.apiKey||''):String(input.apiKey||'').trim();
+    const model=String(input.model||'').trim();
+    if(!baseUrl)return send(res,400,{message:'Proxy URL is required'});
+    try{new URL(baseUrl)}catch{return send(res,400,{message:'Enter a valid proxy URL'});}
+    if(!apiKey)return send(res,400,{message:'API key is required'});
+    if(!model)return send(res,400,{message:'Model name is required'});
+    // Skip connection test when only updating skill/settings (apiKey kept, baseUrl+model unchanged)
+    const settingsOnly=String(input.apiKey||'')==='__keep__'&&existing&&existing.baseUrl===baseUrl&&existing.model===model;
+    if(!settingsOnly){
+      try{
+        const test=await fetch(`${baseUrl}/chat/completions`,{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${apiKey}`},body:JSON.stringify({model,messages:[{role:'user',content:'hi'}],max_tokens:1}),signal:AbortSignal.timeout(15000)});
+        const td=await test.json().catch(()=>({}));
+        if(!test.ok&&test.status!==400)throw new Error(td?.error?.message||`Proxy returned ${test.status}`);
+      }catch(err){return send(res,400,{message:'Could not connect to LLM proxy: '+err.message});}
+    }
+    store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);
+    store.llmConfigs.push({accountId:id,baseUrl,apiKey,model,systemPrompt:String(input.systemPrompt||'').slice(0,4000),nativeEnabled:Boolean(input.nativeEnabled),configuredAt:existing?.configuredAt||new Date().toISOString()});
+    await persist();
+    return send(res,200,{ok:true});
+  }
+  if(parts[4]==='llm'&&req.method==='DELETE'){store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);await persist();return send(res,200,{ok:true});}
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='POST'){
     const input=await readBody(req);
     let n8nBaseUrl=String(input.n8nUrl||'').trim().replace(/\/+$/,'');
@@ -308,12 +357,28 @@ async function enrichMessage(session,message){
     let accountLabel=id;
     try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===id);if(session)accountLabel=session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||id;}catch{}
     const workflowName=`Gakai – ${accountLabel}`;
-    const webhookNodeId=makeUUID(),setNodeId=makeUUID(),httpNodeId=makeUUID();
-    const workflowBody={name:workflowName,nodes:[
-      {id:webhookNodeId,name:'Webhook',type:'n8n-nodes-base.webhook',typeVersion:1,position:[250,300],parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'onReceived'},credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}},
-      {id:setNodeId,name:'Set',type:'n8n-nodes-base.set',typeVersion:1,position:[500,300],parameters:{values:{string:[{name:'chat_id',value:'={{ $json.chat.id }}'},{name:'message_body',value:'={{ $json.message.body }}'}]}}},
-      {id:httpNodeId,name:'Send Reply',type:'n8n-nodes-base.httpRequest',typeVersion:1,position:[750,300],parameters:{method:'POST',url:`${publicUrl}/api/integrations/v1/messages`,bodyParametersUi:{parameter:[{name:'chatId',value:"={{ $('Set').item.json.chat_id }}"},{name:'text',value:"={{ $('Set').item.json.message_body }}"}]}},credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}}
-    ],connections:{Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Send Reply',type:'main',index:0}]]}}};
+    const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),httpNodeId=makeUUID(),llmNodeId=makeUUID();
+    const accountLlm=llmConfig(id);
+    // Build workflow — agentic if LLM proxy is configured, basic Set node otherwise
+    let nodes,connections;
+    const webhookNode={id:webhookNodeId,name:'Webhook',type:'n8n-nodes-base.webhook',typeVersion:1,position:[250,300],parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'onReceived'},credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}};
+    const httpNode={id:httpNodeId,name:'Send Reply',type:'n8n-nodes-base.httpRequest',typeVersion:1,position:[1000,300],parameters:{method:'POST',url:`${publicUrl}/api/integrations/v1/messages`,bodyParametersUi:{parameter:[{name:'chatId',value:"={{ $json.chat_id || $('Webhook').item.json.chat.id }}"},{name:'text',value:"={{ $json.reply || $json.text || $json.message_body }}"}]}},credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}};
+    if(accountLlm){
+      // Create OpenAI-compatible credential in n8n pointing at the LLM proxy
+      let llmCred;
+      try{llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${id}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,baseUrl:accountLlm.baseUrl}})});}
+      catch(err){return send(res,502,{message:'Failed to create LLM credential in n8n: '+err.message});}
+      const systemPrompt=accountLlm.systemPrompt||'You are a helpful WhatsApp assistant. Reply concisely and helpfully. Only reply with the message text, no formatting or labels.';
+      const agentNode={id:middleNodeId,name:'AI Agent',type:'@n8n/n8n-nodes-langchain.agent',typeVersion:1.7,position:[625,300],parameters:{options:{systemMessage:systemPrompt}}};
+      const llmNode={id:llmNodeId,name:'OpenAI Chat Model',type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',typeVersion:1.2,position:[625,500],parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}};
+      nodes=[webhookNode,agentNode,llmNode,httpNode];
+      connections={Webhook:{main:[[{node:'AI Agent',type:'main',index:0}]]},'OpenAI Chat Model':{ai_languageModel:[[{node:'AI Agent',type:'ai_languageModel',index:0}]]},'AI Agent':{main:[[{node:'Send Reply',type:'main',index:0}]]}};
+    }else{
+      const setNode={id:middleNodeId,name:'Set',type:'n8n-nodes-base.set',typeVersion:1,position:[625,300],parameters:{values:{string:[{name:'chat_id',value:'={{ $json.chat.id }}'},{name:'message_body',value:'={{ $json.message.body }}'}]}}};
+      nodes=[webhookNode,setNode,httpNode];
+      connections={Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Send Reply',type:'main',index:0}]]}};
+    }
+    const workflowBody={name:workflowName,nodes,connections};
     let workflow;
     try{workflow=await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(workflowBody)});}
     catch(err){return send(res,502,{message:'Failed to create workflow in n8n: '+err.message});}
@@ -335,7 +400,7 @@ async function enrichMessage(session,message){
     store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
     store.n8nConnections.push({accountId:id,n8nUrl:n8nBaseUrl,n8nApiKeyHash:hash(n8nApiKey),workflowId,workflowName,inboundCredentialId:String(inboundCred.id),outboundCredentialId:String(outboundCred.id),inboundSecret,integrationToken,connectedAt});
     await persist();
-    return send(res,201,{ok:true,workflowId,workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${workflowId}`,webhookUrl,connectedAt,activationWarning});
+    return send(res,201,{ok:true,workflowId,workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${workflowId}`,webhookUrl,connectedAt,activationWarning,agentic:Boolean(accountLlm)});
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='GET'){
     const connection=store.n8nConnections.find(c=>c.accountId===id);
