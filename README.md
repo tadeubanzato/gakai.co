@@ -85,7 +85,24 @@ No Node.js required on the host. Everything runs inside the containers.
 
 ## Installation
 
-### 1. Clone and start
+### 1. Install Docker
+
+If you don't have Docker installed yet:
+
+- **Mac / Windows:** download [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- **Linux (Ubuntu/Debian):**
+  ```sh
+  curl -fsSL https://get.docker.com | sh
+  ```
+- **Linux (other):** follow the [official Docker install guide](https://docs.docker.com/engine/install/)
+
+Verify it's working:
+```sh
+docker --version
+docker compose version
+```
+
+### 2. Clone and start
 
 ```sh
 git clone https://github.com/tadeubanzato/gakai-zap.git
@@ -107,7 +124,7 @@ Gakai is starting. Open: http://gakai.localhost:3000
 Check readiness: http://gakai.localhost:3000/readyz
 ```
 
-### 2. Create your admin account
+### 3. Create your admin account
 
 1. Open `http://gakai.localhost:3000` in your browser
 2. Gakai shows the **Create Account** screen on first visit
