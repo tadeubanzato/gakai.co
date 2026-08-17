@@ -13,7 +13,6 @@ Do not describe Gakai as WAHA Home. Use Gakai in visible copy, images, container
 
 ## Read this first
 
-- Work from `/home/tbanzato/gakai`, not the legacy `/home/tbanzato/waha` directory.
 - Before reading code or taking any project action, synchronize the current branch: run `git status --short`, `git fetch origin --prune`, then—only if the working tree is clean—`git pull --ff-only origin $(git branch --show-current)`. Never switch branches, merge, rebase, stash, or overwrite local work automatically. If fast-forwarding is impossible or the tree is dirty, report it and wait for direction.
 - Read `server.mjs`, `public/app.js`, `public/styles.css`, `docker-compose.yml`, and the relevant tests or fixtures before making a change.
 - During startup, read `references/provider-api.md` when it exists for the current official provider links, verified payload notes, and adapter boundary rules. Its absence is never a startup blocker: note it briefly, continue with the checked-in code and compose configuration, and create or repair the sanitized reference before any provider-integration change. Do not use a compound inspection command that fails just because this optional file is absent.
@@ -22,12 +21,11 @@ Do not describe Gakai as WAHA Home. Use Gakai in visible copy, images, container
 
 ## Current verified runtime
 
-- Dashboard URL: `http://gakai.localhost:3000`.
-- Compose project: `/home/tbanzato/gakai/docker-compose.yml`.
+- Dashboard URL: `http://localhost:3000` by default; the actual host and port depend on where Docker Compose is running and which `GAKAI_PORT` is set. Do not hardcode a specific hostname.
+- Start Gakai from the repository root with `./scripts/gakai-up.sh`. Set `GAKAI_PORT` or `GAKAI_BIND_ADDRESS` as needed.
 - Public application container: `gakai`.
 - Private provider container: `gakai-provider`; it has no host port. The current provider image is upstream WAHA and remains internal during the transition.
 - Persisted local runtime state: automatically generated `.env`, `sessions/`, and `home-data/`. These are intentionally ignored by Git and must never be committed, copied to fixtures, logged, or exposed in browser code.
-- `/home/tbanzato/waha` is a rollback backup only. Do not start, delete, or edit it unless the user explicitly requests a controlled rollback or retirement.
 
 ## Current codebase
 
@@ -86,7 +84,7 @@ The future public release must let users pull Gakai only. Internally it may cont
 3. Add or update sanitized fixtures/tests for behavior that depends on provider payloads.
 4. Validate browser JavaScript inside the application image because the host may not have Node: `docker compose run --rm --no-deps home node --check /app/public/app.js`.
 5. Rebuild and restart the changed service: `docker compose up -d --build`.
-6. Verify the live app through `http://gakai.localhost:3000`; inspect service status/logs when a change affects runtime behavior.
+6. Verify the live app at the URL printed by the launcher (`http://localhost:3000` unless overridden); inspect service status/logs when a change affects runtime behavior.
 7. Review `git diff --check` and `git status`. Commit focused changes on the active feature branch and push only after validation.
 
 ## Git and release hygiene
