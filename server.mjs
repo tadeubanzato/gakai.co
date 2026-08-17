@@ -27,6 +27,7 @@ let store=savedState?JSON.parse(savedState.data):legacy;
 const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
 if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
+if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
 if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.automationSubscriptions?.length||legacy.deletingAccounts?.length))persist();
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
@@ -148,6 +149,21 @@ function ensureN8nKey(accountId){
   const token=`wh_live_${randomBytes(24).toString('base64url')}`;
   if(key){key.token=token;key.hash=hash(token);key.lastUsedAt=null}else store.keys.push({id:randomBytes(8).toString('hex'),accountId:accountId,name:'n8n integration',scopes:['messages:read','messages:send'],createdAt:new Date().toISOString(),lastUsedAt:null,token,hash:hash(token)});
   return token;
+}
+async function n8nRequest(n8nUrl, n8nApiKey, path, options={}) {
+  const headers = { 'X-N8N-API-KEY': n8nApiKey, 'accept': 'application/json', ...(options.headers || {}) };
+  const response = await fetch(`${n8nUrl}/api/v1${path}`, { ...options, headers });
+  const text = await response.text(); let data;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!response.ok) {
+    if (response.status === 401) throw new Error('Invalid n8n API key or insufficient permissions');
+    throw new Error((data && (data.message || data.error)) || `n8n API request failed with status ${response.status}`);
+  }
+  return data;
+}
+function makeUUID() {
+  const b = randomBytes(16).toString('hex');
+  return `${b.slice(0,8)}-${b.slice(8,12)}-${b.slice(12,16)}-${b.slice(16,20)}-${b.slice(20,32)}`;
 }
 async function api(req, res, url) {
 function normalizedPreviewImage(value){
@@ -272,6 +288,64 @@ async function enrichMessage(session,message){
   if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@c.us`:"demo@c.us",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};try{const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});const response=await fetch(destination,{method:"POST",headers:{"content-type":"application/json","x-gakai-secret":subscription.secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true,subscription:automationSummary(subscription)})}catch(error){return send(res,502,{message:error.message||"Test delivery failed",subscription:automationSummary(subscription)})}}
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
+  if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='POST'){
+    const input=await readBody(req);
+    let n8nBaseUrl=String(input.n8nUrl||'').trim().replace(/\/+$/,'');
+    const n8nApiKey=String(input.n8nApiKey||'').trim();
+    try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
+    if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
+    if(!n8nApiKey)return send(res,400,{message:'n8n API key is required'});
+    try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
+    const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
+    const integrationToken='wh_n8n_'+randomBytes(24).toString('base64url');
+    let inboundCred,outboundCred;
+    try{inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Inbound Secret – ${id}`,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});}
+    catch(err){return send(res,502,{message:'Failed to create inbound credential in n8n: '+err.message});}
+    try{outboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Bearer Token – ${id}`,type:'httpBearerAuth',data:{token:integrationToken}})});}
+    catch(err){return send(res,502,{message:'Failed to create outbound credential in n8n: '+err.message});}
+    const webhookPath='gakai-'+id.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24);
+    let accountLabel=id;
+    try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===id);if(session)accountLabel=session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||id;}catch{}
+    const workflowName=`Gakai – ${accountLabel}`;
+    const webhookNodeId=makeUUID(),setNodeId=makeUUID(),httpNodeId=makeUUID();
+    const workflowBody={name:workflowName,nodes:[
+      {id:webhookNodeId,name:'Webhook',type:'n8n-nodes-base.webhook',typeVersion:1,position:[250,300],parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'onReceived'},credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}},
+      {id:setNodeId,name:'Set',type:'n8n-nodes-base.set',typeVersion:1,position:[500,300],parameters:{values:{string:[{name:'chat_id',value:'={{ $json.chat.id }}'},{name:'message_body',value:'={{ $json.message.body }}'}]}}},
+      {id:httpNodeId,name:'Send Reply',type:'n8n-nodes-base.httpRequest',typeVersion:1,position:[750,300],parameters:{method:'POST',url:`${publicUrl}/api/integrations/v1/messages`,bodyParametersUi:{parameter:[{name:'chatId',value:"={{ $('Set').item.json.chat_id }}"},{name:'text',value:"={{ $('Set').item.json.message_body }}"}]}},credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}}
+    ],connections:{Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Send Reply',type:'main',index:0}]]}}};
+    let workflow;
+    try{workflow=await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(workflowBody)});}
+    catch(err){return send(res,502,{message:'Failed to create workflow in n8n: '+err.message});}
+    if(!workflow?.nodes?.length)return send(res,502,{message:'n8n created the workflow but nodes were not saved. Please try again.'});
+    const workflowId=String(workflow.id);
+    try{await n8nRequest(n8nBaseUrl,n8nApiKey,`/workflows/${workflowId}/activate`,{method:'POST'});}catch{}
+    const webhookUrl=`${n8nBaseUrl}/webhook/${webhookPath}`;
+    const connectedAt=new Date().toISOString();
+    // Remove old n8n auto-connect key for this account
+    store.keys=store.keys.filter(k=>!(k.accountId===id&&k.name==='n8n auto-connect'));
+    store.keys.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:integrationToken,hash:hash(integrationToken)});
+    // Create/replace automation subscription (remove all for this account, then re-add the new one)
+    store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);
+    store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',url:webhookUrl,productionUrl:webhookUrl,testUrl:null,testPhone:null,enabled:true,events:['message.received'],secret:inboundSecret,createdAt:connectedAt,lastDelivery:null});
+    // Remove old connection record and add new one
+    store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
+    store.n8nConnections.push({accountId:id,n8nUrl:n8nBaseUrl,n8nApiKeyHash:hash(n8nApiKey),workflowId,workflowName,inboundCredentialId:String(inboundCred.id),outboundCredentialId:String(outboundCred.id),inboundSecret,integrationToken,connectedAt});
+    await persist();
+    return send(res,201,{ok:true,workflowId,workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${workflowId}`,webhookUrl,connectedAt});
+  }
+  if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='GET'){
+    const connection=store.n8nConnections.find(c=>c.accountId===id);
+    if(!connection)return send(res,200,{connected:false});
+    const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect');
+    return send(res,200,{connected:true,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,webhookUrl:subscription?.url||null,lastDelivery:subscription?.lastDelivery||null,connectedAt:connection.connectedAt});
+  }
+  if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='DELETE'){
+    store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
+    store.keys=store.keys.filter(k=>!(k.accountId===id&&k.name==='n8n auto-connect'));
+    store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.accountId===id&&item.name==='n8n auto-connect'));
+    await persist();
+    return send(res,200,{ok:true});
+  }
   return send(res,404,{message:'Not found'});
 }
 http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.headers.host}`); try {
