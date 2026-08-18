@@ -439,7 +439,7 @@ async function enrichMessage(session,message){
             parameters:[
               {
                 name:'chatId',
-                value:"={{ $('Webhook').item.json.chat.id }}"
+                value:"={{ $('Webhook').item.json.body.chat.id }}"
               },
               {
                 name:'text',
@@ -464,7 +464,7 @@ async function enrichMessage(session,message){
           position:[625,300],
           parameters:{
             promptType:'define',
-            text:"={{ $('Webhook').item.json.message.body || $('Webhook').item.json.message.text || '' }}",
+            text:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}",
             options:{systemMessage:systemPrompt}
           }
         };
@@ -488,7 +488,7 @@ async function enrichMessage(session,message){
           position:[625,300],
           parameters:{
             assignments:{assignments:[
-              {id:makeUUID(),name:'message_body',type:'string',value:"={{ $('Webhook').item.json.message.body || $('Webhook').item.json.message.text || '' }}"}
+              {id:makeUUID(),name:'message_body',type:'string',value:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}"}
             ]},
             options:{}
           }
