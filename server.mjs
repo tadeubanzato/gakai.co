@@ -8,9 +8,20 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
 const port = Number(process.env.PORT || 3000);
-const publicHost = process.env.GAKAI_PUBLIC_HOST || 'gakai.localhost';
+const configuredPublicUrl = String(process.env.GAKAI_PUBLIC_URL || '').trim().replace(/\/$/, '');
 const publicPort = Number(process.env.GAKAI_PUBLIC_PORT || port);
-const publicUrl = process.env.GAKAI_PUBLIC_URL || `http://${publicHost}${publicPort === 80 ? '' : `:${publicPort}`}`;
+
+function requestPublicUrl(req) {
+  if (configuredPublicUrl) return configuredPublicUrl;
+
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+  const protocol = forwardedProto || 'http';
+  const host = forwardedHost || req.headers.host;
+
+  if (!host) return `http://127.0.0.1:${publicPort}`;
+  return `${protocol}://${host}`.replace(/\/$/, '');
+}
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
 const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
 const providerWebhookSecret=process.env.GAKAI_PROVIDER_WEBHOOK_SECRET || "";
@@ -341,10 +352,12 @@ async function enrichMessage(session,message){
     try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
     if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
     if(!n8nApiKey)return send(res,400,{message:'n8n API key is required'});
-    // Fix #2: validate that Gakai's own public URL is reachable from outside (not localhost)
+    // Use the URL the user actually used to reach Gakai unless an explicit
+    // GAKAI_PUBLIC_URL override is configured (for example behind a reverse proxy).
+    const publicUrl=requestPublicUrl(req);
     const publicUrlParsed=new URL(publicUrl);
-    if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='gakai.localhost'||publicUrlParsed.hostname.endsWith('.local')||publicUrlParsed.hostname==='127.0.0.1')
-      return send(res,400,{message:`Gakai's public URL (${publicUrl}) is not reachable from n8n. Set GAKAI_PUBLIC_URL to your server's public address before connecting.`});
+    if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='127.0.0.1'||publicUrlParsed.hostname==='::1')
+      return send(res,400,{message:`Gakai is being accessed through ${publicUrl}, which n8n cannot call from another container. Open Gakai using this server's hostname or LAN address, then connect again.`});
     try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
     const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
     const integrationToken='wh_n8n_'+randomBytes(24).toString('base64url');
@@ -422,4 +435,4 @@ http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.hea
   const requested=(url.pathname==='/'||url.pathname.startsWith('/accounts/'))?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
   if (!file.startsWith(publicDir)) return send(res,403,{message:'Forbidden'});
   const content=await readFile(file); res.writeHead(200,{'content-type':types[extname(file)]||'application/octet-stream','cache-control':'no-cache'}); res.end(content);
-} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai is ready at ${publicUrl}`));
+} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}${configuredPublicUrl ? ` (public URL: ${configuredPublicUrl})` : ''}`));
