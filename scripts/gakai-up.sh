@@ -2,10 +2,12 @@
 set -eu
 
 port="${GAKAI_PORT:-3000}"
-host="${GAKAI_PUBLIC_HOST:-$(hostname)}"
 
 case "$port" in
-  *[!0-9]*|"" ) echo "GAKAI_PORT must be a number (for example: GAKAI_PORT=8080)." >&2; exit 2 ;;
+  *[!0-9]*|"" )
+    echo "GAKAI_PORT must be a number (for example: GAKAI_PORT=8080)." >&2
+    exit 2
+    ;;
 esac
 
 if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
@@ -19,7 +21,8 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
 fi
 
 gen_secret() {
-  openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d " \n"
+  openssl rand -hex 32 2>/dev/null || \
+    od -An -N32 -tx1 /dev/urandom | tr -d " \n"
 }
 
 if [ ! -f .env ] || ! grep -q "^GAKAI_PROVIDER_API_KEY=." .env; then
@@ -45,6 +48,43 @@ port_in_use() {
   fi
 }
 
+detect_lan_ip() {
+  # Best option on Linux: determine the source IP used for outbound traffic.
+  if command -v ip >/dev/null 2>&1; then
+    ip route get 1.1.1.1 2>/dev/null |
+      awk '{
+        for (i = 1; i <= NF; i++) {
+          if ($i == "src") {
+            print $(i + 1)
+            exit
+          }
+        }
+      }'
+    return
+  fi
+
+  # Fallback for systems without the ip command.
+  if command -v hostname >/dev/null 2>&1; then
+    hostname -I 2>/dev/null |
+      awk '{print $1}'
+    return
+  fi
+}
+
+machine_hostname="$(hostname 2>/dev/null || true)"
+lan_ip="$(detect_lan_ip || true)"
+
+# Explicit configuration always wins.
+if [ -n "${GAKAI_PUBLIC_URL:-}" ]; then
+  public_url="${GAKAI_PUBLIC_URL%/}"
+elif [ -n "$lan_ip" ]; then
+  public_url="http://$lan_ip:$port"
+elif [ -n "$machine_hostname" ] && [ "$machine_hostname" != "localhost" ]; then
+  public_url="http://$machine_hostname:$port"
+else
+  public_url="http://127.0.0.1:$port"
+fi
+
 if port_in_use "$port"; then
   echo "Port $port is already in use. Choose another port, for example:" >&2
   echo "  GAKAI_PORT=8080 ./scripts/gakai-up.sh" >&2
@@ -52,10 +92,20 @@ if port_in_use "$port"; then
 fi
 
 export GAKAI_PORT="$port"
-export GAKAI_PUBLIC_HOST="$host"
+export GAKAI_PUBLIC_URL="$public_url"
 
 docker compose up -d --build
 
 echo
-echo "Gakai is starting. Open: http://$host:$port"
-echo "Check readiness: http://$host:$port/readyz"
+echo "Gakai is starting."
+
+if [ -n "$machine_hostname" ] && [ "$machine_hostname" != "localhost" ]; then
+  echo "Local hostname: http://${machine_hostname}.local:$port"
+fi
+
+if [ -n "$lan_ip" ]; then
+  echo "LAN address:    http://$lan_ip:$port"
+fi
+
+echo "Gakai URL:      $public_url"
+echo "Readiness:      $public_url/readyz"
