@@ -12,15 +12,24 @@ const configuredPublicUrl = String(process.env.GAKAI_PUBLIC_URL || '').trim().re
 const publicPort = Number(process.env.GAKAI_PUBLIC_PORT || port);
 
 function requestPublicUrl(req) {
+  // Explicit configuration always wins. This is ideal for Cloudflare Tunnel,
+  // reverse proxies, or any deployment with a stable public hostname.
   if (configuredPublicUrl) return configuredPublicUrl;
 
+  // Reverse proxies such as Cloudflare normally provide the original scheme/host.
   const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
   const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
-  const protocol = forwardedProto || 'http';
-  const host = forwardedHost || req.headers.host;
 
-  if (!host) return `http://127.0.0.1:${publicPort}`;
-  return `${protocol}://${host}`.replace(/\/$/, '');
+  // Without a reverse proxy, use exactly what the user used to open Gakai:
+  // hostname.local, LAN IP, DNS hostname, custom domain, etc.
+  const host = forwardedHost || String(req.headers.host || '').trim();
+  const protocol = forwardedProto || 'http';
+
+  if (host) return `${protocol}://${host}`.replace(/\/$/, '');
+
+  // Last-resort fallback. This keeps local-only Gakai usable, although an
+  // external n8n instance cannot call a loopback address.
+  return `http://127.0.0.1:${publicPort}`;
 }
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
 const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
@@ -384,7 +393,7 @@ async function enrichMessage(session,message){
     const publicUrl=requestPublicUrl(req);
     const publicUrlParsed=new URL(publicUrl);
     if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='127.0.0.1'||publicUrlParsed.hostname==='::1')
-      return send(res,400,{message:`Gakai is being accessed through ${publicUrl}, which n8n cannot call from another container. Open Gakai using this server's hostname or LAN address, then connect again.`});
+      return send(res,400,{message:`Gakai resolved its callback URL as ${publicUrl}. n8n cannot call another service through its own loopback address. Open Gakai using a LAN IP, local hostname, or domain, or set GAKAI_PUBLIC_URL when using a reverse proxy.`});
     try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
     const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
     const integrationToken='wh_n8n_'+randomBytes(24).toString('base64url');
@@ -412,7 +421,6 @@ async function enrichMessage(session,message){
         credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}
       };
 
-      const replyJsonExpression=`={{ JSON.stringify({ chatId: $('Webhook').item.json.chat.id, text: $json.output || $json.reply || $json.text || $json.message_body || '' }) }}`;
       const httpNode={
         id:httpNodeId,
         name:'Send Reply',
@@ -425,8 +433,20 @@ async function enrichMessage(session,message){
           authentication:'genericCredentialType',
           genericAuthType:'httpBearerAuth',
           sendBody:true,
-          specifyBody:'json',
-          jsonBody:replyJsonExpression,
+          contentType:'json',
+          specifyBody:'keypair',
+          bodyParameters:{
+            parameters:[
+              {
+                name:'chatId',
+                value:"={{ $('Webhook').item.json.chat.id }}"
+              },
+              {
+                name:'text',
+                value:"={{ $json.output || $json.reply || $json.text || $json.message_body || '' }}"
+              }
+            ]
+          },
           options:{}
         },
         credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}
