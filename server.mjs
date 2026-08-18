@@ -165,16 +165,43 @@ function ensureN8nKey(accountId){
   if(key){key.token=token;key.hash=hash(token);key.lastUsedAt=null}else store.keys.push({id:randomBytes(8).toString('hex'),accountId:accountId,name:'n8n integration',scopes:['messages:read','messages:send'],createdAt:new Date().toISOString(),lastUsedAt:null,token,hash:hash(token)});
   return token;
 }
+function normalizeN8nBaseUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '').replace(/\/api\/v1$/i, '');
+}
+
 async function n8nRequest(n8nUrl, n8nApiKey, path, options={}) {
   const headers = { 'X-N8N-API-KEY': n8nApiKey, 'accept': 'application/json', ...(options.headers || {}) };
-  const response = await fetch(`${n8nUrl}/api/v1${path}`, { ...options, headers });
+  const response = await fetch(`${n8nUrl}/api/v1${path}`, { ...options, headers, signal: options.signal || AbortSignal.timeout(20000) });
   const text = await response.text(); let data;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!response.ok) {
-    if (response.status === 401) throw new Error('Invalid n8n API key or insufficient permissions');
-    throw new Error((data && (data.message || data.error)) || `n8n API request failed with status ${response.status}`);
+    const message = response.status === 401
+      ? 'Invalid n8n API key or insufficient permissions'
+      : ((data && (data.message || data.error)) || `n8n API request failed with status ${response.status}`);
+    throw Object.assign(new Error(message), {status:response.status, data});
   }
   return data;
+}
+
+async function publishN8nWorkflow(n8nUrl,n8nApiKey,workflowId){
+  try{
+    return await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${workflowId}/publish`,{method:'POST'});
+  }catch(error){
+    // Older n8n releases use /activate. Keep this fallback for self-hosted installs
+    // that have not yet moved to the publish endpoint.
+    if(![404,405].includes(error.status))throw error;
+    return await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${workflowId}/activate`,{method:'POST'});
+  }
+}
+
+async function deleteN8nCredentialQuietly(n8nUrl,n8nApiKey,credentialId){
+  if(!credentialId)return;
+  try{await n8nRequest(n8nUrl,n8nApiKey,`/credentials/${credentialId}`,{method:'DELETE'});}catch{}
+}
+
+async function deleteN8nWorkflowQuietly(n8nUrl,n8nApiKey,workflowId){
+  if(!workflowId)return;
+  try{await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${workflowId}`,{method:'DELETE'});}catch{}
 }
 function makeUUID() {
   const b = randomBytes(16).toString('hex');
@@ -347,7 +374,7 @@ async function enrichMessage(session,message){
   if(parts[4]==='llm'&&req.method==='DELETE'){store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);await persist();return send(res,200,{ok:true});}
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='POST'){
     const input=await readBody(req);
-    let n8nBaseUrl=String(input.n8nUrl||'').trim().replace(/\/+$/,'');
+    let n8nBaseUrl=normalizeN8nBaseUrl(input.n8nUrl);
     const n8nApiKey=String(input.n8nApiKey||'').trim();
     try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
     if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
@@ -361,46 +388,110 @@ async function enrichMessage(session,message){
     try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
     const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
     const integrationToken='wh_n8n_'+randomBytes(24).toString('base64url');
-    let inboundCred,outboundCred;
-    try{inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Inbound Secret – ${id}`,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});}
-    catch(err){return send(res,502,{message:'Failed to create inbound credential in n8n: '+err.message});}
-    try{outboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Bearer Token – ${id}`,type:'httpBearerAuth',data:{token:integrationToken}})});}
-    catch(err){return send(res,502,{message:'Failed to create outbound credential in n8n: '+err.message});}
-    const webhookPath='gakai-'+id.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24);
-    let accountLabel=id;
-    try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===id);if(session)accountLabel=session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||id;}catch{}
-    const workflowName=`Gakai – ${accountLabel}`;
-    const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),httpNodeId=makeUUID(),llmNodeId=makeUUID();
-    const accountLlm=llmConfig(id);
-    // Build workflow — agentic if LLM proxy is configured, basic Set node otherwise
-    let nodes,connections;
-    const webhookNode={id:webhookNodeId,name:'Webhook',type:'n8n-nodes-base.webhook',typeVersion:1,position:[250,300],parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'onReceived'},credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}};
-    const httpNode={id:httpNodeId,name:'Send Reply',type:'n8n-nodes-base.httpRequest',typeVersion:1,position:[1000,300],parameters:{method:'POST',url:`${publicUrl}/api/integrations/v1/messages`,bodyParametersUi:{parameter:[{name:'chatId',value:"={{ $json.chat_id || $('Webhook').item.json.chat.id }}"},{name:'text',value:"={{ $json.reply || $json.text || $json.message_body }}"}]}},credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}};
-    if(accountLlm){
-      // Create OpenAI-compatible credential in n8n pointing at the LLM proxy
-      let llmCred;
-      try{llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${id}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,baseUrl:accountLlm.baseUrl}})});}
-      catch(err){return send(res,502,{message:'Failed to create LLM credential in n8n: '+err.message});}
-      const systemPrompt=accountLlm.systemPrompt||'You are a helpful WhatsApp assistant. Reply concisely and helpfully. Only reply with the message text, no formatting or labels.';
-      const agentNode={id:middleNodeId,name:'AI Agent',type:'@n8n/n8n-nodes-langchain.agent',typeVersion:1.7,position:[625,300],parameters:{options:{systemMessage:systemPrompt}}};
-      const llmNode={id:llmNodeId,name:'OpenAI Chat Model',type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',typeVersion:1.2,position:[625,500],parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}};
-      nodes=[webhookNode,agentNode,llmNode,httpNode];
-      connections={Webhook:{main:[[{node:'AI Agent',type:'main',index:0}]]},'OpenAI Chat Model':{ai_languageModel:[[{node:'AI Agent',type:'ai_languageModel',index:0}]]},'AI Agent':{main:[[{node:'Send Reply',type:'main',index:0}]]}};
-    }else{
-      const setNode={id:middleNodeId,name:'Set',type:'n8n-nodes-base.set',typeVersion:1,position:[625,300],parameters:{values:{string:[{name:'chat_id',value:'={{ $json.chat.id }}'},{name:'message_body',value:'={{ $json.message.body }}'}]}}};
-      nodes=[webhookNode,setNode,httpNode];
-      connections={Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Send Reply',type:'main',index:0}]]}};
+    let inboundCred=null,outboundCred=null,llmCred=null,workflow=null;
+    let webhookPath=null,workflowName=null,accountLlm=null,activationWarning=null;
+    try{
+      inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Inbound Secret – ${id}`,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});
+      outboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Bearer Token – ${id}`,type:'httpBearerAuth',data:{token:integrationToken}})});
+
+      webhookPath='gakai-'+id.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24);
+      let accountLabel=id;
+      try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===id);if(session)accountLabel=session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||id;}catch{}
+      workflowName=`Gakai – ${accountLabel}`;
+      const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),httpNodeId=makeUUID(),llmNodeId=makeUUID();
+      accountLlm=llmConfig(id);
+      let nodes,connections;
+
+      const webhookNode={
+        id:webhookNodeId,
+        name:'Webhook',
+        type:'n8n-nodes-base.webhook',
+        typeVersion:2.1,
+        position:[250,300],
+        parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'onReceived',options:{}},
+        credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}
+      };
+
+      const replyJsonExpression=`={{ JSON.stringify({ chatId: $('Webhook').item.json.chat.id, text: $json.output || $json.reply || $json.text || $json.message_body || '' }) }}`;
+      const httpNode={
+        id:httpNodeId,
+        name:'Send Reply',
+        type:'n8n-nodes-base.httpRequest',
+        typeVersion:4.2,
+        position:[1000,300],
+        parameters:{
+          method:'POST',
+          url:`${publicUrl}/api/integrations/v1/messages`,
+          authentication:'genericCredentialType',
+          genericAuthType:'httpBearerAuth',
+          sendBody:true,
+          specifyBody:'json',
+          jsonBody:replyJsonExpression,
+          options:{}
+        },
+        credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}
+      };
+
+      if(accountLlm){
+        // n8n's OpenAI credential uses `url` for an OpenAI-compatible base endpoint.
+        llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${id}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,url:accountLlm.baseUrl}})});
+        const systemPrompt=accountLlm.systemPrompt||'You are a helpful WhatsApp assistant. Reply concisely and helpfully. Only reply with the message text, no formatting or labels.';
+        const agentNode={
+          id:middleNodeId,
+          name:'AI Agent',
+          type:'@n8n/n8n-nodes-langchain.agent',
+          typeVersion:3.1,
+          position:[625,300],
+          parameters:{
+            promptType:'define',
+            text:"={{ $('Webhook').item.json.message.body || $('Webhook').item.json.message.text || '' }}",
+            options:{systemMessage:systemPrompt}
+          }
+        };
+        const llmNode={
+          id:llmNodeId,
+          name:'OpenAI Chat Model',
+          type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',
+          typeVersion:1.3,
+          position:[625,500],
+          parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},
+          credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}
+        };
+        nodes=[webhookNode,agentNode,llmNode,httpNode];
+        connections={Webhook:{main:[[{node:'AI Agent',type:'main',index:0}]]},'OpenAI Chat Model':{ai_languageModel:[[{node:'AI Agent',type:'ai_languageModel',index:0}]]},'AI Agent':{main:[[{node:'Send Reply',type:'main',index:0}]]}};
+      }else{
+        const setNode={
+          id:middleNodeId,
+          name:'Set',
+          type:'n8n-nodes-base.set',
+          typeVersion:3.4,
+          position:[625,300],
+          parameters:{
+            assignments:{assignments:[
+              {id:makeUUID(),name:'message_body',type:'string',value:"={{ $('Webhook').item.json.message.body || $('Webhook').item.json.message.text || '' }}"}
+            ]},
+            options:{}
+          }
+        };
+        nodes=[webhookNode,setNode,httpNode];
+        connections={Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Send Reply',type:'main',index:0}]]}};
+      }
+
+      const workflowBody={name:workflowName,nodes,connections,settings:{executionOrder:'v1'}};
+      workflow=await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(workflowBody)});
+      if(!workflow?.id||!workflow?.nodes?.length)throw new Error('n8n created an incomplete workflow. Please try again.');
+
+      const workflowId=String(workflow.id);
+      try{await publishN8nWorkflow(n8nBaseUrl,n8nApiKey,workflowId);}
+      catch(err){activationWarning=err.message||'Workflow publish failed';console.error('n8n workflow publish failed:',err.message);}
+    }catch(err){
+      await deleteN8nWorkflowQuietly(n8nBaseUrl,n8nApiKey,workflow?.id);
+      await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,llmCred?.id);
+      await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,outboundCred?.id);
+      await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,inboundCred?.id);
+      return send(res,502,{message:'Failed to configure n8n: '+(err.message||'Unknown n8n error')});
     }
-    const workflowBody={name:workflowName,nodes,connections};
-    let workflow;
-    try{workflow=await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(workflowBody)});}
-    catch(err){return send(res,502,{message:'Failed to create workflow in n8n: '+err.message});}
-    if(!workflow?.nodes?.length)return send(res,502,{message:'n8n created the workflow but nodes were not saved. Please try again.'});
     const workflowId=String(workflow.id);
-    // Fix #1: surface activation failures so user knows if the workflow needs manual activation
-    let activationWarning=null;
-    try{await n8nRequest(n8nBaseUrl,n8nApiKey,`/workflows/${workflowId}/activate`,{method:'POST'});}
-    catch(err){activationWarning=err.message||'Workflow activation failed';console.error('n8n workflow activation failed:',err.message);}
     const webhookUrl=`${n8nBaseUrl}/webhook/${webhookPath}`;
     const connectedAt=new Date().toISOString();
     // Remove old n8n auto-connect key for this account
