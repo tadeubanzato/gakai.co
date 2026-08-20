@@ -2,7 +2,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { mkdir } from 'node:fs/promises';
-import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
@@ -34,6 +34,25 @@ function requestPublicUrl(req) {
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
 const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
 const providerWebhookSecret=process.env.GAKAI_PROVIDER_WEBHOOK_SECRET || "";
+// Encrypts secrets we must read back later (e.g. the n8n API key, to call n8n's
+// API again on the user's behalf). Falls back to the provider webhook secret so
+// existing deployments keep working without a new required env var.
+const stateSecretKey=createHash('sha256').update(process.env.GAKAI_STATE_SECRET || providerWebhookSecret || 'gakai-dev-secret').digest();
+function encryptSecret(value){
+  const iv=randomBytes(12);
+  const cipher=createCipheriv('aes-256-gcm',stateSecretKey,iv);
+  const encrypted=Buffer.concat([cipher.update(String(value),'utf8'),cipher.final()]);
+  return `${iv.toString('hex')}:${cipher.getAuthTag().toString('hex')}:${encrypted.toString('hex')}`;
+}
+function decryptSecret(value){
+  const [ivHex,tagHex,dataHex]=String(value||'').split(':');
+  if(!ivHex||!tagHex||!dataHex)return null;
+  try{
+    const decipher=createDecipheriv('aes-256-gcm',stateSecretKey,Buffer.from(ivHex,'hex'));
+    decipher.setAuthTag(Buffer.from(tagHex,'hex'));
+    return Buffer.concat([decipher.update(Buffer.from(dataHex,'hex')),decipher.final()]).toString('utf8');
+  }catch{return null}
+}
 const publicDir = join(process.cwd(), "public");
 const dataDir=process.env.HOME_DATA_DIR || join(process.cwd(),"data");
 const dataFile=join(dataDir,"home.json");
@@ -48,6 +67,7 @@ const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CON
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
 if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
 if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
+let migratedN8nConnections=false;for(const connection of store.n8nConnections){if(!connection.kind){connection.kind='standard';migratedN8nConnections=true}}if(migratedN8nConnections)persist();
 if(!Array.isArray(store.llmConfigs))store.llmConfigs=[];
 if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.automationSubscriptions?.length||legacy.deletingAccounts?.length))persist();
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
@@ -217,6 +237,163 @@ function makeUUID() {
   return `${b.slice(0,8)}-${b.slice(8,12)}-${b.slice(12,16)}-${b.slice(16,20)}-${b.slice(20,32)}`;
 }
 function llmConfig(accountId){return store.llmConfigs.find(c=>c.accountId===accountId)||null;}
+
+// Builds one n8n workflow (Webhook -> [Set | AI Agent] -> Send Reply) and its
+// dedicated credentials. Used both for the initial n8n connect and for creating
+// the paired AI Agent workflow once LiteLLM is configured. Never mutates an
+// existing n8n workflow; each call creates a brand-new one.
+async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}){
+  const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
+  const integrationToken='wh_n8n_'+randomBytes(24).toString('base64url');
+  let inboundCred=null,outboundCred=null,llmCred=null,workflow=null;
+  try{
+    inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Inbound Secret – ${accountId}${kind==='agentic'?' (AI Agent)':''}`,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});
+    outboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Bearer Token – ${accountId}${kind==='agentic'?' (AI Agent)':''}`,type:'httpBearerAuth',data:{token:integrationToken}})});
+
+    const webhookPath='gakai-'+accountId.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24)+(kind==='agentic'?'-ai':'');
+    let accountLabel=accountId;
+    try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===accountId);if(session)accountLabel=session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||accountId;}catch{}
+    const workflowName=`Gakai – ${accountLabel}${kind==='agentic'?' (AI Agent)':''}`;
+    const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),httpNodeId=makeUUID(),llmNodeId=makeUUID();
+    const accountLlm=kind==='agentic'?llmConfig(accountId):null;
+    let nodes,connections;
+
+    const webhookNode={
+      id:webhookNodeId,
+      name:'Webhook',
+      type:'n8n-nodes-base.webhook',
+      typeVersion:2.1,
+      position:[250,300],
+      parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'onReceived',options:{}},
+      credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}
+    };
+
+    const httpNode={
+      id:httpNodeId,
+      name:'Send Reply',
+      type:'n8n-nodes-base.httpRequest',
+      typeVersion:4.2,
+      position:[1000,300],
+      parameters:{
+        method:'POST',
+        url:`${publicUrl}/api/integrations/v1/messages`,
+        authentication:'genericCredentialType',
+        genericAuthType:'httpBearerAuth',
+        sendBody:true,
+        contentType:'json',
+        specifyBody:'keypair',
+        bodyParameters:{
+          parameters:[
+            {
+              name:'chatId',
+              value:"={{ $('Webhook').item.json.body.chat.id }}"
+            },
+            {
+              name:'text',
+              value:"={{ $json.output || $json.reply || $json.text || $json.message_body || '' }}"
+            }
+          ]
+        },
+        options:{}
+      },
+      credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}
+    };
+
+    if(accountLlm){
+      // n8n's OpenAI credential uses `url` for an OpenAI-compatible base endpoint.
+      llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${accountId}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,url:accountLlm.baseUrl}})});
+      const systemPrompt=accountLlm.systemPrompt||'You are a helpful WhatsApp assistant. Reply concisely and helpfully. Only reply with the message text, no formatting or labels.';
+      const agentNode={
+        id:middleNodeId,
+        name:'AI Agent',
+        type:'@n8n/n8n-nodes-langchain.agent',
+        typeVersion:3.1,
+        position:[625,300],
+        parameters:{
+          promptType:'define',
+          text:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}",
+          options:{systemMessage:systemPrompt}
+        }
+      };
+      const llmNode={
+        id:llmNodeId,
+        name:'OpenAI Chat Model',
+        type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',
+        typeVersion:1.3,
+        position:[625,500],
+        parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},
+        credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}
+      };
+      nodes=[webhookNode,agentNode,llmNode,httpNode];
+      connections={Webhook:{main:[[{node:'AI Agent',type:'main',index:0}]]},'OpenAI Chat Model':{ai_languageModel:[[{node:'AI Agent',type:'ai_languageModel',index:0}]]},'AI Agent':{main:[[{node:'Send Reply',type:'main',index:0}]]}};
+    }else{
+      const setNode={
+        id:middleNodeId,
+        name:'Set',
+        type:'n8n-nodes-base.set',
+        typeVersion:3.4,
+        position:[625,300],
+        parameters:{
+          assignments:{assignments:[
+            {id:makeUUID(),name:'message_body',type:'string',value:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}"}
+          ]},
+          options:{}
+        }
+      };
+      nodes=[webhookNode,setNode,httpNode];
+      connections={Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Send Reply',type:'main',index:0}]]}};
+    }
+
+    const workflowBody={name:workflowName,nodes,connections,settings:{executionOrder:'v1'}};
+    workflow=await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(workflowBody)});
+    if(!workflow?.id||!workflow?.nodes?.length)throw new Error('n8n created an incomplete workflow. Please try again.');
+
+    const workflowId=String(workflow.id);
+    let activationWarning=null;
+    try{await publishN8nWorkflow(n8nBaseUrl,n8nApiKey,workflowId);}
+    catch(err){activationWarning=err.message||'Workflow publish failed';console.error('n8n workflow publish failed:',err.message);}
+
+    return {
+      workflowId,workflowName,
+      webhookUrl:`${n8nBaseUrl}/webhook/${webhookPath}`,
+      inboundSecret,integrationToken,activationWarning,
+      inboundCredentialId:String(inboundCred.id),outboundCredentialId:String(outboundCred.id),llmCredentialId:llmCred?String(llmCred.id):null,
+      agentic:Boolean(accountLlm)
+    };
+  }catch(err){
+    await deleteN8nWorkflowQuietly(n8nBaseUrl,n8nApiKey,workflow?.id);
+    await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,llmCred?.id);
+    await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,outboundCred?.id);
+    await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,inboundCred?.id);
+    throw err;
+  }
+}
+
+// Creates the paired AI Agent workflow for an account that already has a
+// standard n8n connection, reusing the same n8n instance/API key on file.
+// Leaves the existing standard workflow untouched. Routes live delivery to
+async function createAgenticN8nWorkflow(accountId,req){
+  const standard=store.n8nConnections.find(c=>c.accountId===accountId&&c.kind==='standard');
+  if(!standard)throw Object.assign(new Error('No existing n8n integration is available'),{status:409});
+  if(store.n8nConnections.some(c=>c.accountId===accountId&&c.kind==='agentic'))throw Object.assign(new Error('The AI workflow already exists'),{status:409});
+  const n8nApiKey=decryptSecret(standard.n8nApiKeyEncrypted);
+  if(!n8nApiKey)throw Object.assign(new Error('Reauthorize the existing n8n integration with its API key before creating an AI workflow'),{status:409});
+  // Verify the stored n8n connection before creating anything.
+  await n8nRequest(standard.n8nUrl,n8nApiKey,'/workflows?limit=1');
+  const publicUrl=requestPublicUrl(req);
+  const built=await createN8nWorkflow({n8nBaseUrl:standard.n8nUrl,n8nApiKey,accountId,publicUrl,kind:'agentic'});
+  const connectedAt=new Date().toISOString();
+  store.keys=store.keys.filter(k=>!(k.accountId===accountId&&k.name==='n8n auto-connect (AI Agent)'));
+  store.keys.push({id:randomBytes(8).toString('hex'),accountId,name:'n8n auto-connect (AI Agent)',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:built.integrationToken,hash:hash(built.integrationToken)});
+  // The generated AI workflow is deliberately isolated: it receives no live
+  // events until a later explicit activation step, and never alters the
+  // existing n8n workflow or its automation subscription.
+  store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.accountId===accountId&&item.name==='n8n auto-connect (AI Agent)'));
+  store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId,name:'n8n auto-connect (AI Agent)',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:false,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
+  store.n8nConnections.push({accountId,kind:'agentic',n8nUrl:standard.n8nUrl,n8nApiKeyEncrypted:standard.n8nApiKeyEncrypted,workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
+  await persist();
+  return built;
+}
 async function llmChat(config,messages){
   const response=await fetch(`${config.baseUrl.replace(/\/+$/,'')}/chat/completions`,{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify({model:config.model,messages}),signal:AbortSignal.timeout(30000)});
   const text=await response.text();let data;try{data=JSON.parse(text)}catch{throw new Error('LLM proxy returned invalid JSON')}
@@ -381,7 +558,7 @@ async function enrichMessage(session,message){
     return send(res,200,{ok:true});
   }
   if(parts[4]==='llm'&&req.method==='DELETE'){store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);await persist();return send(res,200,{ok:true});}
-  if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='POST'){
+  if(parts[4]==='n8n'&&parts[5]==='connect'&&!parts[6]&&req.method==='POST'){
     const input=await readBody(req);
     let n8nBaseUrl=normalizeN8nBaseUrl(input.n8nUrl);
     const n8nApiKey=String(input.n8nApiKey||'').trim();
@@ -395,147 +572,53 @@ async function enrichMessage(session,message){
     if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='127.0.0.1'||publicUrlParsed.hostname==='::1')
       return send(res,400,{message:`Gakai resolved its callback URL as ${publicUrl}. n8n cannot call another service through its own loopback address. Open Gakai using a LAN IP, local hostname, or domain, or set GAKAI_PUBLIC_URL when using a reverse proxy.`});
     try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
-    const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
-    const integrationToken='wh_n8n_'+randomBytes(24).toString('base64url');
-    let inboundCred=null,outboundCred=null,llmCred=null,workflow=null;
-    let webhookPath=null,workflowName=null,accountLlm=null,activationWarning=null;
-    try{
-      inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Inbound Secret – ${id}`,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});
-      outboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Bearer Token – ${id}`,type:'httpBearerAuth',data:{token:integrationToken}})});
-
-      webhookPath='gakai-'+id.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24);
-      let accountLabel=id;
-      try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===id);if(session)accountLabel=session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||id;}catch{}
-      workflowName=`Gakai – ${accountLabel}`;
-      const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),httpNodeId=makeUUID(),llmNodeId=makeUUID();
-      accountLlm=llmConfig(id);
-      let nodes,connections;
-
-      const webhookNode={
-        id:webhookNodeId,
-        name:'Webhook',
-        type:'n8n-nodes-base.webhook',
-        typeVersion:2.1,
-        position:[250,300],
-        parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'onReceived',options:{}},
-        credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}
-      };
-
-      const httpNode={
-        id:httpNodeId,
-        name:'Send Reply',
-        type:'n8n-nodes-base.httpRequest',
-        typeVersion:4.2,
-        position:[1000,300],
-        parameters:{
-          method:'POST',
-          url:`${publicUrl}/api/integrations/v1/messages`,
-          authentication:'genericCredentialType',
-          genericAuthType:'httpBearerAuth',
-          sendBody:true,
-          contentType:'json',
-          specifyBody:'keypair',
-          bodyParameters:{
-            parameters:[
-              {
-                name:'chatId',
-                value:"={{ $('Webhook').item.json.body.chat.id }}"
-              },
-              {
-                name:'text',
-                value:"={{ $json.output || $json.reply || $json.text || $json.message_body || '' }}"
-              }
-            ]
-          },
-          options:{}
-        },
-        credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}
-      };
-
-      if(accountLlm){
-        // n8n's OpenAI credential uses `url` for an OpenAI-compatible base endpoint.
-        llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${id}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,url:accountLlm.baseUrl}})});
-        const systemPrompt=accountLlm.systemPrompt||'You are a helpful WhatsApp assistant. Reply concisely and helpfully. Only reply with the message text, no formatting or labels.';
-        const agentNode={
-          id:middleNodeId,
-          name:'AI Agent',
-          type:'@n8n/n8n-nodes-langchain.agent',
-          typeVersion:3.1,
-          position:[625,300],
-          parameters:{
-            promptType:'define',
-            text:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}",
-            options:{systemMessage:systemPrompt}
-          }
-        };
-        const llmNode={
-          id:llmNodeId,
-          name:'OpenAI Chat Model',
-          type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',
-          typeVersion:1.3,
-          position:[625,500],
-          parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},
-          credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}
-        };
-        nodes=[webhookNode,agentNode,llmNode,httpNode];
-        connections={Webhook:{main:[[{node:'AI Agent',type:'main',index:0}]]},'OpenAI Chat Model':{ai_languageModel:[[{node:'AI Agent',type:'ai_languageModel',index:0}]]},'AI Agent':{main:[[{node:'Send Reply',type:'main',index:0}]]}};
-      }else{
-        const setNode={
-          id:middleNodeId,
-          name:'Set',
-          type:'n8n-nodes-base.set',
-          typeVersion:3.4,
-          position:[625,300],
-          parameters:{
-            assignments:{assignments:[
-              {id:makeUUID(),name:'message_body',type:'string',value:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}"}
-            ]},
-            options:{}
-          }
-        };
-        nodes=[webhookNode,setNode,httpNode];
-        connections={Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Send Reply',type:'main',index:0}]]}};
-      }
-
-      const workflowBody={name:workflowName,nodes,connections,settings:{executionOrder:'v1'}};
-      workflow=await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(workflowBody)});
-      if(!workflow?.id||!workflow?.nodes?.length)throw new Error('n8n created an incomplete workflow. Please try again.');
-
-      const workflowId=String(workflow.id);
-      try{await publishN8nWorkflow(n8nBaseUrl,n8nApiKey,workflowId);}
-      catch(err){activationWarning=err.message||'Workflow publish failed';console.error('n8n workflow publish failed:',err.message);}
-    }catch(err){
-      await deleteN8nWorkflowQuietly(n8nBaseUrl,n8nApiKey,workflow?.id);
-      await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,llmCred?.id);
-      await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,outboundCred?.id);
-      await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,inboundCred?.id);
-      return send(res,502,{message:'Failed to configure n8n: '+(err.message||'Unknown n8n error')});
-    }
-    const workflowId=String(workflow.id);
-    const webhookUrl=`${n8nBaseUrl}/webhook/${webhookPath}`;
+    const existingStandard=store.n8nConnections.find(connection=>connection.accountId===id&&connection.kind==='standard');
+    if(existingStandard){existingStandard.n8nUrl=n8nBaseUrl;existingStandard.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);await persist();return send(res,200,{ok:true,reused:true,workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`});}
+    let built;
+    try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,publicUrl,kind:'standard'}); }
+    catch(err){ return send(res,502,{message:'Failed to configure n8n: '+(err.message||'Unknown n8n error')}); }
     const connectedAt=new Date().toISOString();
     // Remove old n8n auto-connect key for this account
     store.keys=store.keys.filter(k=>!(k.accountId===id&&k.name==='n8n auto-connect'));
-    store.keys.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:integrationToken,hash:hash(integrationToken)});
+    store.keys.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:built.integrationToken,hash:hash(built.integrationToken)});
     // Create/replace automation subscription (remove all for this account, then re-add the new one)
     store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);
-    store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',url:webhookUrl,productionUrl:webhookUrl,testUrl:null,testPhone:null,enabled:true,events:['message.received'],secret:inboundSecret,createdAt:connectedAt,lastDelivery:null});
-    // Remove old connection record and add new one
+    store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:true,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
+    // Remove old connections for this account (both kinds) and start fresh with the standard workflow
     store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
-    store.n8nConnections.push({accountId:id,n8nUrl:n8nBaseUrl,n8nApiKeyHash:hash(n8nApiKey),workflowId,workflowName,inboundCredentialId:String(inboundCred.id),outboundCredentialId:String(outboundCred.id),inboundSecret,integrationToken,connectedAt});
+    store.n8nConnections.push({accountId:id,kind:'standard',n8nUrl:n8nBaseUrl,n8nApiKeyEncrypted:encryptSecret(n8nApiKey),workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
     await persist();
-    return send(res,201,{ok:true,workflowId,workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${workflowId}`,webhookUrl,connectedAt,activationWarning,agentic:Boolean(accountLlm)});
+    return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${built.workflowId}`,webhookUrl:built.webhookUrl,connectedAt,activationWarning:built.activationWarning});
+  }
+  if(parts[4]==='n8n'&&parts[5]==='connect'&&parts[6]==='ai'&&req.method==='POST'){
+    if(!llmConfig(id))return send(res,400,{message:'Connect an LLM proxy before creating an AI workflow'});
+    try{const built=await createAgenticN8nWorkflow(id,req);if(!built)return send(res,409,{message:'Connect n8n first, or AI replies are already enabled'});return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic')?.n8nUrl+'/workflow/'+built.workflowId,activationWarning:built.activationWarning});}
+    catch(error){return send(res,error.status||502,{message:'Failed to create n8n AI workflow: '+(error.message||'Unknown error')});}
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='GET'){
-    const connection=store.n8nConnections.find(c=>c.accountId===id);
-    if(!connection)return send(res,200,{connected:false});
-    const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect');
-    return send(res,200,{connected:true,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,webhookUrl:subscription?.url||null,lastDelivery:subscription?.lastDelivery||null,connectedAt:connection.connectedAt});
+    const connections=store.n8nConnections.filter(c=>c.accountId===id);
+    if(!connections.length)return send(res,200,{connected:false});
+    const workflows=connections.map(connection=>{
+      const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name===(connection.kind==='agentic'?'n8n auto-connect (AI Agent)':'n8n auto-connect'));
+      return {kind:connection.kind,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,webhookUrl:connection.webhookUrl||subscription?.url||null,active:subscription?.enabled!==false,lastDelivery:subscription?.lastDelivery||null,connectedAt:connection.connectedAt};
+    });
+    const standard=workflows.find(w=>w.kind==='standard')||workflows[0];
+    return send(res,200,{connected:true,n8nUrl:connections.find(connection=>connection.kind==='standard')?.n8nUrl||null,...standard,workflows});
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='DELETE'){
+    const connections=store.n8nConnections.filter(c=>c.accountId===id);
+    for(const connection of connections){
+      const n8nApiKey=decryptSecret(connection.n8nApiKeyEncrypted);
+      if(n8nApiKey){
+        await deleteN8nWorkflowQuietly(connection.n8nUrl,n8nApiKey,connection.workflowId);
+        await deleteN8nCredentialQuietly(connection.n8nUrl,n8nApiKey,connection.llmCredentialId);
+        await deleteN8nCredentialQuietly(connection.n8nUrl,n8nApiKey,connection.outboundCredentialId);
+        await deleteN8nCredentialQuietly(connection.n8nUrl,n8nApiKey,connection.inboundCredentialId);
+      }
+    }
     store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
-    store.keys=store.keys.filter(k=>!(k.accountId===id&&k.name==='n8n auto-connect'));
-    store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.accountId===id&&item.name==='n8n auto-connect'));
+    store.keys=store.keys.filter(k=>!(k.accountId===id&&(k.name==='n8n auto-connect'||k.name==='n8n auto-connect (AI Agent)')));
+    store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.accountId===id&&(item.name==='n8n auto-connect'||item.name==='n8n auto-connect (AI Agent)')));
     await persist();
     return send(res,200,{ok:true});
   }

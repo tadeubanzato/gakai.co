@@ -12,7 +12,156 @@ function pairing(){const a=s.account;return `<main class="pairing"><section clas
 function sidebar(){return `<aside class="sidebar"><div class="logo"><b>G</b> Gakai</div><div class="account-switch">${s.accounts.map(a=>`<button data-account="${esc(a.id)}" class="account ${a.id===current()?'selected':''}"><i class="${a.status==='WORKING'?'good':''}"></i><span>${esc(a.label)}<small>${status(a.status)}</small></span></button>`).join('')}</div></aside>`}
 function inbox(){if(s.account?.status!=='WORKING')return `<header><h2>Inbox</h2></header><main class="empty"><h1>${esc(s.account?.label||'Account')} needs attention</h1><p>Reconnect this account to continue.</p><button id="reconnect" class="primary">Reconnect account</button></main>`;const query=(s.search||"").trim().toLowerCase();const visibleChats=query?s.chats.filter(c=>(String(c.name||c.id)+" "+String(c.lastMessage?.body||c.lastMessage?.text||"" )).toLowerCase().includes(query)):s.chats;return `<header><div><h2>Inbox</h2><small>${esc(s.account.label)} · ${status(s.account.status)}</small></div><button id="add" class="primary">+ Connect account</button></header><div class="inbox"><section class="chats ${s.chat?'mobile-hide':''}"><input id="search" value="${esc(s.search||"")}" placeholder="Search conversations">${s.chats.map(c=>`<button class="chat ${s.chat?.id===c.id?'active':''}" data-chat="${esc(c.id)}">${avatar(c)}<span><b>${esc(c.name||c.id)}</b><small>${esc(c.lastMessage?.body||c.lastMessage?.text||'Photo or message')}</small></span></button>`).join('')||'<p class="hint">No conversations found.</p>'}</section><section class="conversation ${!s.chat?'mobile-hide':''}">${s.chat?`<div class="conversation-head"><button id="back" class="back">‹</button>${avatar(s.chat)}<button type="button" id="chat-details" class="conversation-title">${esc(s.chat.name||s.chat.id)}</button></div><div class="messages">${s.messages.map(m=>`<article class="message ${m.fromMe?'mine':''}">${media(m)}${esc(m.body||m.text||'')}<time>${new Date((m.timestamp||0)*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}</time></article>`).join('')}</div><form id="send"><textarea id="text" placeholder="Type a message" rows="1"></textarea><button class="primary">Send</button></form>`:'<div class="blank">Select a conversation</div>'}</section></div>`}
 function accounts(){return `<header><h2>Connected accounts</h2><button id="add" class="primary">+ Connect account</button></header><main class="account-page">${s.accounts.map(a=>`<article class="account-card">${avatar(a)}<div><b>${esc(a.label)}</b><p>${esc(a.phone||'Waiting for profile')} · <em class="${a.status==='WORKING'?'ok':''}">${status(a.status)}</em></p></div><button data-open="${esc(a.id)}" class="secondary">Open inbox</button>${a.status==='WORKING'?'':`<button data-repair="${esc(a.id)}" class="primary">Reconnect</button>`}</article>`).join('')}</main>`}
-function render(){if(!s.accounts.length||s.view==='pairing'){root.innerHTML=pairing();document.querySelector('#create')?.addEventListener('click',create);document.querySelector('#retry')?.addEventListener('click',()=>restart(current()));return}root.innerHTML=`<div class="app">${sidebar()}<main class="main">${s.view==='accounts'?accounts():inbox()}</main></div>`;document.querySelectorAll('[data-view]').forEach(e=>e.onclick=()=>{s.view=e.dataset.view;render()});document.querySelectorAll('[data-account]').forEach(e=>e.onclick=()=>choose(e.dataset.account));document.querySelector('#add')?.addEventListener('click',()=>{s.adding=true;s.account=null;s.qr='';s.view='pairing';render()});document.querySelector('#reconnect')?.addEventListener('click',()=>{s.view='pairing';render();restart(current())});document.querySelectorAll('[data-repair]').forEach(e=>e.onclick=()=>{s.account=s.accounts.find(a=>a.id===e.dataset.repair);s.view='pairing';render();restart(current())});document.querySelectorAll('[data-open]').forEach(e=>e.onclick=()=>choose(e.dataset.open));document.querySelectorAll('[data-chat]').forEach(e=>e.onclick=()=>openChat(e.dataset.chat));document.querySelector('#back')?.addEventListener('click',()=>{s.chat=null;render()});document.querySelector('#search')?.addEventListener('input',e=>{s.search=e.target.value;document.querySelectorAll('[data-chat]').forEach(x=>x.hidden=!x.textContent.toLowerCase().includes(s.search.toLowerCase()))});document.querySelector('#send')?.addEventListener('submit',send)}
+// Collapsed from a chain of ~21 renderWithX wrapper reassignments (previously
+// each redefinition wrapped the prior render, all executing on every state
+// change). Behavior is unchanged; this is the same composed sequence in one
+// function instead of 21 layered closures.
+function render(){
+  if(!s.accounts.length||s.view==='pairing'){
+    root.innerHTML=pairing();
+    document.querySelector('#create')?.addEventListener('click',create);
+    document.querySelector('#retry')?.addEventListener('click',()=>restart(current()));
+    return;
+  }
+
+  const chatsTop=document.querySelector('.chats')?.scrollTop;
+  const messagesTop=document.querySelector('.messages')?.scrollTop;
+  const viewportFallback=viewportIntent||{kind:'anchor',anchor:viewportAnchor(document.querySelector('.messages'))};
+  viewportIntent=null;
+
+  root.innerHTML=`<div class="app">${sidebar()}<main class="main">${s.view==='accounts'?accounts():inbox()}</main></div>`;
+  document.querySelectorAll('[data-view]').forEach(e=>e.onclick=()=>{s.view=e.dataset.view;render()});
+  document.querySelectorAll('[data-account]').forEach(e=>e.onclick=()=>choose(e.dataset.account));
+  document.querySelector('#add')?.addEventListener('click',()=>{s.adding=true;s.account=null;s.qr='';s.view='pairing';render()});
+  document.querySelector('#reconnect')?.addEventListener('click',()=>{s.view='pairing';render();restart(current())});
+  document.querySelectorAll('[data-repair]').forEach(e=>e.onclick=()=>{s.account=s.accounts.find(a=>a.id===e.dataset.repair);s.view='pairing';render();restart(current())});
+  document.querySelectorAll('[data-open]').forEach(e=>e.onclick=()=>choose(e.dataset.open));
+  document.querySelectorAll('[data-chat]').forEach(e=>e.onclick=()=>openChat(e.dataset.chat));
+  document.querySelector('#back')?.addEventListener('click',()=>{s.chat=null;render()});
+  document.querySelector('#search')?.addEventListener('input',e=>{s.search=e.target.value;document.querySelectorAll('[data-chat]').forEach(x=>x.hidden=!x.textContent.toLowerCase().includes(s.search.toLowerCase()))});
+  document.querySelector('#send')?.addEventListener('submit',send);
+
+  document.querySelector('#text')?.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();e.currentTarget.form.requestSubmit()}});
+  if(s.chat)bottom();
+
+  document.querySelectorAll('.account').forEach(row=>{
+    const id=row.dataset.account;if(!id)return;
+    const cog=document.createElement('span');cog.className='account-cog';cog.textContent='⚙';cog.setAttribute('role','button');cog.setAttribute('tabindex','0');cog.setAttribute('aria-label','Account settings');
+    cog.onclick=e=>{e.preventDefault();e.stopPropagation();settings(s.accounts.find(a=>a.id===id))};
+    cog.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();settings(s.accounts.find(a=>a.id===id))}};
+    row.append(cog);
+  });
+
+  requestAnimationFrame(()=>{
+    const chats=document.querySelector('.chats');
+    const messages=document.querySelector('.messages');
+    if(chats&&chatsTop!==undefined)chats.scrollTop=chatsTop;
+    if(messages&&preserveMessagePosition&&messagesTop!==undefined)messages.scrollTop=messagesTop;
+    messages?.addEventListener('scroll',onMessageScroll,{passive:true});
+  });
+
+  requestAnimationFrame(()=>{
+    document.querySelectorAll('.message').forEach((bubble,index)=>{
+      const message=s.messages[index];
+      if(!message||bubble.querySelector(".message-sender"))return;
+      const sender=message.fromMe?{name:s.account?.label||"You",picture:s.account?.picture||null}:message.sender||{};
+      const label=String(sender.name||sender.id||'Unknown sender').replace(/@(c|s|g)\.us$/,'');
+      const row=document.createElement('div');row.className='message-sender';
+      if(sender.picture){const image=document.createElement('img');image.className='sender-avatar';image.src=sender.picture;image.referrerPolicy='no-referrer';image.alt='';row.append(image)}
+      else{const fallback=document.createElement('span');fallback.className='sender-avatar sender-letter';fallback.textContent=(label[0]||'?').toUpperCase();row.append(fallback)}
+      const name=document.createElement('b');name.textContent=label;row.append(name);bubble.prepend(row);
+    });
+  });
+
+  addLinkCards();
+
+  requestAnimationFrame(()=>{
+    const pane=document.querySelector('.messages'),key=messageScrollKey();
+    if(!pane||!key)return;
+    if(!pane.dataset.scrollPersistence){pane.dataset.scrollPersistence='1';pane.addEventListener('scroll',()=>saveMessageScroll(pane),{passive:true})}
+    let saved;try{saved=JSON.parse(sessionStorage.getItem(key)||'null')}catch{}
+    if(saved){pane.scrollTop=saved.atBottom?pane.scrollHeight:saved.top}
+  });
+
+  const appEl=document.querySelector('.app');
+  appEl?.classList.toggle('sidebar-collapsed',sidebarCollapsed);
+  document.querySelector('#sidebar-toggle')?.addEventListener('click',()=>{sidebarCollapsed=!sidebarCollapsed;sessionStorage.setItem('gakai.sidebar',sidebarCollapsed?'collapsed':'expanded');render()});
+  document.querySelector('#cancel-pair')?.addEventListener('click',leavePairing);
+  document.querySelector('#cancel-pair-bottom')?.addEventListener('click',leavePairing);
+
+  requestAnimationFrame(highlightOwnMentions);
+
+  const presenceHeader=root.querySelector('.conversation-head');
+  if(presenceHeader&&s.chat){
+    const title=presenceHeader.querySelector('b');
+    if(title&&!title.parentElement.classList.contains('chat-title')){
+      const box=document.createElement('div');box.className='chat-title';
+      title.replaceWith(box);box.append(title);
+      const indicator=document.createElement('span');indicator.className=`presence-status${activePresence?' is-live':''}`;indicator.textContent=activePresence||'';box.append(indicator);
+    }
+  }
+  const composer=root.querySelector('#text');
+  composer?.addEventListener('input',handleComposerInput);
+  composer?.addEventListener('blur',clearOwnTyping);
+
+  const chatsColumn=root.querySelector('.chats');
+  if(chatsColumn&&s.chatsLoading){
+    const loading=document.createElement('div');loading.className='chat-syncing';
+    loading.innerHTML='<span class="chat-spinner" aria-hidden="true"></span><span>WhatsApp is syncing conversations…</span>';
+    chatsColumn.append(loading);
+  }
+
+  root.querySelectorAll('[data-chat]').forEach(button=>{
+    const chat=s.chats.find(item=>item.id===button.dataset.chat);
+    const unread=Number(chat?.unreadCount)||0;
+    if(!unread)return;
+    const pill=document.createElement('span');pill.className='unread-pill';pill.textContent=unread>99?'99+':String(unread);
+    pill.setAttribute('aria-label',`${unread} unread messages`);button.append(pill);
+  });
+
+  const conversationHead=root.querySelector('.conversation-head');
+  if(conversationHead&&s.chat){
+    const deleteButton=document.createElement('button');
+    deleteButton.className='delete-chat';deleteButton.type='button';deleteButton.textContent='Delete conversation';
+    deleteButton.title='Delete conversation';deleteButton.setAttribute('aria-label','Delete conversation permanently');
+    deleteButton.onclick=async()=>{
+      const chat=s.chat;
+      if(!chat||!confirm(`Permanently delete this conversation and its message history? This cannot be undone.`))return;
+      deleteButton.disabled=true;
+      try{
+        await api(`/api/app/accounts/${encodeURIComponent(current())}/chats/${encodeURIComponent(chat.id)}`,{method:'DELETE'});
+        s.chats=s.chats.filter(item=>item.id!==chat.id);s.chat=null;s.messages=[];render();
+        notice('Conversation deleted');
+      }catch(error){deleteButton.disabled=false;notice(error.message||'Could not delete conversation')}
+    };
+    conversationHead.append(deleteButton);
+  }
+
+  enhanceAudioPlayers();
+  enhanceVideoPlayers();
+
+  markMessageNodes();addHistoryLoadingIndicator();
+  const viewportVersion=++viewportRenderVersion;
+  applyViewportIntent(viewportFallback,viewportVersion);
+
+  bindSmoothHistoryScroll();
+
+  enhanceContactCards();
+
+  root.querySelectorAll("[data-chat]").forEach(button=>{
+    const chat=s.chats.find(item=>item.id===button.dataset.chat);
+    const unread=Number(chat?.unreadCount)||0;
+    button.classList.toggle("has-unread",unread>0);
+    const name=button.querySelector("span > b")?.textContent||"Conversation";
+    button.setAttribute("aria-label",unread?`${name}, ${unread} unread messages`:`${name}, no unread messages`);
+  });
+
+  const searchInput=document.querySelector('#search');
+  if(searchInput){
+    const applySearch=()=>{s.search=searchInput.value;document.querySelectorAll('.chats [data-chat]').forEach(chat=>{chat.style.display=chat.textContent.toLowerCase().includes(s.search.trim().toLowerCase())?'':'none'})};
+    searchInput.value=s.search||'';searchInput.oninput=applySearch;applySearch();
+  }
+}
 let started=false;
 async function refresh(){try{const before=JSON.stringify({accounts:s.accounts.map(a=>[a.id,a.status,a.label]),active:current(),view:s.view,qr:s.qr});const d=await api('/api/app/accounts');s.accounts=d.accounts;if(!s.adding)s.account=s.account&&d.accounts.find(a=>a.id===s.account.id)||d.accounts.find(a=>a.status!=='WORKING')||d.accounts[0]||null;let qrChanged=false;if(s.account?.status==='SCAN_QR_CODE')qrChanged=await loadQr();if(s.account?.status==='WORKING'&&s.view==='pairing'&&!s.adding){s.view='inbox';await loadChats()}const after=JSON.stringify({accounts:s.accounts.map(a=>[a.id,a.status,a.label]),active:current(),view:s.view,qr:s.qr});if(!started||before!==after||qrChanged)render();started=true}catch(e){console.warn(e)}}
 async function create(){try{const d=await api('/api/app/accounts',{method:'POST',body:JSON.stringify({label:document.querySelector('#account-name').value})});s.adding=false;s.account=d.account;s.accounts.push(d.account);render();setTimeout(refresh,800)}catch(e){notice(e.message)}}
@@ -22,9 +171,8 @@ async function choose(id){s.adding=false;s.account=s.accounts.find(a=>a.id===id)
 async function loadChats(){try{const d=await api(`/api/app/accounts/${encodeURIComponent(current())}/chats`);s.chats=Array.isArray(d)?d:d.chats||[]}catch(e){notice(e.message)}}
 async function openChat(id){s.chat=s.chats.find(c=>c.id===id);try{const d=await api(`/api/app/accounts/${encodeURIComponent(current())}/messages?chatId=${encodeURIComponent(id)}`);s.messages=Array.isArray(d)?d:d.messages||[]}catch(e){notice(e.message)}render()}
 async function send(e){e.preventDefault();const text=document.querySelector('#text').value.trim();if(!text)return;try{await api(`/api/app/accounts/${encodeURIComponent(current())}/messages`,{method:'POST',body:JSON.stringify({chatId:s.chat.id,text})});await openChat(s.chat.id)}catch(e){notice(e.message)}}
-const previousRender=render,previousOpenChat=openChat;
+const previousOpenChat=openChat;
 function bottom(){requestAnimationFrame(()=>{const e=document.querySelector('.messages');if(e)e.scrollTop=e.scrollHeight})}
-render=()=>{previousRender();document.querySelector('#text')?.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();e.currentTarget.form.requestSubmit()}});if(s.chat)bottom()};
 openChat=async id=>{s.chat=s.chats.find(c=>c.id===id);s.messages=[];render();try{const d=await api(`/api/app/accounts/${encodeURIComponent(current())}/messages?chatId=${encodeURIComponent(id)}&limit=15`);if(s.chat?.id!==id)return;s.messages=(Array.isArray(d)?d:d.messages||[]).sort((a,b)=>(a.timestamp||0)-(b.timestamp||0));render();loadOlder(id)}catch(error){notice(error.message)}};
 async function loadOlder(id){try{const d=await api(`/api/app/accounts/${encodeURIComponent(current())}/messages?chatId=${encodeURIComponent(id)}&limit=45&offset=15`);if(s.chat?.id!==id)return;const all=[...s.messages,...(Array.isArray(d)?d:d.messages||[])];s.messages=[...new Map(all.map(m=>[m.id,m])).values()].sort((a,b)=>(a.timestamp||0)-(b.timestamp||0));render()}catch(error){console.warn(error)}}
 send=async e=>{e.preventDefault();const text=document.querySelector('#text').value.trim();if(!text)return;const pending={id:`pending-${Date.now()}`,body:text,fromMe:true,timestamp:Math.floor(Date.now()/1000),ackName:'PENDING'};s.messages.push(pending);render();try{const d=await api(`/api/app/accounts/${encodeURIComponent(current())}/messages`,{method:'POST',body:JSON.stringify({chatId:s.chat.id,text})});const i=s.messages.findIndex(m=>m.id===pending.id);if(i>=0)s.messages[i]={...pending,...d.message};render()}catch(error){s.messages=s.messages.filter(m=>m.id!==pending.id);render();notice(error.message)}};
@@ -43,8 +191,7 @@ let restoredWorkspace=false;
 refresh=async()=>{await storedRefresh();if(restoredWorkspace||!s.accounts.length||s.adding)return;restoredWorkspace=true;const accountId=sessionStorage.getItem('gakai.account');const account=s.accounts.find(a=>a.id===accountId)||s.account;if(!account||account.status!=='WORKING')return;await storedChoose(account.id);const chatId=sessionStorage.getItem(`gakai.chat.${account.id}`);if(chatId&&s.chats.some(c=>c.id===chatId))await storedOpen(chatId)};
 function authScreen(setup){root.innerHTML=`<main class="pairing"><section class="pair-card"><span class="eyebrow">GAKAI</span><h1>${setup?'Create your administrator login':'Welcome back'}</h1><p>${setup?'This protects connected accounts and integration keys.':'Sign in to manage your WhatsApp workspace.'}</p><form id="auth"><label>Password<input id="password" type="password" minlength="10" required autocomplete="current-password"></label><button class="primary wide">${setup?'Create secure login':'Sign in'}</button></form></section></main>`;document.querySelector('#auth').onsubmit=async e=>{e.preventDefault();try{await api(`/api/app/auth/${setup?'setup':'login'}`,{method:'POST',body:JSON.stringify({password:document.querySelector('#password').value})});if(setup)sessionStorage.setItem('gakai.first-pairing','1');location.reload()}catch(error){notice(error.message)}}}
 async function settings(account){let keys=[];try{keys=(await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys`)).keys}catch(error){notice(error.message)}const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;background:#0009;z-index:9;display:grid;place-items:center;padding:18px';overlay.innerHTML=`<section class="pair-card" style="max-height:90vh;overflow:auto;text-align:left"><button id="close" class="secondary" style="float:right">Close</button><span class="eyebrow">ACCOUNT SETTINGS</span><h1>${esc(account.label)}</h1><p>${esc(account.phone||'WhatsApp profile')} · ${esc(status(account.status))}</p><label>Personal account name<input id="label" value="${esc(account.label)}"></label><button id="save-label" class="primary">Save name</button><hr style="border-color:#293840;margin:24px 0"><h3>Integrations</h3><p>Create a key for an agent or external app. It is shown once and is restricted to this account.</p><label>Integration name<input id="key-name" placeholder="Claude agent"></label><button id="create-key" class="primary">Create integration key</button><div id="new-key"></div><div style="margin-top:18px">${keys.map(k=>`<p><b>${esc(k.name)}</b><br><small>${esc((k.scopes||[]).join(', '))} · ${k.lastUsedAt?'Last used '+esc(k.lastUsedAt):'Never used'}</small> <button class="secondary revoke" data-key="${esc(k.id)}">Revoke</button></p>`).join('')||'<small>No integration keys yet.</small>'}</div></section>`;document.body.append(overlay);overlay.querySelector('#close').onclick=()=>overlay.remove();overlay.querySelector('#save-label').onclick=async()=>{try{await api(`/api/app/accounts/${encodeURIComponent(account.id)}/label`,{method:'PATCH',body:JSON.stringify({label:overlay.querySelector('#label').value})});overlay.remove();await refresh()}catch(error){notice(error.message)}};overlay.querySelector('#create-key').onclick=async()=>{try{const d=await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys`,{method:'POST',body:JSON.stringify({name:overlay.querySelector('#key-name').value,scopes:['messages:read','messages:send']})});overlay.querySelector('#new-key').innerHTML=`<p><b>Copy this key now — it will not be shown again.</b><br><code style="word-break:break-all">${esc(d.token)}</code></p><p><small>Use it as: Authorization: Bearer your-key<br>Endpoints: /api/integrations/v1/chats, /messages</small></p>`}catch(error){notice(error.message)}};overlay.querySelectorAll('.revoke').forEach(button=>button.onclick=async()=>{await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys/${button.dataset.key}`,{method:'DELETE'});overlay.remove();settings(account)})}
-const settingsRender=render;render=()=>{settingsRender();document.querySelectorAll('.account').forEach(row=>{const id=row.dataset.account;if(!id)return;const cog=document.createElement('span');cog.className='account-cog';cog.textContent='⚙';cog.setAttribute('role','button');cog.setAttribute('tabindex','0');cog.setAttribute('aria-label','Account settings');cog.onclick=e=>{e.preventDefault();e.stopPropagation();settings(s.accounts.find(a=>a.id===id))};cog.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();settings(s.accounts.find(a=>a.id===id))}};row.append(cog)})};
-async function boot(){const state=await (await fetch('/api/app/auth/state')).json();if(!state.authenticated)return authScreen(state.setup,state.setup||state.hasUsername);await refresh();if(!s.accounts.length)await create();setInterval(()=>{if(!document.hidden)refresh()},10000)}
+async function boot(){const state=await (await fetch('/api/app/auth/state')).json();if(!state.authenticated)return authScreen(state.setup,state.setup||state.hasUsername);await refresh();if(!s.accounts.length)await create();setInterval(()=>{if(!document.hidden)refresh()},60000)}
 boot();
 
 // Resource-safe chat loading: never fan out background provider requests. WEBJS
@@ -56,19 +203,6 @@ openChat=async id=>{const request=++chatRequest;s.chat=s.chats.find(c=>c.id===id
 // in only when the user reaches the top of the message pane.
 let preserveMessagePosition=true;
 let historyState={chatId:null,offset:0,loading:false,exhausted:false};
-const renderedWithScrollState=render;
-render=()=>{
-  const chatsTop=document.querySelector('.chats')?.scrollTop;
-  const messagesTop=document.querySelector('.messages')?.scrollTop;
-  renderedWithScrollState();
-  requestAnimationFrame(()=>{
-    const chats=document.querySelector('.chats');
-    const messages=document.querySelector('.messages');
-    if(chats&&chatsTop!==undefined)chats.scrollTop=chatsTop;
-    if(messages&&preserveMessagePosition&&messagesTop!==undefined)messages.scrollTop=messagesTop;
-    messages?.addEventListener('scroll',onMessageScroll,{passive:true});
-  });
-};
 async function onMessageScroll(event){
   const pane=event.currentTarget;
   if(pane.scrollTop>80||historyState.loading||historyState.exhausted||!s.chat)return;
@@ -104,23 +238,6 @@ send=async event=>{
 
 // Group messages need an author label; this runs after the existing renderer so
 // it does not alter the inbox layout or its loading/scroll behaviour.
-const renderWithGroupSenders=render;
-render=()=>{
-  renderWithGroupSenders();
-  requestAnimationFrame(()=>{
-    document.querySelectorAll('.message').forEach((bubble,index)=>{
-      const message=s.messages[index];
-      if(!message||bubble.querySelector(".message-sender"))return;
-      const sender=message.fromMe?{name:s.account?.label||"You",picture:s.account?.picture||null}:message.sender||{};
-      const label=String(sender.name||sender.id||'Unknown sender').replace(/@(c|s|g)\.us$/,'');
-      const row=document.createElement('div');row.className='message-sender';
-      if(sender.picture){const image=document.createElement('img');image.className='sender-avatar';image.src=sender.picture;image.referrerPolicy='no-referrer';image.alt='';row.append(image)}
-      else{const fallback=document.createElement('span');fallback.className='sender-avatar sender-letter';fallback.textContent=(label[0]||'?').toUpperCase();row.append(fallback)}
-      const name=document.createElement('b');name.textContent=label;row.append(name);bubble.prepend(row);
-    });
-  });
-};
-
 // The final low-resource chat loader replaces earlier wrappers, so persist the
 // selected chat here as well. This is what refresh restoration reads.
 const openChatWithWorkspaceRestore=openChat;
@@ -156,8 +273,6 @@ function addLinkCards(){
     const domain=document.createElement('em');domain.textContent=url.hostname;detail.append(domain);card.append(detail);bubble.append(card);
   }));
 }
-const renderWithPreviews=render;
-render=()=>{renderWithPreviews();addLinkCards()};
 const openChatWithPreviews=openChat;
 openChat=async id=>{await openChatWithPreviews(id);if(s.chat?.id===id)loadVisiblePreviews(id)};
 
@@ -200,18 +315,6 @@ function saveMessageScroll(pane){
   const key=messageScrollKey();if(!key)return;
   sessionStorage.setItem(key,JSON.stringify({top:pane.scrollTop,atBottom:pane.scrollTop+pane.clientHeight>=pane.scrollHeight-4}));
 }
-const renderWithScrollPersistence=render;
-render=()=>{
-  renderWithScrollPersistence();
-  requestAnimationFrame(()=>{
-    const pane=document.querySelector('.messages'),key=messageScrollKey();
-    if(!pane||!key)return;
-    if(!pane.dataset.scrollPersistence){pane.dataset.scrollPersistence='1';pane.addEventListener('scroll',()=>saveMessageScroll(pane),{passive:true})}
-    let saved;try{saved=JSON.parse(sessionStorage.getItem(key)||'null')}catch{}
-    if(saved){pane.scrollTop=saved.atBottom?pane.scrollHeight:saved.top}
-  });
-};
-
 // Workspace controls: collapsible account rail, resilient QR pairing, and
 // focused account settings actions.
 let sidebarCollapsed=sessionStorage.getItem('gakai.sidebar')==='collapsed';
@@ -222,8 +325,6 @@ create=async()=>{const input=document.querySelector('#account-name');try{const d
 function leavePairing(){s.adding=false;s.qr='';const account=s.accounts.find(item=>item.status==='WORKING')||s.accounts[0]||null;s.account=account;s.chat=null;s.view=account?.status==='WORKING'?'inbox':'pairing';if(s.view==='inbox')loadChats();render()}
 let closeSettingsOverlay=null;
 settings=async account=>{let keys=[];try{keys=(await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys`)).keys||[]}catch(error){notice(error.message)}const overlay=document.createElement('div');overlay.className='settings-overlay';overlay.innerHTML=`<section class="pair-card settings-card"><button class="modal-close" id="settings-close" aria-label="Close">×</button><span class="eyebrow">ACCOUNT SETTINGS</span><h1>${esc(account.label)}</h1><p>${esc(account.phone||'WhatsApp profile')} · ${esc(status(account.status))}</p><label>Personal account name<input id="label" value="${esc(account.label)}"></label><button id="save-label" class="primary">Save name</button><hr><h3>Connection</h3><p>Generate a fresh QR code to relink this WhatsApp account.</p><button id="relink" class="secondary">↻ Generate new QR code</button><hr><h3>Integrations</h3><label>Integration name<input id="key-name" placeholder="Claude agent"></label><button id="create-key" class="primary">Create integration key</button><div id="new-key"></div><div class="key-list">${keys.map(key=>`<p><b>${esc(key.name)}</b><br><small>${esc((key.scopes||[]).join(', '))} · ${key.lastUsedAt?'Last used '+esc(key.lastUsedAt):'Never used'}</small> <button class="secondary revoke" data-key="${esc(key.id)}">Revoke</button></p>`).join('')||'<small>No integration keys yet.</small>'}</div><hr><button id="delete-account" class="danger">Delete account</button></section>`;document.body.append(overlay);const close=()=>{overlay.remove();if(closeSettingsOverlay===close)closeSettingsOverlay=null};closeSettingsOverlay=close;overlay.querySelector('#settings-close').onclick=close;overlay.onclick=event=>{if(event.target===overlay)close()};overlay.querySelector('#save-label').onclick=async()=>{try{await api(`/api/app/accounts/${encodeURIComponent(account.id)}/label`,{method:'PATCH',body:JSON.stringify({label:overlay.querySelector('#label').value})});close();await refresh()}catch(error){notice(error.message)}};overlay.querySelector('#relink').onclick=async()=>{close();s.adding=false;s.account=account;s.view='pairing';s.qr='';render();await restart(account.id);pollForQr()};overlay.querySelector('#create-key').onclick=async()=>{try{const data=await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys`,{method:'POST',body:JSON.stringify({name:overlay.querySelector('#key-name').value,scopes:['messages:read','messages:send']})});overlay.querySelector('#new-key').innerHTML=`<div class="new-key"><code>${esc(data.token)}</code><button id="copy-key" class="icon-button" aria-label="Copy API key" title="Copy API key">⧉</button></div><small>Copy this key now — it will not be shown again.</small>`;overlay.querySelector('#copy-key').onclick=async()=>{try{await navigator.clipboard.writeText(data.token);notice('API key copied')}catch{notice('Copy failed; select the key manually')}}}catch(error){notice(error.message)}};overlay.querySelectorAll('.revoke').forEach(button=>button.onclick=async()=>{await api(`/api/app/accounts/${encodeURIComponent(account.id)}/integration-keys/${button.dataset.key}`,{method:'DELETE'});close();settings(account)});overlay.querySelector('#delete-account').onclick=async()=>{if(!confirm(`Delete ${account.label}? This removes the account from Gakai.`))return;try{await api(`/api/app/accounts/${encodeURIComponent(account.id)}`,{method:'DELETE'});close();s.accounts=s.accounts.filter(item=>item.id!==account.id);s.account=s.accounts[0]||null;s.chat=null;s.view='inbox';render();await refresh()}catch(error){notice(error.message)}}};
-const renderWithWorkspaceControls=render;
-render=()=>{renderWithWorkspaceControls();const app=document.querySelector('.app');app?.classList.toggle('sidebar-collapsed',sidebarCollapsed);document.querySelector('#sidebar-toggle')?.addEventListener('click',()=>{sidebarCollapsed=!sidebarCollapsed;sessionStorage.setItem('gakai.sidebar',sidebarCollapsed?'collapsed':'expanded');render()});document.querySelector('#cancel-pair')?.addEventListener('click',leavePairing);document.querySelector('#cancel-pair-bottom')?.addEventListener('click',leavePairing)};
 document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;if(closeSettingsOverlay){closeSettingsOverlay();return}if(s.view==='pairing'&&s.accounts.length)leavePairing()});
 
 function highlightOwnMentions(){
@@ -236,8 +337,6 @@ function highlightOwnMentions(){
     nodes.forEach(node=>{if(!pattern.test(node.data))return;pattern.lastIndex=0;const fragment=document.createDocumentFragment();let last=0;node.data.replace(pattern,(match,_name,offset)=>{fragment.append(document.createTextNode(node.data.slice(last,offset)));const tag=document.createElement('span');tag.className='own-mention';tag.textContent=match;fragment.append(tag);last=offset+match.length;return match});fragment.append(document.createTextNode(node.data.slice(last)));node.replaceWith(fragment)});
   });
 }
-const renderWithOwnMentions=render;
-render=()=>{renderWithOwnMentions();requestAnimationFrame(highlightOwnMentions)};
 
 // In the compact rail, an account avatar is an expand affordance first.
 document.addEventListener('click',event=>{
@@ -273,9 +372,7 @@ async function loadPresence(chatId=s.chat?.id){
 }
 function startPresencePolling(chatId=s.chat?.id){
   clearInterval(presencePoll);presencePoll=null;
-  if(!chatId)return;
-  loadPresence(chatId);
-  presencePoll=setInterval(()=>{if(!document.hidden)loadPresence(chatId)},5000);
+  // The WebJS provider presence subscription is unsupported; avoid retry polling.
 }
 async function setOwnPresence(presence,chatId=s.chat?.id){
   if(!chatId||!current())return;
@@ -287,26 +384,10 @@ function clearOwnTyping(){
 }
 function handleComposerInput(){
   const chatId=s.chat?.id;if(!chatId)return;
-  if(typingChatId!==chatId){clearOwnTyping();typingChatId=chatId;setOwnPresence('typing',chatId)}
+  if(typingChatId!==chatId){clearOwnTyping();typingChatId=chatId;setOwnPresence("typing",chatId)}
   clearTimeout(typingIdleTimer);
   typingIdleTimer=setTimeout(clearOwnTyping,2500);
 }
-const renderWithPresence=render;
-render=()=>{
-  renderWithPresence();
-  const header=root.querySelector('.conversation-head');
-  if(header&&s.chat){
-    const title=header.querySelector('b');
-    if(title&&!title.parentElement.classList.contains('chat-title')){
-      const box=document.createElement('div');box.className='chat-title';
-      title.replaceWith(box);box.append(title);
-      const indicator=document.createElement('span');indicator.className=`presence-status${activePresence?' is-live':''}`;indicator.textContent=activePresence||'';box.append(indicator);
-    }
-  }
-  const composer=root.querySelector('#text');
-  composer?.addEventListener('input',handleComposerInput);
-  composer?.addEventListener('blur',clearOwnTyping);
-};
 const openChatWithPresence=openChat;
 openChat=async id=>{
   if(s.chat?.id&&s.chat.id!==id)clearOwnTyping();
@@ -460,16 +541,6 @@ loadChats=async()=>{
   try{await loadChatsWithLoadingIndicator()}
   finally{s.chatsLoading=false;render()}
 };
-const renderWithChatLoadingIndicator=render;
-render=()=>{
-  renderWithChatLoadingIndicator();
-  const column=root.querySelector('.chats');
-  if(!column||!s.chatsLoading)return;
-  const loading=document.createElement('div');
-  loading.className='chat-syncing';
-  loading.innerHTML='<span class="chat-spinner" aria-hidden="true"></span><span>WhatsApp is syncing conversations…</span>';
-  column.append(loading);
-};
 
 // First-run registration asks for an administrator username and password.
 authScreen=(setup,showUsername=true)=>{
@@ -523,17 +594,6 @@ addLinkCards=()=>{
 
 // Unread counts are visible on the conversation list and clear immediately
 // when the user opens that chat, then reconcile with the provider on refresh.
-const renderWithUnreadPills=render;
-render=()=>{
-  renderWithUnreadPills();
-  root.querySelectorAll('[data-chat]').forEach(button=>{
-    const chat=s.chats.find(item=>item.id===button.dataset.chat);
-    const unread=Number(chat?.unreadCount)||0;
-    if(!unread)return;
-    const pill=document.createElement('span');pill.className='unread-pill';pill.textContent=unread>99?'99+':String(unread);
-    pill.setAttribute('aria-label',`${unread} unread messages`);button.append(pill);
-  });
-};
 const openChatWithUnreadReset=openChat;
 openChat=async id=>{
   const chat=s.chats.find(item=>item.id===id);
@@ -557,26 +617,6 @@ loadChats=async()=>{
 };
 
 // Permanent chat deletion: Gakai provider runtime removes the chat and its stored history.
-const renderWithChatDelete=render;
-render=()=>{
-  renderWithChatDelete();
-  const header=root.querySelector('.conversation-head');
-  if(!header||!s.chat)return;
-  const button=document.createElement('button');
-  button.className='delete-chat';button.type='button';button.textContent='Delete conversation';
-  button.title='Delete conversation';button.setAttribute('aria-label','Delete conversation permanently');
-  button.onclick=async()=>{
-    const chat=s.chat;
-    if(!chat||!confirm(`Permanently delete this conversation and its message history? This cannot be undone.`))return;
-    button.disabled=true;
-    try{
-      await api(`/api/app/accounts/${encodeURIComponent(current())}/chats/${encodeURIComponent(chat.id)}`,{method:'DELETE'});
-      s.chats=s.chats.filter(item=>item.id!==chat.id);s.chat=null;s.messages=[];render();
-      notice('Conversation deleted');
-    }catch(error){button.disabled=false;notice(error.message||'Could not delete conversation')}
-  };
-  header.append(button);
-};
 
 // Connecting an additional account starts QR pairing immediately; the old
 // placeholder screen is never shown for an explicit Connect account action.
@@ -629,7 +669,7 @@ addLinkCards=()=>{
       if(!preview.title&&data.title)preview.title=data.title;
       if(!preview.description&&data.description)preview.description=data.description;
       render();
-    }).catch(()=>{}).finally(()=>instagramPreviewRequests.delete(preview.url));
+    }).catch(()=>{});
   }));
 };
 
@@ -649,7 +689,7 @@ addLinkCards=()=>{
       if(!preview.title&&data.title)preview.title=data.title;
       if(!preview.description&&data.description)preview.description=data.description;
       render();
-    }).catch(()=>{}).finally(()=>genericPreviewRequests.delete(preview.url));
+    }).catch(()=>{});
   }));
 };
 
@@ -680,9 +720,6 @@ function enhanceAudioPlayers(){
     if(audio.readyState>=1)metadata();
   });
 }
-const renderWithAudioPlayers=render;
-render=()=>{renderWithAudioPlayers();enhanceAudioPlayers()};
-
 const formatVideoTime=value=>{
   const seconds=Math.max(0,Math.floor(Number(value)||0));
   return `${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;
@@ -709,8 +746,6 @@ function enhanceVideoPlayers(){
     if(video.readyState>=1)metadata();
   });
 }
-const renderWithVideoPlayers=render;
-render=()=>{renderWithVideoPlayers();enhanceVideoPlayers()};
 
 // Chat viewport controller -------------------------------------------------
 // Earlier UI layers rebuild the message pane and each made its own best-effort
@@ -744,16 +779,6 @@ function addHistoryLoadingIndicator(){
   const indicator=document.createElement('div');indicator.className='history-loading';indicator.setAttribute('role','status');indicator.innerHTML='<span class="chat-spinner" aria-hidden="true"></span><span>Loading earlier messages…</span>';
   pane.append(indicator);
 }
-const renderWithStableViewport=render;
-render=()=>{
-  const fallback=viewportIntent||{kind:'anchor',anchor:viewportAnchor(root.querySelector('.messages'))};
-  viewportIntent=null;
-  renderWithStableViewport();
-  markMessageNodes();addHistoryLoadingIndicator();
-  const version=++viewportRenderVersion;
-  applyViewportIntent(fallback,version);
-};
-
 // Disable the previous wheel-only loader. It competes with scroll restoration
 // and is replaced by a normal, gesture-gated scroll listener below.
 onMessageScroll=()=>{};
@@ -787,8 +812,6 @@ function bindSmoothHistoryScroll(){
   pane.dataset.smoothHistoryBound='true';
   pane.addEventListener('scroll',()=>{if(Date.now()-lastHistoryGesture<1600&&pane.scrollTop<=64)loadOlderSmooth(pane)},{passive:true});
 }
-const renderWithSmoothHistoryBinding=render;
-render=()=>{renderWithSmoothHistoryBinding();bindSmoothHistoryScroll()};
 
 function settleAtLatest(chatId){
   const move=()=>{if(s.chat?.id!==chatId)return;viewportIntent={kind:'bottom'};render()};
@@ -890,27 +913,15 @@ function enhanceContactCards(){
     });
   });
 }
-const renderWithContactCards=render;
-render=()=>{renderWithContactCards();enhanceContactCards()};
-
-// Make unread conversations unmistakable in the inbox list.
-const renderWithUnreadState=render;
-render=()=>{
-  renderWithUnreadState();
-  root.querySelectorAll("[data-chat]").forEach(button=>{
-    const chat=s.chats.find(item=>item.id===button.dataset.chat);
-    const unread=Number(chat?.unreadCount)||0;
-    button.classList.toggle("has-unread",unread>0);
-    const name=button.querySelector("span > b")?.textContent||"Conversation";
-    button.setAttribute("aria-label",unread?`${name}, ${unread} unread messages`:`${name}, no unread messages`);
-  });
-};
 
 // Refresh inbox metadata without rebuilding the active conversation when nothing changed.
 const refreshWithInboxUnreadPolling=refresh;
+let nextInboxMetadataRefresh=0;
 const unreadChatFingerprint=chats=>JSON.stringify(chats.map(chat=>[chat.id,chat.timestamp,chat.lastMessage?.timestamp,chat.lastMessage?.body,chat.lastMessage?.text,chat.unreadCount]));
 async function refreshInboxUnreadState(){
   if(!s.account||s.account.status!=="WORKING"||s.view!=="inbox"||s.adding)return;
+  if(Date.now()<nextInboxMetadataRefresh)return;
+  nextInboxMetadataRefresh=Date.now()+60000;
   try{
     const response=await api(`/api/app/accounts/${encodeURIComponent(current())}/chats`);
     const chats=(Array.isArray(response)?response:response.chats||[]).sort((left,right)=>chatOrderTimestamp(right.timestamp||right.lastMessage?.timestamp)-chatOrderTimestamp(left.timestamp||left.lastMessage?.timestamp));
@@ -966,7 +977,11 @@ Tone: friendly and concise
 ## Knowledge base
 [Add any context the AI should know: FAQs, your hours, your products, your policies, etc.]
 `;
-const accountDetailsWithLLM=accountDetails;accountDetails=async account=>{await accountDetailsWithLLM(account);const llmBtn=root.querySelector('[data-service="llm"]');if(!llmBtn)return;const id=encodeURIComponent(account.id);const renderLLM=async()=>{const buttons=[...root.querySelectorAll('[data-service]')];buttons.forEach(b=>b.classList.toggle('on',b===llmBtn));const panel=root.querySelector('#service-detail');let cfg;try{cfg=await api(`/api/app/accounts/${id}/llm`);}catch{cfg={configured:false};}if(!cfg.configured){llmBtn.classList.remove('has-integration');panel.innerHTML='<h3>LLM Proxy</h3><p>Connect an OpenAI-compatible LLM proxy — LiteLLM, OpenRouter, Ollama, or any OpenAI-compatible endpoint.</p><form id="llm-form"><label>Proxy URL<input id="llm-url" type="url" required placeholder="http://litellm:4000 or https://openrouter.ai/api/v1"></label><label>API Key<input id="llm-key" type="password" required placeholder="Your proxy API key"></label><label>Model<input id="llm-model" required placeholder="claude-sonnet-4-5  ·  gpt-4o  ·  llama3"></label><button class="primary" id="llm-save-btn">Connect &amp; Test</button></form><div id="llm-status"></div>';}else{llmBtn.classList.add('has-integration');panel.innerHTML=`<h3>LLM Proxy</h3><div class="n8n-connected-card"><b>${esc(cfg.baseUrl)}</b><span class="llm-model-badge">${esc(cfg.model)}</span></div><div class="llm-native-status">${cfg.nativeEnabled?'<span class="llm-native-on">● Native AI replies on</span>':'<span class="llm-native-off">○ Native AI replies off</span>'}</div><div class="llm-skill-section"><div class="llm-skill-header"><span>AI Skill</span><small>Gakai uses this as the system prompt for every reply</small></div><textarea id="llm-skill" class="llm-skill-editor" spellcheck="false">${esc(cfg.systemPrompt||LLM_SKILL_TEMPLATE)}</textarea><div class="llm-skill-actions"><label class="llm-toggle"><input type="checkbox" id="llm-native-edit" ${cfg.nativeEnabled?'checked':''}> Enable native AI replies (no n8n needed)</label><button class="primary" id="llm-skill-save">Save skill</button></div></div><hr><button type="button" class="danger" id="llm-disconnect">Disconnect</button>`;panel.querySelector('#llm-skill-save').onclick=async()=>{const skill=panel.querySelector('#llm-skill').value;const native=panel.querySelector('#llm-native-edit').checked;try{await api(`/api/app/accounts/${id}/llm`,{method:'POST',body:JSON.stringify({baseUrl:cfg.baseUrl,apiKey:'__keep__',model:cfg.model,systemPrompt:skill,nativeEnabled:native})});notice('AI skill saved');}catch(err){notice(err.message);}};panel.querySelector('#llm-disconnect').onclick=async()=>{if(!confirm('Disconnect LLM proxy?'))return;try{await api(`/api/app/accounts/${id}/llm`,{method:'DELETE'});await renderLLM();}catch(err){notice(err.message);}};return;}const form=panel.querySelector('#llm-form');if(!form)return;form.onsubmit=async e=>{e.preventDefault();const btn=panel.querySelector('#llm-save-btn'),statusDiv=panel.querySelector('#llm-status');btn.disabled=true;statusDiv.textContent='Testing connection…';try{await api(`/api/app/accounts/${id}/llm`,{method:'POST',body:JSON.stringify({baseUrl:panel.querySelector('#llm-url').value.trim(),apiKey:panel.querySelector('#llm-key').value.trim(),model:panel.querySelector('#llm-model').value.trim(),systemPrompt:LLM_SKILL_TEMPLATE,nativeEnabled:false})});await renderLLM();notice('LLM proxy connected');}catch(err){statusDiv.textContent=err.message||'Connection failed';btn.disabled=false;}};};llmBtn.onclick=renderLLM;const llmCfg=await api(`/api/app/accounts/${id}/llm`).catch(()=>({configured:false}));llmBtn.classList.toggle('has-integration',Boolean(llmCfg.configured));};
+const accountDetailsWithLLM=accountDetails;accountDetails=async account=>{await accountDetailsWithLLM(account);const llmBtn=root.querySelector('[data-service="llm"]');if(!llmBtn)return;const id=encodeURIComponent(account.id);const renderLLM=async()=>{const buttons=[...root.querySelectorAll('[data-service]')];buttons.forEach(b=>b.classList.toggle('on',b===llmBtn));const panel=root.querySelector('#service-detail');let cfg;try{cfg=await api(`/api/app/accounts/${id}/llm`);}catch{cfg={configured:false};}if(!cfg.configured){llmBtn.classList.remove('has-integration');panel.innerHTML='<h3>LLM Proxy</h3><p>Connect an OpenAI-compatible LLM proxy — LiteLLM, OpenRouter, Ollama, or any OpenAI-compatible endpoint.</p><form id="llm-form"><label>Proxy URL<input id="llm-url" type="url" required placeholder="http://litellm:4000 or https://openrouter.ai/api/v1"></label><label>API Key<input id="llm-key" type="password" required placeholder="Your proxy API key"></label><label>Model<input id="llm-model" required placeholder="claude-sonnet-4-5  ·  gpt-4o  ·  llama3"></label><button class="primary" id="llm-save-btn">Connect &amp; Test</button></form><div id="llm-status"></div>';}else{llmBtn.classList.add('has-integration');panel.innerHTML=`<h3>LLM Proxy</h3><div class="n8n-connected-card"><b>${esc(cfg.baseUrl)}</b><span class="llm-model-badge">${esc(cfg.model)}</span></div><div class="llm-native-status">${cfg.nativeEnabled?'<span class="llm-native-on">● Native AI replies on</span>':'<span class="llm-native-off">○ Native AI replies off</span>'}</div><div class="llm-skill-section"><div class="llm-skill-header"><span>AI Skill</span><small>Gakai uses this as the system prompt for every reply</small></div><textarea id="llm-skill" class="llm-skill-editor" spellcheck="false">${esc(cfg.systemPrompt||LLM_SKILL_TEMPLATE)}</textarea><div class="llm-skill-actions"><label class="llm-toggle"><input type="checkbox" id="llm-native-edit" ${cfg.nativeEnabled?'checked':''}> Enable native AI replies (no n8n needed)</label><button class="primary" id="llm-skill-save">Save skill</button></div></div><hr><button type="button" class="danger" id="llm-disconnect">Disconnect</button>`;panel.querySelector('#llm-skill-save').onclick=async()=>{const skill=panel.querySelector('#llm-skill').value;const native=panel.querySelector('#llm-native-edit').checked;try{await api(`/api/app/accounts/${id}/llm`,{method:'POST',body:JSON.stringify({baseUrl:cfg.baseUrl,apiKey:'__keep__',model:cfg.model,systemPrompt:skill,nativeEnabled:native})});notice('AI skill saved');}catch(err){notice(err.message);}};panel.querySelector('#llm-disconnect').onclick=async()=>{if(!confirm('Disconnect LLM proxy?'))return;try{await api(`/api/app/accounts/${id}/llm`,{method:'DELETE'});await renderLLM();}catch(err){notice(err.message);}};return;}const form=panel.querySelector('#llm-form');if(!form)return;form.onsubmit=async e=>{e.preventDefault();const btn=panel.querySelector('#llm-save-btn'),statusDiv=panel.querySelector('#llm-status');btn.disabled=true;statusDiv.textContent='Testing connection…';try{await api(`/api/app/accounts/${id}/llm`,{method:'POST',body:JSON.stringify({baseUrl:panel.querySelector('#llm-url').value.trim(),apiKey:panel.querySelector('#llm-key').value.trim(),model:panel.querySelector('#llm-model').value.trim(),systemPrompt:LLM_SKILL_TEMPLATE,nativeEnabled:false})});await renderLLM();llmBtn.click();notice('LLM proxy connected');}catch(err){statusDiv.textContent=err.message||'Connection failed';btn.disabled=false;}};};llmBtn.onclick=renderLLM;const llmCfg=await api(`/api/app/accounts/${id}/llm`).catch(()=>({configured:false}));llmBtn.classList.toggle('has-integration',Boolean(llmCfg.configured));};
 const accountDetailsWithPersistentN8nBadge=accountDetails;accountDetails=async account=>{await accountDetailsWithPersistentN8nBadge(account);const button=root.querySelector('[data-service="n8n"]');if(!button)return;const apply=async()=>{const data=await api(`/api/app/accounts/${encodeURIComponent(account.id)}/automations`).catch(()=>({subscriptions:[]}));let badge=button.querySelector('.n8n-service-badge');if(data.subscriptions?.length){if(!badge){badge=document.createElement('span');badge.className='n8n-service-badge';badge.textContent='✓';button.append(badge)}}else badge?.remove()};await apply();const prior=button.onclick;button.onclick=async()=>{await prior();await apply()};};
-const renderWithPersistentSearch=render;render=()=>{renderWithPersistentSearch();const input=document.querySelector('#search');if(!input)return;const apply=()=>{s.search=input.value;document.querySelectorAll('.chats [data-chat]').forEach(chat=>{chat.style.display=chat.textContent.toLowerCase().includes(s.search.trim().toLowerCase())?'':'none'})};input.value=s.search||'';input.oninput=apply;apply()};
 document.addEventListener("click",async event=>{const button=event.target.closest("#chat-details");if(!button||!s.chat)return;const chat=s.chat;let contact={};if(!String(chat.id||"").endsWith("@g.us")){contact=(await api(`/api/app/accounts/${encodeURIComponent(current())}/contact?contactId=${encodeURIComponent(chat.id)}`).catch(()=>({contact:{}}))).contact||{}}const phone=contact.phone||chat.phone||(String(chat.id).endsWith("@c.us")?String(chat.id).slice(0,-5):"Not available");const modal=document.createElement("div");modal.className="chat-details-modal";modal.innerHTML=`<section class="chat-details-card"><button type="button" class="modal-close" aria-label="Close">×</button><span class="eyebrow">CONVERSATION DETAILS</span><h2></h2><dl><dt>Type</dt><dd></dd><dt>Phone</dt><dd></dd><dt>Chat ID</dt><dd class="chat-details-id"><code></code><button type="button" class="icon-button chat-id-copy" aria-label="Copy chat ID" title="Copy chat ID">⧉</button></dd><dt>Status</dt><dd></dd></dl></section>`;const values=[chat.name||chat.id,chat.kind||"direct",phone,contact.status||contact.about||chat.status||"Not available"];modal.querySelector("h2").textContent=values[0];[...modal.querySelectorAll("dd:not(.chat-details-id)")].forEach((node,index)=>node.textContent=values[index+1]);modal.querySelector(".chat-details-id code").textContent=chat.id;const copy=async()=>{try{if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(chat.id);else throw Error()}catch{const area=document.createElement("textarea");area.value=chat.id;area.style.position="fixed";area.style.opacity="0";document.body.append(area);area.select();document.execCommand("copy");area.remove()}};modal.querySelector(".chat-id-copy").onclick=async()=>{await copy();notice("Chat ID copied")};const close=()=>modal.remove();modal.querySelector(".modal-close").onclick=close;modal.onclick=e=>{if(e.target===modal)close()};document.body.append(modal)});
+const accountDetailsWithAiN8n=accountDetails;accountDetails=async account=>{await accountDetailsWithAiN8n(account);const llmButton=root.querySelector("[data-service=llm]");if(!llmButton)return;const openLlm=llmButton.onclick;llmButton.onclick=async()=>{await openLlm();const panel=root.querySelector("#service-detail");if(!panel)return;const cfg=await api(`/api/app/accounts/${encodeURIComponent(account.id)}/llm`).catch(()=>({configured:false}));if(!cfg.configured)return;const n8n=await api(`/api/app/accounts/${encodeURIComponent(account.id)}/n8n/connect`).catch(()=>({connected:false}));const box=document.createElement("section");box.className="llm-n8n-action";const agent=n8n.workflows?.find(workflow=>workflow.kind==="agentic");if(agent){box.innerHTML=`<b>n8n AI workflow created</b><small>Your separate AI Agent workflow is ready for review.</small><a class='secondary' href="${esc(agent.workflowUrl||"#")}" target="_blank" rel="noopener">Open AI workflow ↗</a>`;}else if(n8n.connected){box.innerHTML="<b>Use this proxy in n8n</b><small>Create a separate AI Agent workflow with your saved proxy and skill. Your existing workflow remains available.</small><button type='button' class='primary' id='enable-n8n-ai'>Create AI workflow in n8n</button><div id='n8n-ai-status'></div>";box.querySelector("#enable-n8n-ai").onclick=async()=>{const button=box.querySelector("#enable-n8n-ai"),status=box.querySelector("#n8n-ai-status");button.disabled=true;status.textContent="Creating AI Agent workflow…";try{const result=await api(`/api/app/accounts/${encodeURIComponent(account.id)}/n8n/connect/ai`,{method:"POST"});status.textContent=result.activationWarning?"Workflow created; open n8n to publish it.":"AI workflow created in n8n. Review it before activation.";button.remove();}catch(error){status.innerHTML=esc(error.message||"Could not create AI workflow")+" <button type='button' class='secondary' id='reauthorize-n8n-ai'>Reauthorize n8n</button>";button.disabled=false;}};}else{box.innerHTML="<b>Connect n8n for AI replies</b><small>Gakai will create a separate AI Agent workflow using this proxy after n8n is connected.</small><button type='button' class='secondary' id='connect-n8n-from-llm'>Connect n8n</button>";box.querySelector("#connect-n8n-from-llm").onclick=()=>root.querySelector("[data-service=n8n]")?.click();}panel.append(box);};};
+document.addEventListener("click",async event=>{const button=event.target.closest("#reauthorize-n8n-ai");if(!button)return;const accountId=current();if(!accountId)return;const status=await api(`/api/app/accounts/${encodeURIComponent(accountId)}/n8n/connect`).catch(()=>({}));const overlay=document.createElement("div");overlay.className="settings-overlay";overlay.innerHTML=`<section class="pair-card settings-card"><button class="modal-close" type="button">×</button><h2>Reauthorize n8n</h2><p>Your existing workflow will be preserved. This authorizes Gakai to create the separate AI workflow.</p><form id="reauthorize-n8n-form"><label>n8n URL<input id="reauth-n8n-url" type="url" required value="${esc(status.n8nUrl||"")}"></label><label>n8n API key<input id="reauth-n8n-key" type="password" required></label><button class="primary">Save authorization</button></form><div id="reauth-n8n-status"></div></section>`;document.body.append(overlay);overlay.querySelector(".modal-close").onclick=()=>overlay.remove();overlay.querySelector("#reauthorize-n8n-form").onsubmit=async e=>{e.preventDefault();const out=overlay.querySelector("#reauth-n8n-status");try{await api(`/api/app/accounts/${encodeURIComponent(accountId)}/n8n/connect`,{method:"POST",body:JSON.stringify({n8nUrl:overlay.querySelector("#reauth-n8n-url").value,n8nApiKey:overlay.querySelector("#reauth-n8n-key").value})});await api(`/api/app/accounts/${encodeURIComponent(accountId)}/n8n/connect/ai`,{method:"POST"});overlay.remove();notice("AI workflow created in n8n")}catch(error){out.textContent=error.message||"Could not reauthorize n8n"}};});
+document.addEventListener("click",event=>{if(!event.target.closest("[data-service=llm]"))return;setTimeout(async()=>{for(let attempt=0;attempt<15;attempt++){const panel=root.querySelector("#service-detail"),accountId=current();if(panel&&accountId&&!panel.querySelector("#n8n-ai-test")&&panel.querySelector("#llm-skill")){try{const status=await api("/api/app/accounts/"+encodeURIComponent(accountId)+"/n8n/connect");if(status.workflows?.some(workflow=>workflow.kind==="agentic")){const section=document.createElement("div"),title=document.createElement("h4"),description=document.createElement("p"),phone=document.createElement("input"),message=document.createElement("input"),button=document.createElement("button"),out=document.createElement("div");section.className="n8n-test-section n8n-ai-test-section";title.textContent="Test AI reply";description.textContent="Send a sample message through the separate AI workflow. Its reply will be delivered to the WhatsApp number below.";phone.id="n8n-ai-test-phone";phone.inputMode="tel";phone.placeholder="Phone number (e.g. 15551234567)";message.id="n8n-ai-test-message";message.placeholder="Initial message for the AI";button.id="n8n-ai-test";button.type="button";button.className="secondary";button.textContent="Run AI test";out.id="n8n-ai-test-status";section.append(title,description,phone,message,button,out);panel.append(section)}return}catch{return}}await new Promise(resolve=>setTimeout(resolve,100))}},0)});
+document.addEventListener("click",async event=>{const button=event.target.closest("#n8n-ai-test");if(!button)return;const accountId=current(),panel=root.querySelector("#service-detail"),phone=panel?.querySelector("#n8n-ai-test-phone")?.value.trim(),text=panel?.querySelector("#n8n-ai-test-message")?.value.trim(),status=panel?.querySelector("#n8n-ai-test-status");if(!phone){if(status)status.textContent="Enter the destination WhatsApp phone number.";return}button.disabled=true;if(status)status.textContent="Delivering test event to the AI workflow…";try{const data=await api("/api/app/accounts/"+encodeURIComponent(accountId)+"/automations"),automation=data.subscriptions?.find(item=>item.name==="n8n auto-connect (AI Agent)");if(!automation)throw Error("The AI workflow test subscription is unavailable.");await api("/api/app/accounts/"+encodeURIComponent(accountId)+"/automations/"+encodeURIComponent(automation.id)+"/test",{method:"POST",body:JSON.stringify({phone,text:text||"Hello from Gakai. Please reply to this message.",destination:"production"})});if(status)status.textContent="Test delivered to n8n. The agent reply will be sent to "+phone+"."}catch(error){if(status)status.textContent=error.message||"Could not run the AI test."}finally{button.disabled=false}});
+const accountDetailsWithPersistentLlmBadge=accountDetails;accountDetails=async account=>{await accountDetailsWithPersistentLlmBadge(account);const button=root.querySelector("[data-service=llm]");if(!button)return;const config=await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/llm").catch(()=>({configured:false}));let badge=button.querySelector(".llm-service-badge");if(config.configured){button.classList.add("has-integration");if(!badge){badge=document.createElement("span");badge.className="llm-service-badge";badge.textContent="✓";button.append(badge)}}else{button.classList.remove("has-integration");badge?.remove()}};
