@@ -67,6 +67,7 @@ const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CON
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
 if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
 if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
+let migratedN8nConnections=false;for(const connection of store.n8nConnections){if(!connection.kind){connection.kind='standard';migratedN8nConnections=true}}if(migratedN8nConnections)persist();
 if(!Array.isArray(store.llmConfigs))store.llmConfigs=[];
 if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.automationSubscriptions?.length||legacy.deletingAccounts?.length))persist();
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
@@ -371,25 +372,24 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}
 // Creates the paired AI Agent workflow for an account that already has a
 // standard n8n connection, reusing the same n8n instance/API key on file.
 // Leaves the existing standard workflow untouched. Routes live delivery to
-// the new agentic workflow's webhook once it exists.
 async function createAgenticN8nWorkflow(accountId,req){
   const standard=store.n8nConnections.find(c=>c.accountId===accountId&&c.kind==='standard');
-  if(!standard)return null;
-  if(store.n8nConnections.some(c=>c.accountId===accountId&&c.kind==='agentic'))return null;
+  if(!standard)throw Object.assign(new Error('No existing n8n integration is available'),{status:409});
+  if(store.n8nConnections.some(c=>c.accountId===accountId&&c.kind==='agentic'))throw Object.assign(new Error('The AI workflow already exists'),{status:409});
   const n8nApiKey=decryptSecret(standard.n8nApiKeyEncrypted);
-  if(!n8nApiKey)return null;
+  if(!n8nApiKey)throw Object.assign(new Error('Reauthorize the existing n8n integration with its API key before creating an AI workflow'),{status:409});
+  // Verify the stored n8n connection before creating anything.
+  await n8nRequest(standard.n8nUrl,n8nApiKey,'/workflows?limit=1');
   const publicUrl=requestPublicUrl(req);
   const built=await createN8nWorkflow({n8nBaseUrl:standard.n8nUrl,n8nApiKey,accountId,publicUrl,kind:'agentic'});
   const connectedAt=new Date().toISOString();
   store.keys=store.keys.filter(k=>!(k.accountId===accountId&&k.name==='n8n auto-connect (AI Agent)'));
   store.keys.push({id:randomBytes(8).toString('hex'),accountId,name:'n8n auto-connect (AI Agent)',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:built.integrationToken,hash:hash(built.integrationToken)});
-  // Route live delivery to the new AI Agent workflow: disable the standard
-  // workflow's subscription (keep it on file, untouched otherwise) and add a
-  // new enabled subscription pointing at the agentic workflow.
-  const standardSubscription=store.automationSubscriptions.find(item=>item.accountId===accountId&&item.name==='n8n auto-connect');
-  if(standardSubscription)standardSubscription.enabled=false;
+  // The generated AI workflow is deliberately isolated: it receives no live
+  // events until a later explicit activation step, and never alters the
+  // existing n8n workflow or its automation subscription.
   store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.accountId===accountId&&item.name==='n8n auto-connect (AI Agent)'));
-  store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId,name:'n8n auto-connect (AI Agent)',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:true,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
+  store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId,name:'n8n auto-connect (AI Agent)',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:false,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
   store.n8nConnections.push({accountId,kind:'agentic',n8nUrl:standard.n8nUrl,n8nApiKeyEncrypted:standard.n8nApiKeyEncrypted,workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
   await persist();
   return built;
@@ -555,15 +555,10 @@ async function enrichMessage(session,message){
     store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);
     store.llmConfigs.push({accountId:id,baseUrl,apiKey,model,systemPrompt:String(input.systemPrompt||'').slice(0,4000),nativeEnabled:Boolean(input.nativeEnabled),configuredAt:existing?.configuredAt||new Date().toISOString()});
     await persist();
-    // If n8n is already connected for this account and no AI Agent workflow
-    // exists yet, create one now, wired to this LiteLLM config. The existing
-    // (non-AI) n8n workflow is left untouched.
-    let agentic=null;
-    if(!existing)agentic=await createAgenticN8nWorkflow(id,req).catch(err=>{console.error('n8n AI Agent workflow creation failed:',err.message);return null;});
-    return send(res,200,{ok:true,n8nAgenticWorkflowCreated:Boolean(agentic)});
+    return send(res,200,{ok:true});
   }
   if(parts[4]==='llm'&&req.method==='DELETE'){store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);await persist();return send(res,200,{ok:true});}
-  if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='POST'){
+  if(parts[4]==='n8n'&&parts[5]==='connect'&&!parts[6]&&req.method==='POST'){
     const input=await readBody(req);
     let n8nBaseUrl=normalizeN8nBaseUrl(input.n8nUrl);
     const n8nApiKey=String(input.n8nApiKey||'').trim();
@@ -577,6 +572,8 @@ async function enrichMessage(session,message){
     if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='127.0.0.1'||publicUrlParsed.hostname==='::1')
       return send(res,400,{message:`Gakai resolved its callback URL as ${publicUrl}. n8n cannot call another service through its own loopback address. Open Gakai using a LAN IP, local hostname, or domain, or set GAKAI_PUBLIC_URL when using a reverse proxy.`});
     try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
+    const existingStandard=store.n8nConnections.find(connection=>connection.accountId===id&&connection.kind==='standard');
+    if(existingStandard){existingStandard.n8nUrl=n8nBaseUrl;existingStandard.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);await persist();return send(res,200,{ok:true,reused:true,workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`});}
     let built;
     try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,publicUrl,kind:'standard'}); }
     catch(err){ return send(res,502,{message:'Failed to configure n8n: '+(err.message||'Unknown n8n error')}); }
@@ -591,11 +588,12 @@ async function enrichMessage(session,message){
     store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
     store.n8nConnections.push({accountId:id,kind:'standard',n8nUrl:n8nBaseUrl,n8nApiKeyEncrypted:encryptSecret(n8nApiKey),workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
     await persist();
-    // If LiteLLM is already configured for this account, immediately create the
-    // paired AI Agent workflow too, so both exist right after connecting.
-    let agenticResult=null;
-    if(llmConfig(id))agenticResult=await createAgenticN8nWorkflow(id,req).catch(err=>{console.error('n8n AI Agent workflow creation failed:',err.message);return null;});
-    return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${built.workflowId}`,webhookUrl:built.webhookUrl,connectedAt,activationWarning:built.activationWarning,agentic:Boolean(agenticResult)});
+    return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${built.workflowId}`,webhookUrl:built.webhookUrl,connectedAt,activationWarning:built.activationWarning});
+  }
+  if(parts[4]==='n8n'&&parts[5]==='connect'&&parts[6]==='ai'&&req.method==='POST'){
+    if(!llmConfig(id))return send(res,400,{message:'Connect an LLM proxy before creating an AI workflow'});
+    try{const built=await createAgenticN8nWorkflow(id,req);if(!built)return send(res,409,{message:'Connect n8n first, or AI replies are already enabled'});return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic')?.n8nUrl+'/workflow/'+built.workflowId,activationWarning:built.activationWarning});}
+    catch(error){return send(res,error.status||502,{message:'Failed to create n8n AI workflow: '+(error.message||'Unknown error')});}
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='GET'){
     const connections=store.n8nConnections.filter(c=>c.accountId===id);
@@ -605,7 +603,7 @@ async function enrichMessage(session,message){
       return {kind:connection.kind,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,webhookUrl:connection.webhookUrl||subscription?.url||null,active:subscription?.enabled!==false,lastDelivery:subscription?.lastDelivery||null,connectedAt:connection.connectedAt};
     });
     const standard=workflows.find(w=>w.kind==='standard')||workflows[0];
-    return send(res,200,{connected:true,...standard,workflows});
+    return send(res,200,{connected:true,n8nUrl:connections.find(connection=>connection.kind==='standard')?.n8nUrl||null,...standard,workflows});
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='DELETE'){
     const connections=store.n8nConnections.filter(c=>c.accountId===id);
