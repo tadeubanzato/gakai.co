@@ -105,8 +105,8 @@ docker compose version
 ### 2. Clone and start
 
 ```sh
-git clone https://github.com/tadeubanzato/gakai-zap.git
-cd gakai-zap
+git clone https://github.com/tadeubanzato/gakai.co.git
+cd gakai.co
 ./scripts/gakai-up.sh
 ```
 
@@ -388,7 +388,7 @@ Sanitized provider payload fixtures live in `test/fixtures/providers/waha/`. Use
 ### Project structure
 
 ```
-gakai-zap/
+gakai.co/
 ├── server.mjs              # Node HTTP server — auth, API, provider proxy, automation
 ├── public/
 │   ├── app.js              # Vanilla browser application

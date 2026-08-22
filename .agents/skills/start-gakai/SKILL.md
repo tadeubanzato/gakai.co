@@ -106,7 +106,7 @@ Implement in this order unless the user explicitly reprioritizes:
 
 ## Git and release hygiene
 
-- Repository: `git@github.com:tadeubanzato/gakai-zap.git`.
+- Repository: `git@github.com:tadeubanzato/gakai.co.git`.
 - Default branch: `main`. Use focused `feature/...` branches for work.
 - Never stage the automatically generated `.env`, `sessions/`, `home-data/`, generated media, credentials, or real payload captures.
 - Use concise imperative commit messages, for example `Highlight unread conversations`.
@@ -115,4 +115,3 @@ Implement in this order unless the user explicitly reprioritizes:
 ## Decision guidance
 
 Prefer a safe incremental migration over a rewrite. When current legacy wrappers make a change fragile, document the dependency and move behavior toward the planned modules rather than adding unbounded new global wrappers. State assumptions, verify live behavior after changes, and clearly distinguish completed behavior from the future Gakai architecture.
-
