@@ -70,7 +70,17 @@ db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5
 let legacy={username:null,password:null,keys:[]};try{legacy=JSON.parse(await readFile(dataFile,"utf8"))}catch{}
 const savedState=db.prepare("SELECT data FROM app_state WHERE id=1").get();
 let store=savedState?JSON.parse(savedState.data):legacy;
-const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
+// Reactions/deleted-chat records otherwise only ever grow (including for
+// accounts that no longer exist, before the account-delete cleanup below
+// existed) and are never useful past a retention window.
+const retentionMs=365*24*60*60*1000;
+function pruneStore(){
+  const now=Date.now();
+  const keep=(items,dateField)=>items.filter(item=>{const at=Date.parse(item[dateField]);return !Number.isFinite(at)||now-at<retentionMs});
+  if(Array.isArray(store.messageReactions))store.messageReactions=keep(store.messageReactions,'reactedAt');
+  if(Array.isArray(store.deletedChats))store.deletedChats=keep(store.deletedChats,'deletedAt');
+}
+const persist=()=>{pruneStore();db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
 if(!Array.isArray(store.deletedChats))store.deletedChats=[];
 if(!Array.isArray(store.messageReactions))store.messageReactions=[];
@@ -82,7 +92,12 @@ if(!Array.isArray(store.llmConfigs))store.llmConfigs=[];
 if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.automationSubscriptions?.length||legacy.deletingAccounts?.length))persist();
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
+// token -> { issuedAt, remember }. TTL-checked in admin(), not just presence-
+// checked, and cleared wholesale on a password change so a leaked token
+// doesn't survive it.
 const sessions=new Map();
+const sessionTtlMs=Number(process.env.GAKAI_SESSION_TTL_MS)||24*60*60*1000;
+const sessionRememberTtlMs=30*24*60*60*1000; // matches the cookie's own Max-Age=2592000 below
 // Guards against a double-click or slow-retry racing two concurrent n8n
 // connect attempts for the same account: each spans several awaited n8n API
 // calls with no atomic "does a connection already exist" check in between.
@@ -93,7 +108,14 @@ const equalHex=(left,right)=>{try{const a=Buffer.from(left||"","hex"),b=Buffer.f
 const passwordHash=value=>{const salt=randomBytes(16).toString('hex');return `${salt}:${scryptSync(value,salt,64).toString('hex')}`};
 const passwordMatches=value=>{const [salt,expected]=store.password.split(':');return timingSafeEqual(Buffer.from(expected,'hex'),scryptSync(value,salt,64))};
 const cookie=req=>Object.fromEntries((req.headers.cookie||'').split(';').map(x=>x.trim().split('=').map(decodeURIComponent)).filter(x=>x.length===2));
-const admin=req=>sessions.has(cookie(req).home_session);
+const issueSession=remember=>{const token=randomBytes(32).toString('hex');sessions.set(token,{issuedAt:Date.now(),remember:Boolean(remember)});return token};
+const admin=req=>{
+  const token=cookie(req).home_session;
+  const session=sessions.get(token);
+  if(!session)return false;
+  if(Date.now()-session.issuedAt>(session.remember?sessionRememberTtlMs:sessionTtlMs)){sessions.delete(token);return false}
+  return true;
+};
 const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8' };
 const send = (res, status, data) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'}); res.end(JSON.stringify(data)); };
 async function readBody(req) { const chunks=[]; let size=0; for await (const chunk of req){size+=chunk.length;if(size>1024*1024)throw Object.assign(new Error('Request body too large'),{status:413});chunks.push(chunk);} req.rawBody=Buffer.concat(chunks).toString('utf8'); return req.rawBody ? JSON.parse(req.rawBody) : {}; }
@@ -666,12 +688,26 @@ async function enrichMessage(session,message){
     if(username.length<3||username.length>40)return send(res,400,{message:"Use a username between 3 and 40 characters"});
     if(password.length<10)return send(res,400,{message:"Use a password with at least 10 characters"});
     store.username=username;store.password=passwordHash(password);await persist();
-    const token=randomBytes(32).toString("hex");sessions.set(token,true);res.writeHead(201,{"set-cookie":sessionCookie(token,Boolean(input.remember)),"content-type":"application/json","cache-control":"no-store"});return res.end(JSON.stringify({ok:true,username}));
+    const token=issueSession(input.remember);res.writeHead(201,{"set-cookie":sessionCookie(token,Boolean(input.remember)),"content-type":"application/json","cache-control":"no-store"});return res.end(JSON.stringify({ok:true,username}));
   }
-  if(url.pathname==="/api/app/auth/login"&&req.method==="POST"){const {username,password,remember}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||"").trim()!==expectedUsername)||!passwordMatches(password||""))return send(res,401,{message:"Incorrect username or password"});const token=randomBytes(32).toString("hex");sessions.set(token,true);res.writeHead(200,{"set-cookie":sessionCookie(token,Boolean(remember)),"content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
+  if(url.pathname==="/api/app/auth/login"&&req.method==="POST"){const {username,password,remember}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||"").trim()!==expectedUsername)||!passwordMatches(password||""))return send(res,401,{message:"Incorrect username or password"});const token=issueSession(remember);res.writeHead(200,{"set-cookie":sessionCookie(token,Boolean(remember)),"content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==="/api/app/auth/logout"&&req.method==="POST"){const token=cookie(req).home_session;sessions.delete(token);res.writeHead(200,{"set-cookie":"home_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0","content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==="/api/app/auth/profile"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{username:store.username||null});}
-  if(url.pathname==="/api/app/auth/profile"&&req.method==="PATCH"){if(!admin(req))return send(res,401,{message:"Sign in required"});const input=await readBody(req),username=String(input.username||"").trim(),currentPassword=String(input.currentPassword||"");if(!currentPassword||!passwordMatches(currentPassword))return send(res,401,{message:"Current password is incorrect"});if(username&&(username.length<3||username.length>40))return send(res,400,{message:"Use a username between 3 and 40 characters"});if(input.newPassword&&String(input.newPassword).length<10)return send(res,400,{message:"Use a password with at least 10 characters"});if(username)store.username=username;if(input.newPassword)store.password=passwordHash(String(input.newPassword));await persist();return send(res,200,{ok:true,username:store.username});}
+  if(url.pathname==="/api/app/auth/profile"&&req.method==="PATCH"){if(!admin(req))return send(res,401,{message:"Sign in required"});const input=await readBody(req),username=String(input.username||"").trim(),currentPassword=String(input.currentPassword||"");if(!currentPassword||!passwordMatches(currentPassword))return send(res,401,{message:"Current password is incorrect"});if(username&&(username.length<3||username.length>40))return send(res,400,{message:"Use a username between 3 and 40 characters"});if(input.newPassword&&String(input.newPassword).length<10)return send(res,400,{message:"Use a password with at least 10 characters"});if(username)store.username=username;
+    let freshCookie=null;
+    if(input.newPassword){
+      store.password=passwordHash(String(input.newPassword));
+      // A leaked session token must not survive a password change. Revoke
+      // every session, then re-issue one for the tab that just changed it so
+      // the admin isn't logged out by their own action.
+      const previousToken=cookie(req).home_session,remember=sessions.get(previousToken)?.remember||false;
+      sessions.clear();
+      freshCookie=sessionCookie(issueSession(remember),remember);
+    }
+    await persist();
+    const headers={"content-type":"application/json"};if(freshCookie)headers["set-cookie"]=freshCookie;
+    res.writeHead(200,headers);return res.end(JSON.stringify({ok:true,username:store.username}));
+  }
   if(!admin(req))return send(res,401,{message:'Sign in required'});
   if(req.method==='GET'&&url.pathname==='/api/app/events'){
     const accountId=String(url.searchParams.get('accountId')||'');
@@ -727,7 +763,7 @@ async function enrichMessage(session,message){
     return send(res,201,{account:account(created || {name:id,status:'STARTING',config:config(input.label)})});
   }
   const id=decodeURIComponent(parts[3] || '');
-  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);delete store.accountLabels[id];store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.deletedChats=(store.deletedChats||[]).filter(item=>item.accountId!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
+  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);delete store.accountLabels[id];store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.deletedChats=(store.deletedChats||[]).filter(item=>item.accountId!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);store.keys=(store.keys||[]).filter(item=>item.accountId!==id);store.messageReactions=(store.messageReactions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
   if (req.method==='GET' && parts[4]==='qr') return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/auth/qr`));
   if (req.method==='POST' && parts[4]==='start') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
   if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
@@ -778,7 +814,7 @@ async function enrichMessage(session,message){
     if(!messageId)return send(res,400,{message:'Invalid message ID'});
     const reaction=String(input.reaction||'');if(reaction.length>16)return send(res,400,{message:'Invalid reaction'});
     await providerRequest('/api/reaction',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,messageId,reaction})});
-    store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));if(reaction)store.messageReactions.push({accountId:id,messageId,reaction});await persist();
+    store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));if(reaction)store.messageReactions.push({accountId:id,messageId,reaction,reactedAt:new Date().toISOString()});await persist();
     return send(res,200,{ok:true,reaction});
   }
   if (req.method==='POST' && parts[4]==='messages') {
@@ -930,4 +966,4 @@ wss.on('connection',(socket,req)=>{
 server.on('upgrade',(req,socket,head)=>{const url=new URL(req.url,`http://${req.headers.host}`);if(url.pathname!=='/api/app/ws'||!admin(req)||!url.searchParams.get('accountId')||!url.searchParams.get('chatId')){socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();return;}wss.handleUpgrade(req,socket,head,client=>wss.emit('connection',client,req));});
 server.listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}${configuredPublicUrl ? ` (public URL: ${configuredPublicUrl})` : ''}`));
 
-export { server, readBody };
+export { server, readBody, store, sessions };
