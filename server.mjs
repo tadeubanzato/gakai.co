@@ -325,14 +325,18 @@ async function dispatchAutomationEvent(payload){
   const message=messageView(payload.payload||{}),chatId=payload.payload?.from||payload.payload?.chatId||null,kind=String(chatId||"").endsWith("@g.us")?"group":"direct";
   const chat={id:chatId,kind,name:payload.payload?.chatName||payload.payload?._data?.chatName||payload.payload?._data?.notifyName||null};
   if(message.sender?.id){const contact=await resolveContact(accountId,message.sender.id);message.sender={...message.sender,phone:contact.phone||null,name:message.sender.name||contact.name||null};if(kind==="direct")chat.phone=contact.phone||null;}
-  const event={id:`evt_${payload.payload?.id||randomBytes(12).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
+  // payload.payload.id is frequently a structured WAHA id object, not a
+  // string — `${object}` stringifies to "[object Object]" for every message,
+  // which collided every inbound event onto the same app_events primary key
+  // after the first one. Resolve it the same way the rest of the codebase does.
+  const event={id:`evt_${providerMessageId(payload.payload?.id)||randomBytes(12).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
   // Persist before notifying the browser or downstream automation. This gives
   // reconnecting clients a small durable replay window and avoids exposing raw
   // provider payloads outside the adapter boundary.
   if (!recordAppEvent(event)) return;
   await Promise.allSettled([
     ...store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)).map(subscription=>deliverAutomation(subscription,event)),
-    dispatchLLMReply(accountId,event)
+    hasEnabledAgenticN8n(accountId)?Promise.resolve():dispatchLLMReply(accountId,event)
   ]);
 }
 
@@ -386,6 +390,11 @@ function makeUUID() {
   return `${b.slice(0,8)}-${b.slice(8,12)}-${b.slice(12,16)}-${b.slice(16,20)}-${b.slice(20,32)}`;
 }
 function llmConfig(accountId){return store.llmConfigs.find(c=>c.accountId===accountId)||null;}
+// An account can have both native LLM auto-reply and a generated n8n AI
+// Agent workflow configured. When both are live, the n8n AI Agent wins and
+// native dispatch is skipped, so an inbound message never gets two
+// independent AI replies.
+function hasEnabledAgenticN8n(accountId){return store.automationSubscriptions.some(item=>item.accountId===accountId&&item.enabled&&item.name==='n8n auto-connect (AI Agent)');}
 const llmProviders=new Set(['omniroute','litellm']);
 function inferLlmProvider(baseUrl,requested){
   if(llmProviders.has(requested))return requested;
@@ -414,7 +423,6 @@ function llmRequestBody(config,messages,extra={}){
 }
 const defaultAssistantInstructions=`You are the WhatsApp assistant for this business.
 
-Reply only to messages from approved phone numbers: +15551234567 and +15557654321. For everyone else, do not send a reply.
 Use a friendly, warm, professional tone. Keep replies concise and natural for WhatsApp. Answer customer questions, help with scheduling and next steps, and ask one clear follow-up question when information is missing.
 Do not make up facts, prices, availability, or promises. If a request needs a human, say that you will pass it on. Reply with only the message text—no labels, markdown, or explanation.`;
 function assistantInstructions(value){return String(value||'').trim()||defaultAssistantInstructions;}
