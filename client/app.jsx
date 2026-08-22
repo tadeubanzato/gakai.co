@@ -35,7 +35,7 @@ function Pairing({account,onLinked,onCancel}){
   return <main className="pairing"><section className="pair-card"><span className="eyebrow">CONNECT WHATSAPP</span><h1>Link {account.label}</h1><p>Open WhatsApp on your phone, then scan this code to link <b>{account.label}</b>.</p>{image?<img className="qr" src={image} alt="WhatsApp pairing QR code"/>:<div className="qr loading" role="status">{message}</div>}<ol><li>Open WhatsApp on your phone</li><li>Choose <b>Linked devices</b></li><li>Tap <b>Link a device</b> and scan this code</li></ol><p className="pair-status"><i/>{message}</p><button className="pairing-cancel" onClick={onCancel}>Cancel</button></section></main>
 }
 
-function Settings({account,onClose,onDeleted,onNotice}){
+function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
   const[llm,setLlm]=useState(null),[n8n,setN8n]=useState(null),[profile,setProfile]=useState(null),[service,setService]=useState(null),[busy,setBusy]=useState(false);
   const base="/api/app/accounts/"+encodeURIComponent(account.id);
   const refresh=useCallback(()=>Promise.all([api(base+"/llm"),api(base+"/n8n/connect"),api("/api/app/auth/profile")]).then(x=>{setLlm(x[0]);setN8n(x[1]);setProfile(x[2])}).catch(x=>onNotice(x.message)),[base,onNotice]);
@@ -50,7 +50,7 @@ function Settings({account,onClose,onDeleted,onNotice}){
 
   const saveLlm=async e=>{e.preventDefault();const f=e.currentTarget;const enteredKey=f.apiKey.value.trim(),next={configured:true,baseUrl:f.baseUrl.value.trim().replace(/\/+$/,"") ,model:f.model.value.trim(),systemPrompt:f.systemPrompt.value,nativeEnabled:f.nativeEnabled.checked,apiKeyLast4:enteredKey?enteredKey.slice(-4):llm?.apiKeyLast4||""};setBusy(true);try{await api(base+"/llm",{method:"POST",body:JSON.stringify({baseUrl:next.baseUrl,apiKey:enteredKey||"__keep__",model:next.model,systemPrompt:next.systemPrompt,nativeEnabled:next.nativeEnabled})});setLlm(next);await refresh();onNotice("LLM Proxy saved and verified.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const connectN8n=async e=>{e.preventDefault();const f=e.currentTarget;const n8nUrl=f.n8nUrl.value.trim().replace(/\/+$/,""),enteredKey=f.n8nApiKey.value.trim();setBusy(true);try{const result=await api(base+"/n8n/connect",{method:"POST",body:JSON.stringify({n8nUrl,n8nApiKey:enteredKey||"__keep__"})});setN8n(current=>({...current,connected:true,n8nUrl,n8nApiKeyLength:enteredKey.length||current?.n8nApiKeyLength||0,n8nApiKeyLast4:enteredKey?enteredKey.slice(-4):current?.n8nApiKeyLast4||"",workflows:result.workflowId?[...(current?.workflows||[]).filter(workflow=>workflow.kind!=="standard"),{kind:"standard",workflowId:result.workflowId,workflowName:result.workflowName,workflowUrl:result.workflowUrl}]:current?.workflows||[]}));await refresh();onNotice(result.reused?"n8n connection verified.":"n8n workflow created and connected.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
-  const saveName=async e=>{e.preventDefault();const label=e.currentTarget.label.value.trim();if(!label)return;setBusy(true);try{await api(base+"/label",{method:"PATCH",body:JSON.stringify({label})});onNotice("Account name saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  const saveName=async e=>{e.preventDefault();const label=e.currentTarget.label.value.trim();if(!label)return;setBusy(true);try{await api(base+"/label",{method:"PATCH",body:JSON.stringify({label})});onRenamed?.(account.id,label);onNotice("Account name saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const saveProfile=async e=>{e.preventDefault();const f=e.currentTarget;setBusy(true);try{const result=await api("/api/app/auth/profile",{method:"PATCH",body:JSON.stringify({username:f.username.value,currentPassword:f.currentPassword.value,newPassword:f.newPassword.value})});setProfile(current=>({...current,username:result.username}));f.currentPassword.value="";f.newPassword.value="";onNotice("Sign-in details saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const del=async()=>{if(!confirm(`Delete ${account.label} from Gakai? Its linked WhatsApp session will be removed. You can add and scan it again later.`))return;setBusy(true);try{await api(base,{method:"DELETE"});onDeleted()}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const ai=async()=>{setBusy(true);try{await api(base+"/n8n/connect/ai",{method:"POST"});await refresh();onNotice("AI workflow created.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
@@ -86,7 +86,7 @@ function Settings({account,onClose,onDeleted,onNotice}){
 }
 
 function App(){
-  const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState("");
+  const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState("");
   const settingsRef=useRef(null);
   const chatListRef=useRef(null);
   const suppressAutoSelectRef=useRef(false);
@@ -98,6 +98,7 @@ function App(){
   },[fail]);
 
   const load=useCallback(async id=>{
+    setChatsLoading(true);
     try{
       const d=await api("/api/app/accounts/"+encodeURIComponent(id)+"/chats");
       const next=(Array.isArray(d)?d:d.chats||[]).sort((left,right)=>Number(right.timestamp||right.lastMessage?.timestamp||0)-Number(left.timestamp||left.lastMessage?.timestamp||0));
@@ -106,8 +107,13 @@ function App(){
       // "Select a conversation" placeholder. Keep the reader's existing chat
       // selected during refreshes, otherwise open the newest one.
       setChat(current=>current?next.find(item=>item.id===current.id):suppressAutoSelectRef.current?undefined:next[0]);
-    }catch(x){fail(x.message)}
+    }catch(x){fail(x.message)}finally{setChatsLoading(false)}
   },[fail]);
+
+  const handleAccountRenamed=useCallback((id,label)=>{
+    setAccounts(current=>current.map(item=>item.id===id?{...item,label}:item));
+    setAccount(current=>current?.id===id?{...current,label}:current);
+  },[]);
 
   // SSE carries normalized Gakai events. Keep a low-frequency fallback for
   // provider changes that do not emit a webhook (for example, a QR lifecycle).
@@ -118,9 +124,9 @@ function App(){
       try{const change=JSON.parse(event.data);if(change.account?.id===account.id)load(account.id)}catch{}
     };
     stream.addEventListener("gakai",update);
-    const interval=setInterval(()=>load(account.id), 60000);
+    const interval=setInterval(()=>load(account.id), chats.length?60000:10000);
     return()=>{stream.removeEventListener("gakai",update);stream.close();clearInterval(interval)};
-  },[account?.id, account?.status, load]);
+  },[account?.id, account?.status, chats.length, load]);
 
   useEffect(()=>{api("/api/app/auth/state").then(setAuth).catch(x=>fail(x.message))},[fail]);
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);
@@ -187,7 +193,7 @@ function App(){
   if((add||!accounts.length)&&!pair)return <main className="pairing"><section className="pair-card"><span className="eyebrow">CONNECT WHATSAPP</span><h1>Connect your WhatsApp</h1><p>Gakai will generate a secure QR code immediately. Scan it from WhatsApp to link this account.</p><ol><li>Open WhatsApp on your phone</li><li>Choose <b>Linked devices</b></li><li>Tap <b>Link a device</b> and scan</li></ol><button className="primary wide" onClick={beginPairing}>Connect WhatsApp</button>{accounts.length?<button className="nav wide" onClick={()=>setAdd(false)}>Cancel</button>:null}</section></main>;
   const closeSettings=()=>{history.pushState({},"","/");setSettings(false)};
   const accountDeleted=async()=>{history.replaceState({},"","/");setSettings(false);setChat();await refresh()};
-  if(settings&&account)return <Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail}/>;
+  if(settings&&account)return <Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>;
 
   return (
     <>
@@ -219,13 +225,13 @@ function App(){
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>
               <input placeholder="Search conversations" value={q} onChange={e=>setQ(e.target.value)} aria-label="Search conversations"/>
               {visible.map(x=><button key={x.id} className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}><Avatar item={x}/><span><b>{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||"Photo or message"}</small></span>{x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}</button>)}
-              {!visible.length?<p className="hint">No conversations found.</p>:null}
+              {chatsLoading?<p className="hint" role="status">Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">No conversations yet. Gakai is waiting for WhatsApp to finish syncing.</p>:null}
             </section>
             <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} chat={chat} onBack={()=>setChat()} onSent={handleSent} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
         </main>
       </div>
-      {settings&&account?<Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail}/>:null}
+      {settings&&account?<Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>:null}
       {note?<div className="toast" role="status">{note}</div>:null}
     </>
   )

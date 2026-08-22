@@ -202,3 +202,4 @@ video.media{background:#000}audio.media-audio{display:block;width:min(100%,360px
 }
 /* Live presence status from the authenticated WebSocket channel. */
 .typing-indicator{padding:0 18px 6px;color:#8ce6cf;font-size:12px;background:var(--panel)}
+.hint[role="status"]{color:var(--green)}
