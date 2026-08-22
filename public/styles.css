@@ -99,12 +99,15 @@ video.media{background:#000}audio.media-audio{display:block;width:min(100%,360px
 /* The generic header rule distributes children across the full row. Chat
    identity needs to stay together: avatar, name/group name, then chat ID. */
 .conversation-head { justify-content: flex-start; }
+.conversation-delete{margin-left:auto;padding:8px 11px;border-radius:8px;background:#7d3036;color:#fff;font-weight:700}.conversation-delete:hover{background:#a43b3b}.conversation-delete:disabled{opacity:.65;cursor:wait}
+.system-message{color:#cbd8d3;font-style:italic}.system-message.call{font-style:normal;color:#c6e9de}
 .instagram-preview { width:min(100%,420px); overflow:hidden; border-radius:8px; background:#fff; }
 .instagram-preview iframe { display:block; width:100%; min-height:480px; border:0; background:#fff; }
 .instagram-preview-copy { display:grid; gap:5px; padding:12px; background:#10252c; border-top:1px solid #31424b; color:var(--ink); }
 .instagram-preview-copy b { font-size:13px; line-height:1.35; }
 .instagram-preview-copy small { display:block; color:#b8cbc4; font-size:12px; line-height:1.45; white-space:normal; }
 .instagram-preview>a { display:block; padding:8px 10px; color:#8ce6cf; background:#123c43; font-size:12px; text-decoration:none; }
+.instagram-native-preview{overflow:hidden;background:#10252c}.instagram-native-preview span{display:grid;gap:5px}.instagram-native-preview em{color:#e5a9c5;font-size:11px;font-style:normal;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.instagram-native-preview .instagram-open{margin-top:3px;color:#8ce6cf;font-weight:700}.instagram-mark{background:linear-gradient(135deg,#833ab4,#fd1d1d 56%,#fcb045);color:#fff}
 
 /* Login's persistent-session choice is a compact control, not a full-width
    text field like the username and password inputs above it. */

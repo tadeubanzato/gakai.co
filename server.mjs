@@ -65,6 +65,7 @@ const savedState=db.prepare("SELECT data FROM app_state WHERE id=1").get();
 let store=savedState?JSON.parse(savedState.data):legacy;
 const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
+if(!Array.isArray(store.deletedChats))store.deletedChats=[];
 if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
 if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
 let migratedN8nConnections=false;for(const connection of store.n8nConnections){if(!connection.kind){connection.kind='standard';migratedN8nConnections=true}}if(migratedN8nConnections)persist();
@@ -200,30 +201,75 @@ async function openGraphPreview(value){
   if(externalPreviewCache.size>80)externalPreviewCache.delete(externalPreviewCache.keys().next().value);
   return result;
 }
+function avatarUrl(value){
+  const raw=String(value||'').trim();
+  if(/^data:image\//i.test(raw))return raw;
+  try{
+    const url=new URL(raw,providerUrl);
+    if(url.pathname.startsWith('/api/files/'))return `/api/app/media?path=${encodeURIComponent(`${url.pathname}${url.search}`)}`;
+    return /^https?:$/.test(url.protocol)?url.href:null;
+  }catch{return null}
+}
 function account(s) { const rawStatus=s.status; return { id:s.name, label:s.config?.metadata?.['gakai.label'] || s.config?.metadata?.['waha-home.label'] || s.me?.pushName || s.name, status:['WORKING','CONNECTED','READY'].includes(rawStatus)?'WORKING':rawStatus, phone:s.me?.id?.split('@')[0] || null, profile:s.me?.pushName || null }; }
 async function accountView(session){
   const view=account(session);if(!session.me?.id)return view;
 
-  try{const contacts=await providerRequest(`/api/contacts/all?session=${encodeURIComponent(session.name)}`);const self=(Array.isArray(contacts)?contacts:[]).find(contact=>contact.id===session.me.id||contact.number===session.me.id.split("@")[0])||{};const photo=await providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(session.me.id)}&session=${encodeURIComponent(session.name)}`);view.picture=photo?.profilePictureURL||photo?.url||null;view.mentionNames=[view.label,view.profile,self.name,self.pushName,self.shortName,view.phone].filter(Boolean)}catch{view.picture=null;view.mentionNames=[view.label,view.profile,view.phone].filter(Boolean)}
+  try{const contacts=await providerRequest(`/api/contacts/all?session=${encodeURIComponent(session.name)}`);const self=(Array.isArray(contacts)?contacts:[]).find(contact=>contact.id===session.me.id||contact.number===session.me.id.split("@")[0])||{};const photo=await providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(session.me.id)}&session=${encodeURIComponent(session.name)}`);view.picture=avatarUrl(photo?.profilePictureURL||photo?.url);view.mentionNames=[view.label,view.profile,self.name,self.pushName,self.shortName,view.phone].filter(Boolean)}catch{view.picture=null;view.mentionNames=[view.label,view.profile,view.phone].filter(Boolean)}
   return view;
 }
 function normalizedTimestamp(value){const numeric=Number(value);if(Number.isFinite(numeric)&&numeric>0)return numeric>1e12?Math.floor(numeric/1000):numeric;const parsed=Date.parse(value);return Number.isFinite(parsed)?Math.floor(parsed/1000):0;}
 const config = label => label ? ({metadata:{'gakai.label':label}}) : {};
+function chatTimestamp(chat){return normalizedTimestamp(chat.lastMessage?.timestamp || chat._chat?.lastMessage?.timestamp || chat.timestamp || chat._chat?.timestamp || 0)}
 function chatOverview(chat) {
-  return { id:chat.id, name:chat.name, picture:chat.picture || null, unreadCount:Number(chat.unreadCount ?? chat.unreadMessagesCount ?? chat._chat?.unreadCount ?? 0) || 0,
-    timestamp:normalizedTimestamp(chat.timestamp || chat.lastMessage?.timestamp || 0),
+  return { id:chat.id, name:chat.name, picture:avatarUrl(chat.picture), unreadCount:Number(chat.unreadCount ?? chat.unreadMessagesCount ?? chat._chat?.unreadCount ?? 0) || 0,
+    timestamp:chatTimestamp(chat),
     lastMessage:chat.lastMessage ? {body:chat.lastMessage.body || '', text:chat.lastMessage.text || '', timestamp:chat.lastMessage.timestamp || 0, hasMedia:Boolean(chat.lastMessage.hasMedia)} : null };
+}
+const chatPictureCache=new Map();
+const chatPictureCacheTtl=24*60*60*1000;
+function chatPictureFor(session,chatId){
+  const key=`${session}:${chatId}`,cached=chatPictureCache.get(key);
+  if(cached&&cached.expiresAt>Date.now())return cached.value;
+  const entry={value:null,expiresAt:Date.now()+5*60*1000};
+  const task=providerRequest(`/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/picture?refresh=true`).then(picture=>{entry.expiresAt=Date.now()+chatPictureCacheTtl;return avatarUrl(picture?.url)}).catch(()=>null);
+  entry.value=task;chatPictureCache.set(key,entry);
+  if(chatPictureCache.size>500)chatPictureCache.delete(chatPictureCache.keys().next().value);
+  return task;
+}
+async function enrichChatOverview(session,chat){const view=chatOverview(chat);if(!view.picture&&view.id)view.picture=await chatPictureFor(session,view.id);return view}
+async function mapWithConcurrency(values,limit,worker){const result=new Array(values.length);let next=0;await Promise.all(Array.from({length:Math.min(limit,values.length)},async()=>{while(next<values.length){const index=next++;result[index]=await worker(values[index])}}));return result}
+async function allChatOverviews(session){
+  const limit=100,all=[];let offset=0;
+  for(;;){
+    const page=await providerRequest(`/api/${encodeURIComponent(session)}/chats/overview?limit=${limit}&offset=${offset}`);
+    if(!Array.isArray(page))return all;
+    all.push(...page);
+    if(page.length<limit)return all;
+    offset+=page.length;
+  }
+}
+function systemMessageView(message){
+  const data=message._data||{},type=String(message.type||data.type||data.subtype||'').toLowerCase();
+  if(type==='call_log'){
+    const video=Boolean(data.isVideoCall),outcome=String(data.callOutcome||'').replace(/_/g,' ').toLowerCase();
+    const duration=Number(data.callDuration||0),minutes=Math.floor(duration/60),seconds=duration%60;
+    const length=duration>0?` · ${minutes?`${minutes}m `:''}${seconds}s`:'';
+    return {kind:'call',label:`${video?'Video':'Voice'} call${outcome?` · ${outcome}`:''}${length}`};
+  }
+  if(type==='gp2')return {kind:'group-event',label:'Group activity'};
+  if(type==='e2e_notification')return {kind:'security',label:'Messages are end-to-end encrypted'};
+  return type?{kind:'system',label:'WhatsApp system message'}:null;
 }
 function messageView(message) {
   const participant=message.participant && typeof message.participant==='object'?message.participant:{};
   const senderId=participant.id||message.participant||message.author||message.from||null;
   const senderName=participant.name||message.participantName||message.authorName||message.pushName||message.notifyName||message._data?.notifyName||null;
-  const senderPicture=participant.picture||message.participantPicture||message.authorPicture||message.profilePictureUrl||null;
+  const senderPicture=avatarUrl(participant.picture||message.participantPicture||message.authorPicture||message.profilePictureUrl);
   const rawPreview=message.linkPreview||message.preview||message._data?.linkPreview||(message._data?.links?.[0]?{url:message._data.links[0].link||message._data.links[0].url||message.body||message.text||"",title:message._data.title||"",description:message._data.description||message._data.text||"",image:message._data.botReelPluginThumbnailCdnUrl||message._data.thumbnailHQ||message._data.thumbnailUrl||null}:null);
   // Always pass URL if available so client can fetch OG data; only omit if no URL at all
   const hasUrl = rawPreview && (rawPreview.url || rawPreview.canonicalUrl || rawPreview.link);
   const hasContent = rawPreview && (rawPreview.title || rawPreview.titleText || rawPreview.description || rawPreview.desc || rawPreview.thumbnail || rawPreview.thumbnailUrl || rawPreview.image || rawPreview.imageUrl);
-  return { id:message.id, timestamp:message.timestamp || 0, fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '',
+  return { id:message.id, timestamp:message.timestamp || 0, fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '', system:systemMessageView(message),
     hasMedia:Boolean(message.hasMedia), media:message.media ? {url:message.media.url || null, mimetype:message.media.mimetype || null, filename:message.media.filename || null} : null, mediaUrl:message.mediaUrl || null, vCards:Array.isArray(message.vCards)?message.vCards:(Array.isArray(message._data?.vCards)?message._data.vCards:[]), sender:senderId?{id:senderId,name:senderName,picture:senderPicture}:null, linkPreview:hasUrl?{url:rawPreview.url||rawPreview.canonicalUrl||rawPreview.link||message.body||message.text||'',title:hasContent?(rawPreview.title||rawPreview.titleText||''):'',description:hasContent?(rawPreview.description||rawPreview.desc||''):'',image:hasContent?(rawPreview.thumbnail||rawPreview.thumbnailUrl||rawPreview.image||rawPreview.imageUrl||null):null}:null, ack:message.ack, ackName:message.ackName };
 }
 const contactsListCache=new Map();
@@ -232,8 +278,11 @@ async function contactsFor(session){
   const task=providerRequest(`/api/contacts/all?session=${encodeURIComponent(session)}`).catch(error=>{contactsListCache.delete(session);throw error});contactsListCache.set(session,task);if(contactsListCache.size>50)contactsListCache.delete(contactsListCache.keys().next().value);return await task;
 }
 const contactCache=new Map();
+const profilePictureCache=new Map();
+const profileCacheTtl=5*60*1000;
+function profilePictureFor(session,contactId){const key=`${session}:${contactId}`,cached=profilePictureCache.get(key);if(cached&&cached.expiresAt>Date.now())return cached.value;profilePictureCache.delete(key);const task=providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`);const entry={value:task,expiresAt:Date.now()+profileCacheTtl};profilePictureCache.set(key,entry);task.catch(()=>{if(profilePictureCache.get(key)===entry)profilePictureCache.delete(key)});if(profilePictureCache.size>500)profilePictureCache.delete(profilePictureCache.keys().next().value);return task;}
 async function resolveContact(session,rawId){
-  const key=`${session}:${rawId}`;if(contactCache.has(key))return contactCache.get(key);
+  const key=`${session}:${rawId}`,cached=contactCache.get(key);if(cached&&cached.expiresAt>Date.now())return cached.value;contactCache.delete(key);
   let contactId=String(rawId||'');
   try{
     if(contactId.endsWith('@lid')){
@@ -243,9 +292,9 @@ async function resolveContact(session,rawId){
     }
     const contacts=await contactsFor(session);
     const contact=(Array.isArray(contacts)?contacts:[]).find(item=>item.id===contactId||item.number===contactId.replace(/@.*$/,'')||item.lid===rawId)||{};
-    const picture=await providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`).catch(()=>null);
-    const phone=contact.number||contact.phoneNumber||contact.phone||(contactId.endsWith("@c.us")?contactId.slice(0,-5):null); const value={id:contactId,phone:phone?String(phone).replace(/[^0-9]/g,""):null,name:contact.name||contact.pushName||contact.shortName||contact.verifiedName||null,status:contact.status||contact.about||contact.description||null,picture:picture?.profilePictureURL||picture?.url||null}; contactCache.set(key,value); if(contactCache.size>500)contactCache.delete(contactCache.keys().next().value); return value;
-  }catch{const value={id:contactId,phone:contactId.endsWith("@c.us")?contactId.slice(0,-5):null,name:null,picture:null};contactCache.set(key,value);if(contactCache.size>500)contactCache.delete(contactCache.keys().next().value);return value}
+    const picture=await profilePictureFor(session,contactId);
+    const phone=contact.number||contact.phoneNumber||contact.phone||(contactId.endsWith("@c.us")?contactId.slice(0,-5):null); const value={id:contactId,phone:phone?String(phone).replace(/[^0-9]/g,""):null,name:contact.name||contact.pushName||contact.shortName||contact.verifiedName||null,status:contact.status||contact.about||contact.description||null,picture:avatarUrl(picture?.profilePictureURL||picture?.url)}; contactCache.set(key,{value,expiresAt:Date.now()+profileCacheTtl}); if(contactCache.size>500)contactCache.delete(contactCache.keys().next().value); return value;
+  }catch{const value={id:contactId,phone:contactId.endsWith("@c.us")?contactId.slice(0,-5):null,name:null,picture:null};return value}
 }
 const automationSummary=subscription=>({id:subscription.id,accountId:subscription.accountId,name:subscription.name,url:subscription.url,productionUrl:subscription.productionUrl||subscription.url,testUrl:subscription.testUrl||null,testPhone:subscription.testPhone||null,enabled:subscription.enabled,events:subscription.events,secret:subscription.secret,createdAt:subscription.createdAt,lastDelivery:subscription.lastDelivery||null});
 async function automationFetch(subscription,event){
@@ -580,12 +629,12 @@ async function enrichMessage(session,message){
     return send(res,201,{account:account(created || {name:id,status:'STARTING',config:config(input.label)})});
   }
   const id=decodeURIComponent(parts[3] || '');
-  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
+  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.deletedChats=(store.deletedChats||[]).filter(item=>item.accountId!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
   if (req.method==='GET' && parts[4]==='qr') return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/auth/qr`));
   if (req.method==='POST' && parts[4]==='start') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
   if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
   if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}/messages/read`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});return send(res,200,{ok:true});}
-  if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}`,{method:'DELETE'});return send(res,200,{ok:true});}
+  if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){const chatId=decodeURIComponent(parts[5]);await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}`,{method:'DELETE'});store.deletedChats=(store.deletedChats||[]).filter(item=>!(item.accountId===id&&item.chatId===chatId));store.deletedChats.push({accountId:id,chatId,deletedAt:new Date().toISOString()});await persist();return send(res,200,{ok:true});}
   // Presence stays behind the dashboard proxy so the browser never receives
   // direct provider access or its API key.
   if (parts[4]==='presence') {
@@ -605,8 +654,10 @@ async function enrichMessage(session,message){
   if (req.method==='GET' && parts[4]==='chats') {
     // Keep the inbox useful for multi-account workspaces without requesting an
     // unbounded provider overview on every refresh.
-    const chats=await providerRequest(`/api/${encodeURIComponent(id)}/chats/overview?limit=100`);
-    return send(res,200,chats.map(chatOverview).sort((a,b) => b.timestamp - a.timestamp));
+    const chats=await allChatOverviews(id);
+    const deleted=new Set((store.deletedChats||[]).filter(item=>item.accountId===id).map(item=>item.chatId));
+    const recent=chats.filter(chat=>!deleted.has(chat.id)).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,30);
+    return send(res,200,(await mapWithConcurrency(recent,2,chat=>enrichChatOverview(id,chat))).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
   if (req.method==='GET' && parts[4]==='messages') {

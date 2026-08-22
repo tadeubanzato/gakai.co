@@ -8,7 +8,7 @@ const status=x=>({WORKING:"Connected",SCAN_QR_CODE:"Ready to scan",STARTING:"Sta
 const detailsSlug=()=>{const match=window.location.pathname.match(/^\/details\/([^/]+)\/?$/);return match?decodeURIComponent(match[1]):null};
 const maskSecret=(length,last4)=>last4?`${"•".repeat(Math.max(0,Number(length||0)-String(last4).length))}${last4}`:"Saved — leave blank to keep";
 
-function Avatar({item}){const label=item?.name||item?.label||"?";return item?.picture?<img className="avatar" src={item.picture} alt=""/>:<span className="avatar avatar-letter">{label[0].toUpperCase()}</span>}
+function Avatar({item}){const label=String(item?.name||item?.label||"?"),rawPicture=String(item?.picture||"").trim(),picture=/^data:image\//i.test(rawPicture)||rawPicture.startsWith("/api/app/media?")?rawPicture:/^https?:\/\//i.test(rawPicture)?`/api/app/link-image?url=${encodeURIComponent(rawPicture)}`:null;const[failed,setFailed]=useState(false);return picture&&!failed?<img className="avatar" src={picture} alt="" onError={()=>setFailed(true)}/>:<span className="avatar avatar-letter" aria-hidden="true">{label[0]?.toUpperCase()||"?"}</span>}
 
 function Login({setup,done,fail}){
   const[error,setError]=useState("");
@@ -89,6 +89,7 @@ function App(){
   const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState("");
   const settingsRef=useRef(null);
   const chatListRef=useRef(null);
+  const suppressAutoSelectRef=useRef(false);
 
   const fail=useCallback(x=>{setNote(x);setTimeout(()=>setNote(""),4500)},[]);
   
@@ -104,7 +105,7 @@ function App(){
       // A working inbox should open on a useful conversation, not a blank
       // "Select a conversation" placeholder. Keep the reader's existing chat
       // selected during refreshes, otherwise open the newest one.
-      setChat(current=>next.find(item=>item.id===current?.id)||next[0]);
+      setChat(current=>current?next.find(item=>item.id===current.id):suppressAutoSelectRef.current?undefined:next[0]);
     }catch(x){fail(x.message)}
   },[fail]);
 
@@ -117,7 +118,7 @@ function App(){
 
   useEffect(()=>{api("/api/app/auth/state").then(setAuth).catch(x=>fail(x.message))},[fail]);
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);
-  useEffect(()=>{setChat();setChats([]);if(account?.status==="WORKING")load(account.id)},[account?.id,account?.status,load]);
+  useEffect(()=>{suppressAutoSelectRef.current=false;setChat();setChats([]);if(account?.status==="WORKING")load(account.id)},[account?.id,account?.status,load]);
 
   const logout=async()=>{await api("/api/app/auth/logout",{method:"POST"}).catch(()=>{});window.location.assign("/")};
   
@@ -126,6 +127,7 @@ function App(){
   // Keep unread state server-authoritative. The badge clears only after the
   // provider has accepted the read receipt; no arbitrary client timer.
   const handleChatClick=useCallback(async(chatItem)=>{
+    suppressAutoSelectRef.current=false;
     setChat(chatItem);
     if(chatItem.unreadCount && account){
       try{
@@ -166,6 +168,11 @@ function App(){
       load(account.id);
     }
   },[account?.id, load]);
+  const handleChatDeleted=useCallback(chatId=>{
+    suppressAutoSelectRef.current=true;
+    setChats(current=>current.filter(item=>item.id!==chatId));
+    setChat(current=>current?.id===chatId?undefined:current);
+  },[]);
 
   if(!auth)return <main className="pairing">Loading Gakai…</main>;
   if(!auth.authenticated)return <Login setup={!!auth.setup} done={()=>location.reload()} fail={fail}/>;
@@ -208,7 +215,7 @@ function App(){
               {visible.map(x=><button key={x.id} className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}><Avatar item={x}/><span><b>{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||"Photo or message"}</small></span>{x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}</button>)}
               {!visible.length?<p className="hint">No conversations found.</p>:null}
             </section>
-            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} chat={chat} onBack={()=>setChat()} onSent={handleSent}/>:<div className="blank">Select a conversation</div>}</section>
+            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} chat={chat} onBack={()=>setChat()} onSent={handleSent} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
         </main>
       </div>

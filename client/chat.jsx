@@ -50,9 +50,20 @@ function mediaKind(message) {
   if (type.startsWith("audio/") ) return "audio";
   return "document";
 }
+function avatarSrc(value) {
+  const picture = String(value || "").trim();
+  if (/^data:image\//i.test(picture)) return picture;
+  if (picture.startsWith("/api/app/media?")) return picture;
+  return /^https?:\/\//i.test(picture) ? `/api/app/link-image?url=${encodeURIComponent(picture)}` : null;
+}
+function Avatar({ picture, label, className = "avatar" }) {
+  const [failed, setFailed] = useState(false);
+  const src = avatarSrc(picture), letter = String(label || "?")[0]?.toUpperCase() || "?";
+  return src && !failed ? <img className={className} src={src} alt="" onError={() => setFailed(true)} /> : <span className={`${className} ${className.includes("sender-avatar") ? "sender-letter" : "avatar-letter"}`} aria-hidden="true">{letter}</span>;
+}
 function Sender({ sender }) {
   const label = sender?.name || sender?.id || "Unknown sender";
-  return <span className="message-sender">{sender?.picture ? <img className="sender-avatar" src={sender.picture} alt="" /> : <span className="sender-avatar sender-letter" aria-hidden="true">{label[0]?.toUpperCase()}</span>}<span>{label}</span></span>;
+  return <span className="message-sender"><Avatar className="sender-avatar" picture={sender?.picture} label={label}/><span>{label}</span></span>;
 }
 function mediaTime(value) {
   if (!Number.isFinite(value) || value < 0) return "0:00";
@@ -132,20 +143,13 @@ function LinkPreview({ body, preview }) {
     const text = String(value || "").replace(/&#x([\da-f]+);/gi, (_match, code) => String.fromCodePoint(parseInt(code, 16))).replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code))).replace(/&(quot|apos|amp|lt|gt);/gi, (_match, entity) => ({quot:'"',apos:"'",amp:'&',lt:'<',gt:'>'})[entity.toLowerCase()]).replace(/\s+/g, " ").trim();
     return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text;
   };
-  if (instagram) {
-    // Instagram's metadata is often a very long, entity-encoded caption. Its
-    // embed is the consistent visual representation for both sent and received
-    // posts, regardless of whether a partial OpenGraph image was returned.
-    const embedUrl = (() => {
-      try {
-        const source = new URL(url);
-        if (!/^\/(p|reel|tv)\//.test(source.pathname)) return null;
-        return `https://www.instagram.com${source.pathname.replace(/\/$/, "")}/embed/captioned/`;
-      } catch { return null; }
-    })();
-    if (embedUrl) return <div className="instagram-preview"><iframe src={embedUrl} title="Instagram post preview" loading="lazy" referrerPolicy="strict-origin-when-cross-origin"/>{(data.title || data.description) && <div className="instagram-preview-copy">{data.title && <b>{readable(data.title, 120)}</b>}{data.description && <small>{readable(data.description, 420)}</small>}</div>}<a href={url} target="_blank" rel="noreferrer">Open on Instagram</a></div>;
-    return <a className="link-preview" href={url} target="_blank" rel="noreferrer"><span><b>Instagram post</b><small>Open on Instagram</small></span></a>;
-  }
+  const image = /^data:image\//i.test(String(imageUrl || "")) ? imageUrl : imageUrl ? `${instagram ? "/api/app/instagram-image" : "/api/app/link-image"}?url=${encodeURIComponent(imageUrl)}` : null;
+  const previewImage = image && <img src={image} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(event) => {
+    const imageNode=event.currentTarget;
+    if (!instagram && !imageNode.dataset.directFallback && imageUrl) { imageNode.dataset.directFallback="true"; imageNode.src=imageUrl; return; }
+    imageNode.style.display="none";
+  }} />;
+  if (instagram) return <a className="link-preview instagram-native-preview" href={url} target="_blank" rel="noreferrer">{previewImage || <div className="site-preview-mark instagram-mark" aria-hidden="true">◎</div>}<span><em>Instagram</em><b>{readable(data.title || "Instagram post", 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}<small className="instagram-open">Open on Instagram ↗</small></span></a>;
   if (!hasContent) {
     let hostname = "Website", label = "Open website";
     try {
@@ -154,31 +158,23 @@ function LinkPreview({ body, preview }) {
     } catch {}
     return <a className="link-preview site-preview" href={url} target="_blank" rel="noreferrer"><div className="site-preview-mark" aria-hidden="true">{hostname[0]?.toUpperCase() || "↗"}</div><span><b>{hostname}</b><small>{label}</small></span></a>;
   }
-  const image = imageUrl ? `${instagram ? "/api/app/instagram-image" : "/api/app/link-image"}?url=${encodeURIComponent(imageUrl)}` : null;
-  return <a className="link-preview" href={url} target="_blank" rel="noreferrer">{image && <img src={image} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(event) => {
-    // The relay remains the default so Gakai can enforce its URL policy. Some
-    // sites reject proxy requests, though, while allowing a normal browser
-    // image load; retry once with the already validated Open Graph URL.
-    const imageNode=event.currentTarget;
-    if (!imageNode.dataset.directFallback && imageUrl) { imageNode.dataset.directFallback="true"; imageNode.src=imageUrl; return; }
-    imageNode.style.display="none";
-  }} />}<span><b>{readable(data.title || url, 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}</span></a>;
+  return <a className="link-preview" href={url} target="_blank" rel="noreferrer">{previewImage}<span><b>{readable(data.title || url, 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}</span></a>;
 }
-function MessageCard({ message, accountId, chatId, onMediaResolved }) {
+function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved }) {
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
   return <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}`}>
-    {!message.fromMe && message.sender && <Sender sender={message.sender} />}
+    {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} />}
     <MediaCard message={message} accountId={accountId} chatId={chatId} onResolved={onMediaResolved} />
     {visibleBody && <span className="message-body">{visibleBody}</span>}
     <LinkPreview body={body} preview={message?.linkPreview} />
-    {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className="message-body">Unsupported message</span>}
+    {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
     <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}</time>
   </article>;
 }
 
-export function ChatPanel({ accountId, chat, onBack, onSent }) {
+export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   const paneRef = useRef(null);
   const requestRef = useRef(0);
   const initialChatRef = useRef(null);
@@ -192,6 +188,7 @@ export function ChatPanel({ accountId, chat, onBack, onSent }) {
   const [olderLoading, setOlderLoading] = useState(false);
   const [exhausted, setExhausted] = useState(false);
   const [error, setError] = useState("");
+  const [deleting, setDeleting] = useState(false);
   const chatId = chat?.id;
 
   const captureAnchor = useCallback(() => {
@@ -352,17 +349,31 @@ export function ChatPanel({ accountId, chat, onBack, onSent }) {
     }
   }, [accountId, chat, chatId, onSent]);
 
+  const deleteConversation = useCallback(async () => {
+    if (!chatId || deleting || !window.confirm(`Delete the conversation with ${chat?.name || chatId}? This removes it from WhatsApp and cannot be undone.`)) return;
+    setDeleting(true); setError("");
+    try {
+      await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" });
+      onDeleted?.(chatId);
+    } catch (cause) {
+      setError(cause.message || "Could not delete this conversation.");
+    } finally {
+      setDeleting(false);
+    }
+  }, [accountId, chat?.name, chatId, deleting, onDeleted]);
+
   const name = chat?.name || chatId || "Conversation";
   return <div className="conversation-react-root" aria-label={name}>
     <header className="conversation-head">
       {onBack && <button type="button" className="back" onClick={onBack} aria-label="Back to conversations">‹</button>}
-      {chat?.picture ? <img className="avatar" src={chat.picture} alt="" /> : <span className="avatar avatar-letter" aria-hidden="true">{String(name)[0]?.toUpperCase()}</span>}<span className="chat-title"><b>{name}</b><small>Chat ID: {chatId || "Unavailable"}</small></span>
+      <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small>Chat ID: {chatId || "Unavailable"}</small></span>
+      <button type="button" className="conversation-delete" onClick={deleteConversation} disabled={deleting}>{deleting ? "Deleting…" : "Delete"}</button>
     </header>
     <div className="messages" ref={paneRef} onScroll={maybeLoadOlder}>
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
       {loading && !messages.length ? <p className="chat-loading">Loading messages…</p> : <div className="message-list">
-        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} onMediaResolved={resolveMedia}/></div>)}
+        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia}/></div>)}
       </div>}
     </div>
     <form className="composer" onSubmit={send}>
