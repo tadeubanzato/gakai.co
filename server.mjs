@@ -9,6 +9,7 @@ import { WebSocketServer } from 'ws';
 import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, extractMentionIds, hasMessageContent, messageView as domainMessageView, providerMessageId, resolveMentionLabels } from './src/domain/message.mjs';
 import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
 import { createBoundedCache } from './src/lib/lru-cache.mjs';
+import { decodeHtmlEntities } from './src/lib/html.mjs';
 
 const port = Number(process.env.PORT || 3000);
 const configuredPublicUrl = String(process.env.GAKAI_PUBLIC_URL || '').trim().replace(/\/$/, '');
@@ -173,7 +174,7 @@ const htmlMeta=(html,key)=>{
     new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${key}["']`,'i'),
     new RegExp(`<meta[^>]+(?:property|name)=["']${key}["'][^>]+content=["']([^"']+)["']`,'i'),
   ];
-  for(const re of patterns){const m=html.match(re);if(m?.[1])return m[1].replace(/&/g,'&');}
+  for(const re of patterns){const m=html.match(re);if(m?.[1])return decodeHtmlEntities(m[1]);}
   return null;
 };
 
