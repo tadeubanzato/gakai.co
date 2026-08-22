@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { chatOverview, chatTimestamp } from '../../src/domain/message.mjs';
+import { chatOverview, chatTimestamp, hasMessageContent } from '../../src/domain/message.mjs';
 
 const fixturePath = fileURLToPath(new URL('../fixtures/providers/waha/chat-overview.json', import.meta.url));
 const providerUrl = 'http://provider:3000';
@@ -39,4 +39,23 @@ test('chatOverview defaults unreadCount to 0 when the provider omits it', () => 
   const view = chatOverview({ id: 'x@c.us', name: 'No Unread' }, providerUrl);
   assert.equal(view.unreadCount, 0);
   assert.equal(view.lastMessage, null);
+});
+
+test('hasMessageContent rejects a fresh timestamp with no real message behind it', () => {
+  // Observed live: WAHA/WEBJS can bump lastMessage.timestamp to "now" during a
+  // background resync with body, text, and hasMedia all empty/false — no real
+  // message was sent. That must not count as recent activity.
+  assert.equal(hasMessageContent({ lastMessage: { timestamp: 1787438229, body: '', text: '', hasMedia: false } }), false);
+});
+
+test('hasMessageContent accepts a real text message', () => {
+  assert.equal(hasMessageContent({ lastMessage: { body: 'hello', text: '', hasMedia: false } }), true);
+});
+
+test('hasMessageContent accepts a media-only message with no caption', () => {
+  assert.equal(hasMessageContent({ lastMessage: { body: '', text: '', hasMedia: true } }), true);
+});
+
+test('hasMessageContent is false when there is no lastMessage at all', () => {
+  assert.equal(hasMessageContent({}), false);
 });

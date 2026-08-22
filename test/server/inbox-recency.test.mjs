@@ -12,11 +12,15 @@ const day = 24 * 60 * 60;
 // Fixed set of chats: a mix of recent, stale (older than the 60-day default
 // recency window), and one Gakai has recorded as deleted.
 const chatOverviews = [
-  { id: 'recent-1@c.us', name: 'Recent 1', lastMessage: { timestamp: now - 1 * day } },
-  { id: 'recent-2@c.us', name: 'Recent 2', lastMessage: { timestamp: now - 5 * day } },
-  { id: 'stale-1@c.us', name: 'Stale 1', lastMessage: { timestamp: now - 120 * day } },
-  { id: 'stale-2@c.us', name: 'Stale 2', lastMessage: { timestamp: now - 400 * day } },
-  { id: 'deleted-in-gakai@c.us', name: 'Deleted in Gakai', lastMessage: { timestamp: now - 2 * day } },
+  { id: 'recent-1@c.us', name: 'Recent 1', lastMessage: { timestamp: now - 1 * day, body: 'hi' } },
+  { id: 'recent-2@c.us', name: 'Recent 2', lastMessage: { timestamp: now - 5 * day, body: 'hey' } },
+  { id: 'stale-1@c.us', name: 'Stale 1', lastMessage: { timestamp: now - 120 * day, body: 'old' } },
+  { id: 'stale-2@c.us', name: 'Stale 2', lastMessage: { timestamp: now - 400 * day, body: 'older' } },
+  { id: 'deleted-in-gakai@c.us', name: 'Deleted in Gakai', lastMessage: { timestamp: now - 2 * day, body: 'gone' } },
+  // A resync "ghost": fresh timestamp, but no real message behind it (WAHA/WEBJS
+  // observed doing this — several chats sharing one identical touched
+  // timestamp with empty body/text and hasMedia:false).
+  { id: 'ghost@lid', name: 'Ghost Contact', lastMessage: { timestamp: now, body: '', text: '', hasMedia: false } },
 ];
 
 const mockProvider = http.createServer((req, res) => {
@@ -59,7 +63,7 @@ test('the inbox excludes chats with no activity in the recency window, even when
 
   assert.equal(response.status, 200);
   const ids = chats.map(c => c.id).sort();
-  assert.deepEqual(ids, ['recent-1@c.us', 'recent-2@c.us'], 'stale chats and the Gakai-deleted chat must not pad out the list');
+  assert.deepEqual(ids, ['recent-1@c.us', 'recent-2@c.us'], 'stale chats, the Gakai-deleted chat, and the fresh-timestamp-no-content ghost must not pad out the list');
 });
 
 test('the most recently active chat sorts first', async () => {

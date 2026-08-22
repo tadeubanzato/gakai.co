@@ -26,6 +26,19 @@ export function chatTimestamp(chat) {
   return normalizedTimestamp(chat.lastMessage?.timestamp || chat.lastMessage?._data?.timestamp || chat._chat?.lastMessage?.timestamp || chat._chat?.lastMessage?._data?.timestamp || chat.timestamp || chat._chat?.timestamp || 0);
 }
 
+// WAHA/WEBJS can touch a chat's timestamp during a background resync with no
+// real new message behind it (observed: several unrelated chats sharing the
+// exact same lastMessage.timestamp, all with empty body/text and
+// hasMedia:false). chatTimestamp() trusts that value at face value, which
+// makes an old, irrelevant chat look freshly active. Use this alongside
+// chatTimestamp() wherever "recently active" needs to mean a real message,
+// not just a touched timestamp.
+export function hasMessageContent(chat) {
+  const lastMessage = chat.lastMessage || chat._chat?.lastMessage;
+  if (!lastMessage) return false;
+  return Boolean(lastMessage.body || lastMessage.text || lastMessage.hasMedia);
+}
+
 export function chatOverview(chat, providerUrl) {
   return {
     id: chat.id, name: chat.name, picture: avatarUrl(chat.picture, providerUrl),

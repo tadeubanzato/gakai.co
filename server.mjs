@@ -6,7 +6,7 @@ import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac, creat
 import { DatabaseSync } from 'node:sqlite';
 import { createProviderClient } from './src/providers/index.mjs';
 import { WebSocketServer } from 'ws';
-import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, messageView as domainMessageView, providerMessageId } from './src/domain/message.mjs';
+import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, hasMessageContent, messageView as domainMessageView, providerMessageId } from './src/domain/message.mjs';
 import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
 import { createBoundedCache } from './src/lib/lru-cache.mjs';
 
@@ -816,7 +816,7 @@ async function enrichMessage(session,message){
     const chats=await allChatOverviews(id);
     const deleted=new Set((store.deletedChats||[]).filter(item=>item.accountId===id).map(item=>item.chatId));
     const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
-    const recent=chats.filter(chat=>!deleted.has(chat.id)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,30);
+    const recent=chats.filter(chat=>!deleted.has(chat.id)&&hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,30);
     return send(res,200,(await mapWithConcurrency(recent,2,chat=>enrichChatOverview(id,chat))).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
