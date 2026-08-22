@@ -344,17 +344,6 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     if (event.currentTarget.scrollTop <= 120) loadOlder();
   }, [loadOlder]);
 
-  // Short conversations may not fill the viewport enough to be scrollable.
-  // Continue paging only in that case; once it fills, further history loads
-  // happen naturally as the reader scrolls toward the top.
-  useEffect(() => {
-    if (loading || olderLoading || exhausted || !messages.length) return undefined;
-    const pane = paneRef.current;
-    if (!pane || pane.scrollTop > 120 || pane.scrollHeight > pane.clientHeight + 120) return undefined;
-    const frame = requestAnimationFrame(loadOlder);
-    return () => cancelAnimationFrame(frame);
-  }, [exhausted, loadOlder, loading, messages.length, olderLoading]);
-
   const send = useCallback(async event => {
     event.preventDefault();
     const field = event.currentTarget.elements.text;

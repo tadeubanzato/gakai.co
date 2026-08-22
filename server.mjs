@@ -238,11 +238,11 @@ async function accountView(session){
 }
 function normalizedTimestamp(value){const numeric=Number(value);if(Number.isFinite(numeric)&&numeric>0)return numeric>1e12?Math.floor(numeric/1000):numeric;const parsed=Date.parse(value);return Number.isFinite(parsed)?Math.floor(parsed/1000):0;}
 const config = label => label ? ({metadata:{'gakai.label':label}}) : {};
-function chatTimestamp(chat){return normalizedTimestamp(chat.lastMessage?.timestamp || chat._chat?.lastMessage?.timestamp || chat.timestamp || chat._chat?.timestamp || 0)}
+function chatTimestamp(chat){return normalizedTimestamp(chat.lastMessage?.timestamp || chat.lastMessage?._data?.timestamp || chat._chat?.lastMessage?.timestamp || chat._chat?.lastMessage?._data?.timestamp || chat.timestamp || chat._chat?.timestamp || 0)}
 function chatOverview(chat) {
   return { id:chat.id, name:chat.name, picture:avatarUrl(chat.picture), unreadCount:Number(chat.unreadCount ?? chat.unreadMessagesCount ?? chat._chat?.unreadCount ?? 0) || 0,
     timestamp:chatTimestamp(chat),
-    lastMessage:chat.lastMessage ? {body:chat.lastMessage.body || '', text:chat.lastMessage.text || '', timestamp:chat.lastMessage.timestamp || 0, hasMedia:Boolean(chat.lastMessage.hasMedia)} : null };
+    lastMessage:chat.lastMessage ? {body:chat.lastMessage.body || '', text:chat.lastMessage.text || '', timestamp:normalizedTimestamp(chat.lastMessage.timestamp || chat.lastMessage._data?.timestamp || 0), hasMedia:Boolean(chat.lastMessage.hasMedia)} : null };
 }
 const chatPictureCache=new Map();
 const chatPictureCacheTtl=24*60*60*1000;
