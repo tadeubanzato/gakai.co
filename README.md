@@ -120,13 +120,13 @@ The launcher:
 Output when ready:
 
 ```
-Gakai is starting. Open: http://gakai.localhost:3000
-Check readiness: http://gakai.localhost:3000/readyz
+Gakai URL:      http://<server-lan-ip>:3000
+Readiness:      http://<server-lan-ip>:3000/readyz
 ```
 
 ### 3. Create your admin account
 
-1. Open `http://gakai.localhost:3000` in your browser
+1. Open the **Gakai URL** printed by the launcher in your browser
 2. Gakai shows the **Create Account** screen on first visit
 3. Enter a username (3–40 characters) and password (10+ characters)
 4. Your password is stored as a **salted scrypt hash** — never in plaintext
@@ -139,7 +139,7 @@ By default Gakai runs on port **3000**. If that port is already in use on your m
 GAKAI_PORT=8080 ./scripts/gakai-up.sh
 ```
 
-Then open `http://gakai.localhost:8080` instead.
+Then open the URL printed by the launcher instead.
 
 ### Bind to localhost only (optional)
 
@@ -262,7 +262,6 @@ All variables are optional. The launcher sets safe defaults automatically.
 |---|---|---|
 | `GAKAI_PORT` | `3000` | Host port Gakai listens on |
 | `GAKAI_BIND_ADDRESS` | `0.0.0.0` | Network interface (`127.0.0.1` for local-only) |
-| `GAKAI_PUBLIC_HOST` | `gakai.localhost` | Hostname for generated self-links |
 | `GAKAI_PUBLIC_URL` | _(auto-derived)_ | Full public URL — set this when behind a reverse proxy |
 | `GAKAI_PROVIDER_API_KEY` | _(auto-generated)_ | Internal credential between Gakai and its provider |
 | `GAKAI_PROVIDER_WEBHOOK_SECRET` | _(auto-generated)_ | HMAC key for verifying provider webhook payloads |
@@ -289,10 +288,10 @@ docker compose logs -f provider  # WhatsApp engine
 ### Health checks
 
 ```sh
-curl http://gakai.localhost:3000/healthz
+curl http://localhost:3000/healthz
 # → {"ok":true,"service":"gakai"}
 
-curl http://gakai.localhost:3000/readyz
+curl http://localhost:3000/readyz
 # → {"ok":true} or error details if the provider is unreachable
 ```
 
