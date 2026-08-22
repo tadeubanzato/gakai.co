@@ -4,11 +4,10 @@ import { extname, join, normalize } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
 import { createProviderClient } from './src/providers/index.mjs';
 import { WebSocketServer } from 'ws';
 import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, messageView as domainMessageView, providerMessageId } from './src/domain/message.mjs';
+import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
 
 const port = Number(process.env.PORT || 3000);
 const configuredPublicUrl = String(process.env.GAKAI_PUBLIC_URL || '').trim().replace(/\/$/, '');
@@ -84,6 +83,10 @@ if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.a
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
 const sessions=new Map();
+// Guards against a double-click or slow-retry racing two concurrent n8n
+// connect attempts for the same account: each spans several awaited n8n API
+// calls with no atomic "does a connection already exist" check in between.
+const n8nConnectLocks=new Map();
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const sessionCookie=(token,remember)=>`home_session=${token}; HttpOnly; SameSite=Strict; Path=/${remember?"; Max-Age=2592000":""}`;
 const equalHex=(left,right)=>{try{const a=Buffer.from(left||"","hex"),b=Buffer.from(right||"","hex");return a.length===b.length&&timingSafeEqual(a,b)}catch{return false}};
@@ -194,25 +197,25 @@ async function instagramPreview(value){
   return result;
 }
 const externalPreviewCache=new Map();
-const privateAddress=address=>address==="::1"||address==="0.0.0.0"||address.startsWith("fe80:")||address.startsWith("fc")||address.startsWith("fd")||/^10\./.test(address)||/^127\./.test(address)||/^169\.254\./.test(address)||/^192\.168\./.test(address)||/^172\.(1[6-9]|2\d|3[01])\./.test(address);
-async function safePublicUrl(value){try{const url=new URL(value);if(!/^https?:$/.test(url.protocol)||url.hostname==="localhost"||url.hostname.endsWith(".local"))return null;const direct=isIP(url.hostname);const addresses=direct?[{address:url.hostname}]:await lookup(url.hostname,{all:true,verbatim:true});return addresses.length&&addresses.every(item=>!privateAddress(item.address))?url:null}catch{return null}}
-function n8nWebhookUrl(value){try{const url=new URL(value);return url.protocol==="https:"&&url.hostname!=="localhost"?url:null}catch{return null}}
+const safePublicUrl=async value=>(await validatePublicUrl(value))?.url||null;
+const n8nWebhookUrl=async value=>(await validatePublicUrl(value,{requireHttps:true}))?.url||null;
 async function openGraphPreview(value){
-  const url=await safePublicUrl(value);if(!url)throw Object.assign(new Error("Invalid public URL"),{status:400});
+  const validated=await validatePublicUrl(value);if(!validated)throw Object.assign(new Error("Invalid public URL"),{status:400});
+  const url=validated.url;
   const cached=externalPreviewCache.get(url.href);if(cached)return cached;
   const ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  const response=await fetch(url,{headers:{'user-agent':ua,'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},signal:AbortSignal.timeout(10000),redirect:'follow'});
+  const response=await fetchPinned(value,{headers:{'user-agent':ua,'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},signal:AbortSignal.timeout(10000)});
   if(!response.ok)throw Object.assign(new Error("Link preview unavailable"),{status:502});
   const html=(await response.text()).slice(0,1024*1024);
-  
+
   let title=htmlMeta(html,'og:title')||htmlMeta(html,'twitter:title');
   let description=htmlMeta(html,'og:description')||htmlMeta(html,'twitter:description')||htmlMeta(html,'description');
   let image=htmlMeta(html,'og:image')||htmlMeta(html,'twitter:image')||htmlMeta(html,'og:image:secure_url');
-  
+
   if(image&&!image.startsWith('http')){
     try{image=new URL(image,url.href).href}catch{image=null}
   }
-  
+
   // Expose a plain string in the Gakai preview model. Passing a URL object
   // across the JSON boundary was inconsistent between consumers and left the
   // React renderer without a usable image source.
@@ -284,7 +287,7 @@ async function resolveContact(session,rawId){
 }
 const automationSummary=subscription=>({id:subscription.id,accountId:subscription.accountId,name:subscription.name,url:subscription.url,productionUrl:subscription.productionUrl||subscription.url,testUrl:subscription.testUrl||null,testPhone:subscription.testPhone||null,enabled:subscription.enabled,events:subscription.events,secret:subscription.secret,createdAt:subscription.createdAt,lastDelivery:subscription.lastDelivery||null});
 async function automationFetch(subscription,event){
-  const request=url=>fetch(url,{method:'POST',headers:{'content-type':'application/json','x-gakai-secret':subscription.secret,'x-gakai-event-id':event.id,'user-agent':'Gakai/1.0'},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});
+  const request=url=>fetchPinned(url,{requireHttps:true,method:'POST',headers:{'content-type':'application/json','x-gakai-secret':subscription.secret,'x-gakai-event-id':event.id,'user-agent':'Gakai/1.0'},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});
   let response=await request(subscription.url);
   if(!response.ok&&event.source==='test'&&response.status===404&&subscription.url.includes('/webhook/'))response=await request(subscription.url.replace('/webhook/','/webhook-test/'));
   return response;
@@ -688,10 +691,11 @@ async function enrichMessage(session,message){
   }
   if(req.method==='GET'&&url.pathname==='/api/app/link-preview'){return send(res,200,await openGraphPreview(url.searchParams.get('url')||''));}
   if(req.method==='GET'&&url.pathname==='/api/app/link-image'){
-  const image=await safePublicUrl(url.searchParams.get('url')||'');
-  if(!image)return send(res,400,{message:'Invalid public image URL'});
+  const imageUrl=url.searchParams.get('url')||'';
   const ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  const response=await fetch(image,{headers:{'user-agent':ua,'accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'},signal:AbortSignal.timeout(10000),redirect:'follow'});
+  let response;
+  try{response=await fetchPinned(imageUrl,{headers:{'user-agent':ua,'accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'},signal:AbortSignal.timeout(10000)});}
+  catch{return send(res,400,{message:'Invalid public image URL'});}
   if(!response.ok)return send(res,502,{message:'Preview image unavailable'});
   const type=response.headers.get('content-type')||'image/jpeg';
   if(!type.startsWith('image/'))return send(res,502,{message:'Invalid preview image'});
@@ -788,8 +792,8 @@ async function enrichMessage(session,message){
   if(parts[4]==="integration-keys"&&req.method==="GET")return send(res,200,{keys:store.keys.filter(k=>k.accountId===id).map(({hash,token,...key})=>key)});
   if(parts[4]==="integration-keys"&&req.method==="POST"){const input=await readBody(req);const token=`wh_live_${randomBytes(24).toString("base64url")}`;const key={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"Integration").slice(0,80),scopes:Array.isArray(input.scopes)?input.scopes:["messages:read","messages:send"],createdAt:new Date().toISOString(),lastUsedAt:null,hash:hash(token)};store.keys.push(key);await persist();return send(res,201,{key:{...key,hash:undefined},token});}
   if(parts[4]==="automations"&&req.method==="GET")return send(res,200,{subscriptions:store.automationSubscriptions.filter(subscription=>subscription.accountId===id).map(automationSummary)});
-  if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await safePublicUrl(input.url||""),secret=String(input.secret||"").trim();if(!url||url.protocol!=="https:")return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@c.us",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json","x-gakai-secret":secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
-  if(parts[4]==="automations"&&!parts[5]&&req.method==="POST"){const input=await readBody(req),production=n8nWebhookUrl(input.productionUrl||input.url||""),test=n8nWebhookUrl(input.testUrl||""),requestedSecret=String(input.secret||"").trim();if(!production)return send(res,400,{message:"Use an HTTPS n8n production webhook URL"});if(input.testUrl&&!test)return send(res,400,{message:"Use an HTTPS n8n test webhook URL"});if(requestedSecret.length>256)return send(res,400,{message:"Invalid Header Auth secret"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:production.href,productionUrl:production.href,testUrl:test?.href||null,testPhone:String(input.testPhone||"").replace(/[^0-9]/g,"")||null,enabled:true,events:["message.received"],secret:requestedSecret||ensureN8nKey(id),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}
+  if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await n8nWebhookUrl(input.url||""),secret=String(input.secret||"").trim();if(!url)return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@c.us",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await fetchPinned(url.href,{requireHttps:true,method:"POST",headers:{"content-type":"application/json","x-gakai-secret":secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
+  if(parts[4]==="automations"&&!parts[5]&&req.method==="POST"){const input=await readBody(req),production=await n8nWebhookUrl(input.productionUrl||input.url||""),test=await n8nWebhookUrl(input.testUrl||""),requestedSecret=String(input.secret||"").trim();if(!production)return send(res,400,{message:"Use an HTTPS n8n production webhook URL"});if(input.testUrl&&!test)return send(res,400,{message:"Use an HTTPS n8n test webhook URL"});if(requestedSecret.length>256)return send(res,400,{message:"Invalid Header Auth secret"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:production.href,productionUrl:production.href,testUrl:test?.href||null,testPhone:String(input.testPhone||"").replace(/[^0-9]/g,"")||null,enabled:true,events:["message.received"],secret:requestedSecret||ensureN8nKey(id),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}
   if(parts[4]==="automations"&&parts[5]&&req.method==="PATCH"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req);if(typeof input.enabled==="boolean")subscription.enabled=input.enabled;await persist();return send(res,200,{subscription:automationSummary(subscription)});}
   if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@c.us`:"demo@c.us",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};try{const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});const response=await fetch(destination,{method:"POST",headers:{"content-type":"application/json","x-gakai-secret":subscription.secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true,subscription:automationSummary(subscription)})}catch(error){return send(res,502,{message:error.message||"Test delivery failed",subscription:automationSummary(subscription)})}}
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
@@ -828,42 +832,53 @@ async function enrichMessage(session,message){
   }
   if(parts[4]==='llm'&&req.method==='DELETE'){store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);await persist();return send(res,200,{ok:true});}
   if(parts[4]==='n8n'&&parts[5]==='connect'&&!parts[6]&&req.method==='POST'){
-    const input=await readBody(req);
-    let n8nBaseUrl=normalizeN8nBaseUrl(input.n8nUrl);
-    const existingStandard=store.n8nConnections.find(connection=>connection.accountId===id&&connection.kind==='standard');
-    const requestedApiKey=String(input.n8nApiKey||'').trim();
-    const n8nApiKey=requestedApiKey==='__keep__'?(decryptSecret(existingStandard?.n8nApiKeyEncrypted)||''):requestedApiKey;
-    try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
-    if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
-    if(!n8nApiKey)return send(res,400,{message:'n8n API key is required'});
-    // Use the URL the user actually used to reach Gakai unless an explicit
-    // GAKAI_PUBLIC_URL override is configured (for example behind a reverse proxy).
-    const publicUrl=requestPublicUrl(req);
-    const publicUrlParsed=new URL(publicUrl);
-    if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='127.0.0.1'||publicUrlParsed.hostname==='::1')
-      return send(res,400,{message:`Gakai resolved its callback URL as ${publicUrl}. n8n cannot call another service through its own loopback address. Open Gakai using a LAN IP, local hostname, or domain, or set GAKAI_PUBLIC_URL when using a reverse proxy.`});
-    try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
-    if(existingStandard){existingStandard.n8nUrl=n8nBaseUrl;existingStandard.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);await persist();return send(res,200,{ok:true,reused:true,workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`});}
-    let built;
-    try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,publicUrl,kind:'standard'}); }
-    catch(err){ return send(res,502,{message:'Failed to configure n8n: '+(err.message||'Unknown n8n error')}); }
-    const connectedAt=new Date().toISOString();
-    // Remove old n8n auto-connect key for this account
-    store.keys=store.keys.filter(k=>!(k.accountId===id&&k.name==='n8n auto-connect'));
-    store.keys.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:built.integrationToken,hash:hash(built.integrationToken)});
-    // Create/replace automation subscription (remove all for this account, then re-add the new one)
-    store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);
-    store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:true,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
-    // Remove old connections for this account (both kinds) and start fresh with the standard workflow
-    store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
-    store.n8nConnections.push({accountId:id,kind:'standard',n8nUrl:n8nBaseUrl,n8nApiKeyEncrypted:encryptSecret(n8nApiKey),workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
-    await persist();
-    return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${built.workflowId}`,webhookUrl:built.webhookUrl,connectedAt,activationWarning:built.activationWarning});
+    if(n8nConnectLocks.has(id))return send(res,409,{message:'A connection attempt is already in progress for this account'});
+    const attempt=(async()=>{
+      const input=await readBody(req);
+      let n8nBaseUrl=normalizeN8nBaseUrl(input.n8nUrl);
+      const existingStandard=store.n8nConnections.find(connection=>connection.accountId===id&&connection.kind==='standard');
+      const requestedApiKey=String(input.n8nApiKey||'').trim();
+      const n8nApiKey=requestedApiKey==='__keep__'?(decryptSecret(existingStandard?.n8nApiKeyEncrypted)||''):requestedApiKey;
+      try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
+      if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
+      if(!n8nApiKey)return send(res,400,{message:'n8n API key is required'});
+      // Use the URL the user actually used to reach Gakai unless an explicit
+      // GAKAI_PUBLIC_URL override is configured (for example behind a reverse proxy).
+      const publicUrl=requestPublicUrl(req);
+      const publicUrlParsed=new URL(publicUrl);
+      if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='127.0.0.1'||publicUrlParsed.hostname==='::1')
+        return send(res,400,{message:`Gakai resolved its callback URL as ${publicUrl}. n8n cannot call another service through its own loopback address. Open Gakai using a LAN IP, local hostname, or domain, or set GAKAI_PUBLIC_URL when using a reverse proxy.`});
+      try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
+      if(existingStandard){existingStandard.n8nUrl=n8nBaseUrl;existingStandard.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);await persist();return send(res,200,{ok:true,reused:true,workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`});}
+      let built;
+      try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,publicUrl,kind:'standard'}); }
+      catch(err){ return send(res,502,{message:'Failed to configure n8n: '+(err.message||'Unknown n8n error')}); }
+      const connectedAt=new Date().toISOString();
+      // Remove old n8n auto-connect key for this account
+      store.keys=store.keys.filter(k=>!(k.accountId===id&&k.name==='n8n auto-connect'));
+      store.keys.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:built.integrationToken,hash:hash(built.integrationToken)});
+      // Create/replace automation subscription (remove all for this account, then re-add the new one)
+      store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);
+      store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:true,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
+      // Remove old connections for this account (both kinds) and start fresh with the standard workflow
+      store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
+      store.n8nConnections.push({accountId:id,kind:'standard',n8nUrl:n8nBaseUrl,n8nApiKeyEncrypted:encryptSecret(n8nApiKey),workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
+      await persist();
+      return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${built.workflowId}`,webhookUrl:built.webhookUrl,connectedAt,activationWarning:built.activationWarning});
+    })();
+    n8nConnectLocks.set(id,attempt);
+    try{ return await attempt; } finally{ n8nConnectLocks.delete(id); }
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&parts[6]==='ai'&&req.method==='POST'){
-    if(!llmConfig(id))return send(res,400,{message:'Connect an LLM proxy before creating an AI workflow'});
-    try{const built=await createAgenticN8nWorkflow(id,req);if(!built)return send(res,409,{message:'Connect n8n first, or AI replies are already enabled'});return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic')?.n8nUrl+'/workflow/'+built.workflowId,activationWarning:built.activationWarning});}
-    catch(error){return send(res,error.status||502,{message:'Failed to create n8n AI workflow: '+(error.message||'Unknown error')});}
+    const lockKey=`${id}:agentic`;
+    if(n8nConnectLocks.has(lockKey))return send(res,409,{message:'A connection attempt is already in progress for this account'});
+    const attempt=(async()=>{
+      if(!llmConfig(id))return send(res,400,{message:'Connect an LLM proxy before creating an AI workflow'});
+      try{const built=await createAgenticN8nWorkflow(id,req);if(!built)return send(res,409,{message:'Connect n8n first, or AI replies are already enabled'});return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic')?.n8nUrl+'/workflow/'+built.workflowId,activationWarning:built.activationWarning});}
+      catch(error){return send(res,error.status||502,{message:'Failed to create n8n AI workflow: '+(error.message||'Unknown error')});}
+    })();
+    n8nConnectLocks.set(lockKey,attempt);
+    try{ return await attempt; } finally{ n8nConnectLocks.delete(lockKey); }
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='GET'){
     const connections=store.n8nConnections.filter(c=>c.accountId===id);
