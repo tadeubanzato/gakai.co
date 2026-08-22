@@ -5,6 +5,7 @@ home-data/
 *.db-wal
 *.db-shm
 node_modules/
+public/assets/
 coverage/
 *.log
 .DS_Store

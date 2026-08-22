@@ -109,11 +109,17 @@ function App(){
     }catch(x){fail(x.message)}
   },[fail]);
 
-  // Poll for chat list updates when account is working
+  // SSE carries normalized Gakai events. Keep a low-frequency fallback for
+  // provider changes that do not emit a webhook (for example, a QR lifecycle).
   useEffect(()=>{
     if(!account || account.status!=="WORKING") return;
-    const interval=setInterval(()=>load(account.id), 15000);
-    return()=>clearInterval(interval);
+    const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(account.id));
+    const update=event=>{
+      try{const change=JSON.parse(event.data);if(change.account?.id===account.id)load(account.id)}catch{}
+    };
+    stream.addEventListener("gakai",update);
+    const interval=setInterval(()=>load(account.id), 60000);
+    return()=>{stream.removeEventListener("gakai",update);stream.close();clearInterval(interval)};
   },[account?.id, account?.status, load]);
 
   useEffect(()=>{api("/api/app/auth/state").then(setAuth).catch(x=>fail(x.message))},[fail]);

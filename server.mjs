@@ -6,6 +6,8 @@ import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac, creat
 import { DatabaseSync } from 'node:sqlite';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { createProviderClient } from './src/providers/index.mjs';
+import { WebSocketServer } from 'ws';
 
 const port = Number(process.env.PORT || 3000);
 const configuredPublicUrl = String(process.env.GAKAI_PUBLIC_URL || '').trim().replace(/\/$/, '');
@@ -34,6 +36,11 @@ function requestPublicUrl(req) {
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
 const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
 const providerWebhookSecret=process.env.GAKAI_PROVIDER_WEBHOOK_SECRET || "";
+const provider = createProviderClient({
+  kind: process.env.GAKAI_PROVIDER_KIND || 'waha',
+  baseUrl: providerUrl,
+  apiKey: providerApiKey,
+});
 // Encrypts secrets we must read back later (e.g. the n8n API key, to call n8n's
 // API again on the user's behalf). Falls back to the provider webhook secret so
 // existing deployments keep working without a new required env var.
@@ -59,7 +66,7 @@ const dataFile=join(dataDir,"home.json");
 const dbFile=join(dataDir,"gakai.db");
 await mkdir(dataDir,{recursive:true});
 const db=new DatabaseSync(dbFile);
-db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK (id=1), data TEXT NOT NULL);");
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK (id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS app_events (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, type TEXT NOT NULL, occurred_at TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS app_events_account_created ON app_events(account_id, created_at);");
 let legacy={username:null,password:null,keys:[]};try{legacy=JSON.parse(await readFile(dataFile,"utf8"))}catch{}
 const savedState=db.prepare("SELECT data FROM app_state WHERE id=1").get();
 let store=savedState?JSON.parse(savedState.data):legacy;
@@ -84,23 +91,34 @@ const admin=req=>sessions.has(cookie(req).home_session);
 const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8' };
 const send = (res, status, data) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'}); res.end(JSON.stringify(data)); };
 async function readBody(req) { let value='',size=0; for await (const chunk of req){size+=chunk.length;if(size>1024*1024)throw Object.assign(new Error('Request body too large'),{status:413});value+=chunk;} req.rawBody=value; return value ? JSON.parse(value) : {}; }
-async function providerRequest(path, options={}) {
-  const headers = { accept:'application/json', ...(options.headers || {}) };
-  if (providerApiKey) headers['x-api-key'] = providerApiKey;
-  const response = await fetch(`${providerUrl}${path}`, {...options, headers});
-  const text = await response.text(); let data;
-  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!response.ok) throw Object.assign(new Error(data?.message || data || 'Provider request failed'), {status:response.status});
-  return data;
+const providerRequest = provider.request;
+const providerFile = provider.file;
+const liveEventStreams = new Set();
+const writeSseEvent = (res, event, id) => {
+  res.write(`id: ${id || event.id}\nevent: gakai\ndata: ${JSON.stringify(event)}\n\n`);
+};
+function recordAppEvent(event) {
+  const result = db.prepare('INSERT OR IGNORE INTO app_events(id, account_id, type, occurred_at, payload, created_at) VALUES(?,?,?,?,?,?)')
+    .run(event.id, event.account.id, event.type, event.occurredAt, JSON.stringify(event), new Date().toISOString());
+  if (!result.changes) return false;
+  db.prepare("DELETE FROM app_events WHERE id IN (SELECT id FROM app_events ORDER BY created_at DESC LIMIT -1 OFFSET 5000)").run();
+  for (const stream of liveEventStreams) {
+    if (stream.accountId === event.account.id) writeSseEvent(stream.res, event, event.id);
+  }
+  return true;
 }
-async function providerFile(path, extraHeaders={}) {
-  // The provider runtime's media links point at its own localhost. Relay only managed files.
-  if (!path.startsWith('/api/files/')) throw Object.assign(new Error('Invalid media path'), {status:400});
-  const headers = {...extraHeaders};
-  if (providerApiKey) headers['x-api-key'] = providerApiKey;
-  const response = await fetch(`${providerUrl}${path}`, {headers});
-  if (!response.ok) throw Object.assign(new Error('Media is unavailable'), {status:response.status});
-  return response;
+const typingSockets=new Set();
+const presencePolls=new Map();
+const socketOpen=socket=>socket.readyState===1;
+const presenceValue=value=>String(value?.presence||value?.status||value?.state||value?.data?.presence||'').toLowerCase();
+function broadcastTyping(accountId,chatId,payload,except){for(const socket of typingSockets)if(socket!==except&&socket.accountId===accountId&&socket.chatId===chatId&&socketOpen(socket))socket.send(JSON.stringify(payload));}
+function stopPresencePoll(key){const poll=presencePolls.get(key);if(!poll)return;clearInterval(poll.timer);presencePolls.delete(key)}
+function maybeStopPresencePoll(key){if(![...typingSockets].some(socket=>`${socket.accountId}:${socket.chatId}`===key))stopPresencePoll(key)}
+function startPresencePoll(accountId,chatId){
+  const key=`${accountId}:${chatId}`;if(presencePolls.has(key))return;
+  const poll={last:'',timer:null};
+  const read=async()=>{try{await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}/subscribe`,{method:'POST'});const value=presenceValue(await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}`));if(value!==poll.last){poll.last=value;broadcastTyping(accountId,chatId,{type:'presence',accountId,chatId,presence:value||'paused'})}}catch{}};
+  poll.timer=setInterval(read,2000);presencePolls.set(key,poll);read();
 }
 const mediaCache=new Map();
 async function cachedMedia(path){
@@ -269,7 +287,7 @@ function messageView(message) {
   // Always pass URL if available so client can fetch OG data; only omit if no URL at all
   const hasUrl = rawPreview && (rawPreview.url || rawPreview.canonicalUrl || rawPreview.link);
   const hasContent = rawPreview && (rawPreview.title || rawPreview.titleText || rawPreview.description || rawPreview.desc || rawPreview.thumbnail || rawPreview.thumbnailUrl || rawPreview.image || rawPreview.imageUrl);
-  return { id:message.id, timestamp:message.timestamp || 0, fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '', system:systemMessageView(message),
+  return { id:message.id, timestamp:normalizedTimestamp(message.timestamp || message._data?.timestamp || 0), fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '', system:systemMessageView(message),
     hasMedia:Boolean(message.hasMedia), media:message.media ? {url:message.media.url || null, mimetype:message.media.mimetype || null, filename:message.media.filename || null} : null, mediaUrl:message.mediaUrl || null, vCards:Array.isArray(message.vCards)?message.vCards:(Array.isArray(message._data?.vCards)?message._data.vCards:[]), sender:senderId?{id:senderId,name:senderName,picture:senderPicture}:null, linkPreview:hasUrl?{url:rawPreview.url||rawPreview.canonicalUrl||rawPreview.link||message.body||message.text||'',title:hasContent?(rawPreview.title||rawPreview.titleText||''):'',description:hasContent?(rawPreview.description||rawPreview.desc||''):'',image:hasContent?(rawPreview.thumbnail||rawPreview.thumbnailUrl||rawPreview.image||rawPreview.imageUrl||null):null}:null, ack:message.ack, ackName:message.ackName };
 }
 const contactsListCache=new Map();
@@ -315,6 +333,10 @@ async function dispatchAutomationEvent(payload){
   const chat={id:chatId,kind,name:payload.payload?.chatName||payload.payload?._data?.chatName||payload.payload?._data?.notifyName||null};
   if(message.sender?.id){const contact=await resolveContact(accountId,message.sender.id);message.sender={...message.sender,phone:contact.phone||null,name:message.sender.name||contact.name||null};if(kind==="direct")chat.phone=contact.phone||null;}
   const event={id:`evt_${payload.payload?.id||randomBytes(12).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
+  // Persist before notifying the browser or downstream automation. This gives
+  // reconnecting clients a small durable replay window and avoids exposing raw
+  // provider payloads outside the adapter boundary.
+  if (!recordAppEvent(event)) return;
   await Promise.allSettled([
     ...store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)).map(subscription=>deliverAutomation(subscription,event)),
     dispatchLLMReply(accountId,event)
@@ -665,6 +687,22 @@ async function enrichMessage(session,message){
   if(url.pathname==="/api/app/auth/profile"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{username:store.username||null});}
   if(url.pathname==="/api/app/auth/profile"&&req.method==="PATCH"){if(!admin(req))return send(res,401,{message:"Sign in required"});const input=await readBody(req),username=String(input.username||"").trim(),currentPassword=String(input.currentPassword||"");if(!currentPassword||!passwordMatches(currentPassword))return send(res,401,{message:"Current password is incorrect"});if(username&&(username.length<3||username.length>40))return send(res,400,{message:"Use a username between 3 and 40 characters"});if(input.newPassword&&String(input.newPassword).length<10)return send(res,400,{message:"Use a password with at least 10 characters"});if(username)store.username=username;if(input.newPassword)store.password=passwordHash(String(input.newPassword));await persist();return send(res,200,{ok:true,username:store.username});}
   if(!admin(req))return send(res,401,{message:'Sign in required'});
+  if(req.method==='GET'&&url.pathname==='/api/app/events'){
+    const accountId=String(url.searchParams.get('accountId')||'');
+    if(!accountId)return send(res,400,{message:'accountId is required'});
+    const afterId=String(req.headers['last-event-id']||url.searchParams.get('after')||'');
+    const after=afterId?db.prepare('SELECT created_at FROM app_events WHERE id=?').get(afterId)?.created_at:null;
+    const rows=after
+      ?db.prepare('SELECT id,payload FROM app_events WHERE account_id=? AND created_at>? ORDER BY created_at ASC LIMIT 250').all(accountId,after)
+      :db.prepare('SELECT id,payload FROM app_events WHERE account_id=? ORDER BY created_at DESC LIMIT 50').all(accountId).reverse();
+    res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
+    res.write(': connected\n\n');
+    for(const row of rows){try{writeSseEvent(res,JSON.parse(row.payload),row.id)}catch{}}
+    const stream={res,accountId};liveEventStreams.add(stream);
+    const heartbeat=setInterval(()=>res.write(': keepalive\n\n'),25000);
+    req.on('close',()=>{clearInterval(heartbeat);liveEventStreams.delete(stream)});
+    return;
+  }
   if(req.method==='GET'&&url.pathname==='/api/app/link-preview'){return send(res,200,await openGraphPreview(url.searchParams.get('url')||''));}
   if(req.method==='GET'&&url.pathname==='/api/app/link-image'){
   const image=await safePublicUrl(url.searchParams.get('url')||'');
@@ -739,7 +777,7 @@ async function enrichMessage(session,message){
     // The first screen must be fast. Media download is intentionally opt-in,
     // because the provider may need to retrieve every attachment before replying.
     const downloadMedia=url.searchParams.get('media') === '1';
-    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}&offset=${offset}&downloadMedia=${downloadMedia}`);
+    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}&offset=${offset}&sortBy=timestamp&sortOrder=desc&merge=true&downloadMedia=${downloadMedia}`);
     return send(res,200,(await Promise.all(messages.map(message=>enrichMessage(id,message)))).sort((a,b) => a.timestamp - b.timestamp));
   }
   if (req.method==='GET' && parts[4]==='message-media') {
@@ -866,11 +904,21 @@ async function enrichMessage(session,message){
   }
   return send(res,404,{message:'Not found'});
 }
-http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.headers.host}`); try {
+const server=http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.headers.host}`); try {
   if (url.pathname === '/healthz' || url.pathname === '/readyz' || url.pathname.startsWith('/api/')) return await api(req,res,url);
   // React owns application routes. Serve the shell for deep links so a direct
   // visit to an account details page does not get treated as a missing file.
   const requested=(url.pathname==='/'||url.pathname.startsWith('/accounts/')||url.pathname.startsWith('/details/'))?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
   if (!file.startsWith(publicDir)) return send(res,403,{message:'Forbidden'});
   const content=await readFile(file); res.writeHead(200,{'content-type':types[extname(file)]||'application/octet-stream','cache-control':'no-cache'}); res.end(content);
-} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}${configuredPublicUrl ? ` (public URL: ${configuredPublicUrl})` : ''}`));
+} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }});
+const wss=new WebSocketServer({noServer:true});
+wss.on('connection',(socket,req)=>{
+  const url=new URL(req.url,`http://${req.headers.host}`);
+  socket.accountId=String(url.searchParams.get('accountId')||'');socket.chatId=String(url.searchParams.get('chatId')||'');typingSockets.add(socket);startPresencePoll(socket.accountId,socket.chatId);
+  socket.send(JSON.stringify({type:'ready'}));
+  socket.on('message',raw=>{try{const input=JSON.parse(String(raw));if(input.type!=='presence'||input.accountId!==socket.accountId||input.chatId!==socket.chatId||!['typing','recording','paused'].includes(input.presence))return;providerRequest(`/api/${encodeURIComponent(socket.accountId)}/presence`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chatId:socket.chatId,presence:input.presence})}).catch(()=>{});broadcastTyping(socket.accountId,socket.chatId,{type:'presence',accountId:socket.accountId,chatId:socket.chatId,presence:input.presence},socket)}catch{}});
+  socket.on('close',()=>{typingSockets.delete(socket);maybeStopPresencePoll(`${socket.accountId}:${socket.chatId}`)});
+});
+server.on('upgrade',(req,socket,head)=>{const url=new URL(req.url,`http://${req.headers.host}`);if(url.pathname!=='/api/app/ws'||!admin(req)||!url.searchParams.get('accountId')||!url.searchParams.get('chatId')){socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();return;}wss.handleUpgrade(req,socket,head,client=>wss.emit('connection',client,req));});
+server.listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}${configuredPublicUrl ? ` (public URL: ${configuredPublicUrl})` : ''}`));

@@ -9,7 +9,9 @@ RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
+COPY --from=frontend /app/node_modules ./node_modules
 COPY server.mjs ./server.mjs
+COPY src ./src
 COPY --from=frontend /app/public ./public
 ENV PORT=3000
 EXPOSE 3000

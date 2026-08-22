@@ -17,7 +17,7 @@ function serializedId(value) {
   try { return JSON.stringify(value); } catch { return ""; }
 }
 const idFor = (message, index) => serializedId(message?.id) || `${message?.timestamp || 0}-${message?.fromMe ? "out" : "in"}-${message?.body || message?.text || "message"}-${index}`;
-const stamp = (message) => Number(message?.timestamp) || 0;
+const stamp = (message) => { const value=Number(message?.timestamp); if(Number.isFinite(value)&&value>0)return value; const parsed=Date.parse(message?.timestamp||""); return Number.isFinite(parsed)?Math.floor(parsed/1000):0; };
 const pageOf = (result) => Array.isArray(result) ? result : (result?.messages || []);
 const endpoint = (accountId, chatId, offset = 0) => `/api/app/accounts/${encodeURIComponent(accountId)}/messages?chatId=${encodeURIComponent(chatId)}&limit=${PAGE_SIZE}&offset=${offset}`;
 
@@ -189,7 +189,19 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   const [exhausted, setExhausted] = useState(false);
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [remoteTyping, setRemoteTyping] = useState(false);
+  const typingSocketRef = useRef(null);
+  const typingTimerRef = useRef(null);
   const chatId = chat?.id;
+  const sendPresence = useCallback(presence => { const socket=typingSocketRef.current; if(socket?.readyState===1)socket.send(JSON.stringify({type:"presence",accountId,chatId,presence})); },[accountId,chatId]);
+  useEffect(()=>{
+    setRemoteTyping(false); if(!accountId||!chatId)return undefined;
+    const protocol=window.location.protocol==="https:"?"wss":"ws";
+    const socket=new WebSocket(`${protocol}://${window.location.host}/api/app/ws?accountId=${encodeURIComponent(accountId)}&chatId=${encodeURIComponent(chatId)}`);
+    typingSocketRef.current=socket;
+    socket.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==="presence")setRemoteTyping(value.presence==="typing"||value.presence==="recording")}catch{}};
+    return()=>{if(typingSocketRef.current===socket)typingSocketRef.current=null;socket.close();setRemoteTyping(false)};
+  },[accountId,chatId]);
 
   const captureAnchor = useCallback(() => {
     const pane = paneRef.current;
@@ -334,6 +346,7 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     const field = event.currentTarget.elements.text;
     const text = field?.value?.trim();
     if (!text || !chatId) return;
+    if(typingTimerRef.current)clearTimeout(typingTimerRef.current); sendPresence("paused");
     field.value = "";
     const pending = { id: `pending-${Date.now()}`, body: text, fromMe: true, timestamp: Math.floor(Date.now() / 1000), pending: true };
     followLatestRef.current = true;
@@ -347,7 +360,8 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       setMessages(current => current.filter(message => message.id !== pending.id));
       setError(cause.message || "Could not send message.");
     }
-  }, [accountId, chat, chatId, onSent]);
+  }, [accountId, chat, chatId, onSent, sendPresence]);
+  const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800)},[sendPresence]);
 
   const deleteConversation = useCallback(async () => {
     if (!chatId || deleting || !window.confirm(`Delete the conversation with ${chat?.name || chatId}? This removes it from WhatsApp and cannot be undone.`)) return;
@@ -376,12 +390,15 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
         {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia}/></div>)}
       </div>}
     </div>
+    {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
     <form className="composer" onSubmit={send}>
       <textarea
         name="text"
         rows="1"
         placeholder="Type a message"
         aria-label="Message"
+        onInput={handleComposerInput}
+        onBlur={()=>{if(typingTimerRef.current)clearTimeout(typingTimerRef.current);sendPresence("paused")}}
         onKeyDown={e => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
