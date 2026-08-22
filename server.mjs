@@ -73,6 +73,7 @@ let store=savedState?JSON.parse(savedState.data):legacy;
 const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
 if(!Array.isArray(store.deletedChats))store.deletedChats=[];
+if(!Array.isArray(store.messageReactions))store.messageReactions=[];
 if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
 if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
 let migratedN8nConnections=false;for(const connection of store.n8nConnections){if(!connection.kind){connection.kind='standard';migratedN8nConnections=true}}if(migratedN8nConnections)persist();
@@ -249,7 +250,7 @@ function chatPictureFor(session,chatId){
   const key=`${session}:${chatId}`,cached=chatPictureCache.get(key);
   if(cached&&cached.expiresAt>Date.now())return cached.value;
   const entry={value:null,expiresAt:Date.now()+5*60*1000};
-  const task=providerRequest(`/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/picture?refresh=true`).then(picture=>{entry.expiresAt=Date.now()+chatPictureCacheTtl;return avatarUrl(picture?.url)}).catch(()=>null);
+  const task=providerRequest(`/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/picture?refresh=true`).then(picture=>{entry.expiresAt=Date.now()+chatPictureCacheTtl;return avatarUrl(picture?.profilePictureURL||picture?.url||picture?.profilePicture||picture)}).catch(()=>null);
   entry.value=task;chatPictureCache.set(key,entry);
   if(chatPictureCache.size>500)chatPictureCache.delete(chatPictureCache.keys().next().value);
   return task;
@@ -278,6 +279,8 @@ function systemMessageView(message){
   if(type==='e2e_notification')return {kind:'security',label:'Messages are end-to-end encrypted'};
   return type?{kind:'system',label:'WhatsApp system message'}:null;
 }
+function providerMessageId(value){if(typeof value==='string'||typeof value==='number')return String(value);if(!value||typeof value!=='object')return null;const id=value._serialized||value.serialized||value.id;return typeof id==='string'||typeof id==='number'?String(id):null}
+function replyView(reply){if(!reply||typeof reply!=='object')return null;return {id:providerMessageId(reply.id),body:reply.body||reply.text||'',hasMedia:Boolean(reply.hasMedia||reply.media),participant:reply.participant||null}}
 function messageView(message) {
   const participant=message.participant && typeof message.participant==='object'?message.participant:{};
   const senderId=participant.id||message.participant||message.author||message.from||null;
@@ -287,7 +290,7 @@ function messageView(message) {
   // Always pass URL if available so client can fetch OG data; only omit if no URL at all
   const hasUrl = rawPreview && (rawPreview.url || rawPreview.canonicalUrl || rawPreview.link);
   const hasContent = rawPreview && (rawPreview.title || rawPreview.titleText || rawPreview.description || rawPreview.desc || rawPreview.thumbnail || rawPreview.thumbnailUrl || rawPreview.image || rawPreview.imageUrl);
-  return { id:message.id, timestamp:normalizedTimestamp(message.timestamp || message._data?.timestamp || 0), fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '', system:systemMessageView(message),
+  return { id:providerMessageId(message.id)||message.id, timestamp:normalizedTimestamp(message.timestamp || message._data?.timestamp || 0), fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '', system:systemMessageView(message), replyTo:replyView(message.replyTo||message.quotedMsg||message._data?.replyTo),
     hasMedia:Boolean(message.hasMedia), media:message.media ? {url:message.media.url || null, mimetype:message.media.mimetype || null, filename:message.media.filename || null} : null, mediaUrl:message.mediaUrl || null, vCards:Array.isArray(message.vCards)?message.vCards:(Array.isArray(message._data?.vCards)?message._data.vCards:[]), sender:senderId?{id:senderId,name:senderName,picture:senderPicture}:null, linkPreview:hasUrl?{url:rawPreview.url||rawPreview.canonicalUrl||rawPreview.link||message.body||message.text||'',title:hasContent?(rawPreview.title||rawPreview.titleText||''):'',description:hasContent?(rawPreview.description||rawPreview.desc||''):'',image:hasContent?(rawPreview.thumbnail||rawPreview.thumbnailUrl||rawPreview.image||rawPreview.imageUrl||null):null}:null, ack:message.ack, ackName:message.ackName };
 }
 const contactsListCache=new Map();
@@ -297,7 +300,9 @@ async function contactsFor(session){
 }
 const contactCache=new Map();
 const profilePictureCache=new Map();
+const accountIdentityCache=new Map();
 const profileCacheTtl=5*60*1000;
+async function accountIdentityFor(session){const cached=accountIdentityCache.get(session);if(cached&&cached.expiresAt>Date.now())return cached.id;try{const value=await providerRequest(`/api/sessions/${encodeURIComponent(session)}`),id=String(value?.me?.id||'');accountIdentityCache.set(session,{id,expiresAt:Date.now()+profileCacheTtl});return id}catch{return ''}}
 function profilePictureFor(session,contactId){const key=`${session}:${contactId}`,cached=profilePictureCache.get(key);if(cached&&cached.expiresAt>Date.now())return cached.value;profilePictureCache.delete(key);const task=providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`);const entry={value:task,expiresAt:Date.now()+profileCacheTtl};profilePictureCache.set(key,entry);task.catch(()=>{if(profilePictureCache.get(key)===entry)profilePictureCache.delete(key)});if(profilePictureCache.size>500)profilePictureCache.delete(profilePictureCache.keys().next().value);return task;}
 async function resolveContact(session,rawId){
   const key=`${session}:${rawId}`,cached=contactCache.get(key);if(cached&&cached.expiresAt>Date.now())return cached.value;contactCache.delete(key);
@@ -656,11 +661,18 @@ function normalizedPreviewImage(value){
   }
 async function enrichMessage(session,message){
   const view=messageView(message);
+  const reaction=store.messageReactions.find(item=>item.accountId===session&&item.messageId===String(view.id));
+  if(reaction)view.reaction=reaction.reaction;
   if(view.sender?.id){
     const resolved=await resolveContact(session,view.sender.id);
     view.sender={...view.sender,id:resolved.id||view.sender.id,name:resolved.name||view.sender.name||String(resolved.id||view.sender.id).replace(/@(c|s|g)\.us$/,''),picture:resolved.picture||view.sender.picture||null};
   }
   if(view.linkPreview)view.linkPreview.image=normalizedPreviewImage(view.linkPreview.image);
+  const rawMentionIds=Array.isArray(message._data?.mentionedJidList)?message._data.mentionedJidList:[];
+  if(rawMentionIds.length){
+    const ownId=await accountIdentityFor(session);
+    view.mentions=(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId));const id=contact.id||String(rawId);const ownNumber=ownId.replace(/@.*$/,''),mentionNumber=id.replace(/@.*$/,'');return {id,name:contact.name||mentionNumber,isMe:Boolean(ownId&&(id===ownId||mentionNumber===ownNumber))}}))).filter(mention=>mention.name);
+  }
   const body=String(view.body||view.text||'');
   const mentionIds=[...new Set([...body.matchAll(/@(\d{5,})/g)].map(match=>match[1]))].slice(0,8);
   if(mentionIds.length){
@@ -793,9 +805,17 @@ async function enrichMessage(session,message){
     if(!chatId||!messageId)return send(res,400,{message:'chatId and messageId are required'});
     return send(res,200,{message:await enrichMessage(id,await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}?downloadMedia=true`))});
   }
+  if(req.method==='POST'&&parts[4]==='messages'&&parts[5]&&parts[6]==='reaction'){
+    const input=await readBody(req),messageId=providerMessageId(decodeURIComponent(parts[5]));
+    if(!messageId)return send(res,400,{message:'Invalid message ID'});
+    const reaction=String(input.reaction||'');if(reaction.length>16)return send(res,400,{message:'Invalid reaction'});
+    await providerRequest('/api/reaction',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,messageId,reaction})});
+    store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));if(reaction)store.messageReactions.push({accountId:id,messageId,reaction});await persist();
+    return send(res,200,{ok:true,reaction});
+  }
   if (req.method==='POST' && parts[4]==='messages') {
-    const input=await readBody(req); if (!input.chatId || !input.text?.trim()) return send(res,400,{message:'Recipient and message are required'});
-    const sent=await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,chatId:input.chatId,text:input.text.trim()})});
+    const input=await readBody(req),replyTo=providerMessageId(input.replyTo); if (!input.chatId || !input.text?.trim()) return send(res,400,{message:'Recipient and message are required'});
+    const sent=await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,chatId:input.chatId,text:input.text.trim(),...(replyTo?{reply_to:replyTo}:{})})});
     return send(res,200,{message:messageView(sent || {})});
   }
   if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req);const session=await providerRequest(`/api/sessions/${encodeURIComponent(id)}`);const next={...(session.config||{}),metadata:{...(session.config?.metadata||{}),'gakai.label':String(input.label||'WhatsApp account').slice(0,80)}};await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({config:next})});return send(res,200,{ok:true});}
