@@ -371,6 +371,78 @@ function makeUUID() {
   return `${b.slice(0,8)}-${b.slice(8,12)}-${b.slice(12,16)}-${b.slice(16,20)}-${b.slice(20,32)}`;
 }
 function llmConfig(accountId){return store.llmConfigs.find(c=>c.accountId===accountId)||null;}
+const llmProviders=new Set(['omniroute','litellm']);
+function inferLlmProvider(baseUrl,requested){
+  if(llmProviders.has(requested))return requested;
+  try{const url=new URL(baseUrl);return /(^|\.)litellm\b/i.test(url.hostname)||url.port==='4000'?'litellm':'omniroute';}catch{return 'omniroute';}
+}
+function normalizeLlmBaseUrl(value,provider){
+  const url=new URL(String(value||'').trim());
+  // Accept either an OpenAI-compatible base URL or the complete Chat
+  // Completions endpoint. Keep any proxy-specific path prefix and query
+  // parameters (for example, a version selected by the proxy).
+  url.hash='';
+  url.pathname=url.pathname.replace(/\/+$/,'').replace(/\/chat\/completions$/i,'');
+  // LiteLLM's OpenAI-compatible API is served under /v1.
+  if(provider==='litellm'&&!/(^|\/)v1$/i.test(url.pathname))url.pathname=`${url.pathname}/v1`.replace(/\/\/+/g,'/');
+  return url.href;
+}
+function llmChatCompletionsUrl(baseUrl){
+  const url=new URL(baseUrl);
+  url.pathname=`${url.pathname.replace(/\/+$/,'')}/chat/completions`.replace(/\/\/+/g,'/');
+  return url.href;
+}
+function llmRequestBody(config,messages,extra={}){
+  // Both supported proxies use OpenAI Chat Completions. This shared adapter
+  // keeps native replies, connection verification, and n8n in agreement.
+  return {model:config.model,stream:false,messages,...extra};
+}
+const defaultAssistantInstructions=`You are the WhatsApp assistant for this business.
+
+Reply only to messages from approved phone numbers: +15551234567 and +15557654321. For everyone else, do not send a reply.
+Use a friendly, warm, professional tone. Keep replies concise and natural for WhatsApp. Answer customer questions, help with scheduling and next steps, and ask one clear follow-up question when information is missing.
+Do not make up facts, prices, availability, or promises. If a request needs a human, say that you will pass it on. Reply with only the message text—no labels, markdown, or explanation.`;
+function assistantInstructions(value){return String(value||'').trim()||defaultAssistantInstructions;}
+
+// n8n versions released before the public credential-update endpoint return
+// 405 for PUT /credentials/{id}. For those versions, replace only Gakai's
+// dedicated credential and repoint the generated Chat Model in the same
+// workflow update. This leaves customer-owned credentials untouched.
+async function syncN8nLlmCredential(connection,n8nApiKey,config){
+  const name=`Gakai LLM Proxy – ${config.accountId}`;
+  const body={name,type:'openAiApi',data:{apiKey:config.apiKey,url:config.baseUrl}};
+  try{
+    await n8nRequest(connection.n8nUrl,n8nApiKey,`/credentials/${encodeURIComponent(connection.llmCredentialId)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    return {id:String(connection.llmCredentialId),name,replacedCredentialId:null};
+  }catch(error){
+    if(error.status!==405)throw error;
+    const replacement=await n8nRequest(connection.n8nUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    return {id:String(replacement.id),name:replacement.name||name,replacedCredentialId:String(connection.llmCredentialId)};
+  }
+}
+
+// Keep Gakai's LLM settings and the generated n8n AI Agent in lockstep.
+// We fetch first so any customer edits to other workflow nodes remain intact.
+async function syncAgenticN8nInstructions(accountId,config){
+  const connection=store.n8nConnections.find(item=>item.accountId===accountId&&item.kind==='agentic');
+  if(!connection)return false;
+  const n8nApiKey=decryptSecret(connection.n8nApiKeyEncrypted);
+  if(!n8nApiKey)throw new Error('Reauthorize n8n before updating the AI Agent settings');
+  const workflow=await n8nRequest(connection.n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`);
+  const agent=workflow?.nodes?.find(node=>node.name==='AI Agent'&&node.type==='@n8n/n8n-nodes-langchain.agent');
+  const model=workflow?.nodes?.find(node=>node.name==='OpenAI Chat Model'&&node.type==='@n8n/n8n-nodes-langchain.lmChatOpenAi');
+  if(!agent||!model)throw new Error('The generated n8n AI Agent or Chat Model node could not be found. Recreate the AI workflow before saving settings.');
+  if(!connection.llmCredentialId)throw new Error('The generated n8n LLM credential could not be found. Recreate the AI workflow before saving settings.');
+  const credential=await syncN8nLlmCredential(connection,n8nApiKey,config);
+  agent.parameters={...(agent.parameters||{}),options:{...(agent.parameters?.options||{}),systemMessage:assistantInstructions(config.systemPrompt)}};
+  model.parameters={...(model.parameters||{}),model:{...(typeof model.parameters?.model==='object'?model.parameters.model:{}),__rl:true,mode:'list',value:config.model}};
+  model.credentials={...(model.credentials||{}),openAiApi:{id:credential.id,name:credential.name}};
+  await n8nRequest(connection.n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({name:workflow.name,nodes:workflow.nodes,connections:workflow.connections,settings:workflow.settings||{executionOrder:'v1'}})});
+  await publishN8nWorkflow(connection.n8nUrl,n8nApiKey,connection.workflowId);
+  connection.llmCredentialId=credential.id;
+  if(credential.replacedCredentialId)await deleteN8nCredentialQuietly(connection.n8nUrl,n8nApiKey,credential.replacedCredentialId);
+  return true;
+}
 
 // Builds one n8n workflow (Webhook -> [Set | AI Agent] -> Send Reply) and its
 // dedicated credentials. Used both for the initial n8n connect and for creating
@@ -436,7 +508,7 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}
     if(accountLlm){
       // n8n's OpenAI credential uses `url` for an OpenAI-compatible base endpoint.
       llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${accountId}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,url:accountLlm.baseUrl}})});
-      const systemPrompt=accountLlm.systemPrompt||'You are a helpful WhatsApp assistant. Reply concisely and helpfully. Only reply with the message text, no formatting or labels.';
+      const systemPrompt=assistantInstructions(accountLlm.systemPrompt);
       const agentNode={
         id:middleNodeId,
         name:'AI Agent',
@@ -529,7 +601,7 @@ async function createAgenticN8nWorkflow(accountId,req){
   return built;
 }
 async function llmChat(config,messages){
-  const response=await fetch(`${config.baseUrl.replace(/\/+$/,'')}/chat/completions`,{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify({model:config.model,messages}),signal:AbortSignal.timeout(30000)});
+  const response=await fetch(llmChatCompletionsUrl(config.baseUrl),{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify(llmRequestBody(config,messages)),signal:AbortSignal.timeout(30000)});
   const text=await response.text();let data;try{data=JSON.parse(text)}catch{throw new Error('LLM proxy returned invalid JSON')}
   if(!response.ok)throw new Error(data?.error?.message||data?.message||`LLM proxy error ${response.status}`);
   return data?.choices?.[0]?.message?.content||'';
@@ -537,7 +609,7 @@ async function llmChat(config,messages){
 async function dispatchLLMReply(accountId,event){
   const config=llmConfig(accountId);if(!config||!config.nativeEnabled)return;
   const chatId=event.chat?.id;const userText=event.message?.body||event.message?.text||'';if(!chatId||!userText)return;
-  const systemPrompt=config.systemPrompt||'You are a helpful WhatsApp assistant. Reply concisely and helpfully.';
+  const systemPrompt=assistantInstructions(config.systemPrompt);
   try{
     const reply=await llmChat(config,[{role:'system',content:systemPrompt},{role:'user',content:userText}]);
     if(!reply.trim())return;
@@ -693,31 +765,36 @@ async function enrichMessage(session,message){
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
   // LLM proxy config endpoints
-  if(parts[4]==='llm'&&req.method==='GET'){const cfg=llmConfig(id);return send(res,200,cfg?{configured:true,baseUrl:cfg.baseUrl,model:cfg.model,systemPrompt:cfg.systemPrompt||'',nativeEnabled:cfg.nativeEnabled||false,apiKeyLength:String(cfg.apiKey||'').length,apiKeyLast4:String(cfg.apiKey||'').slice(-4)}:{configured:false});}
+  if(parts[4]==='llm'&&parts[5]==='test'&&req.method==='POST'){const cfg=llmConfig(id),input=await readBody(req),prompt=String(input.prompt||'').trim();if(!cfg)return send(res,409,{message:'Save an LLM proxy before testing it'});if(!prompt||prompt.length>4000)return send(res,400,{message:'Enter a test prompt up to 4,000 characters'});try{return send(res,200,{reply:await llmChat(cfg,[{role:'system',content:cfg.systemPrompt||'You are a helpful assistant.'},{role:'user',content:prompt}])});}catch(error){return send(res,502,{message:error.message||'LLM test failed'});}}
+  if(parts[4]==='llm'&&req.method==='GET'){const cfg=llmConfig(id);return send(res,200,cfg?{configured:true,provider:cfg.provider||inferLlmProvider(cfg.baseUrl),baseUrl:cfg.baseUrl,model:cfg.model,systemPrompt:cfg.systemPrompt||'',nativeEnabled:cfg.nativeEnabled||false,apiKeyLength:String(cfg.apiKey||'').length,apiKeyLast4:String(cfg.apiKey||'').slice(-4)}:{configured:false});}
   if(parts[4]==='llm'&&req.method==='POST'){
     const input=await readBody(req);
-    const baseUrl=String(input.baseUrl||'').trim().replace(/\/+$/,'');
+    let baseUrl=String(input.baseUrl||'').trim().replace(/\/+$/,'');
     const existing=llmConfig(id);
     // __keep__ means "don't change the stored API key" (used by the skill/settings update form)
     const apiKey=String(input.apiKey||'')==='__keep__'?(existing?.apiKey||''):String(input.apiKey||'').trim();
     const model=String(input.model||'').trim();
     if(!baseUrl)return send(res,400,{message:'Proxy URL is required'});
-    try{new URL(baseUrl)}catch{return send(res,400,{message:'Enter a valid proxy URL'});}
+    const provider=inferLlmProvider(baseUrl,String(input.provider||''));
+    try{baseUrl=normalizeLlmBaseUrl(baseUrl,provider)}catch{return send(res,400,{message:'Enter a valid proxy URL'});}
     if(!apiKey)return send(res,400,{message:'API key is required'});
     if(!model)return send(res,400,{message:'Model name is required'});
     // Skip connection test when only updating skill/settings (apiKey kept, baseUrl+model unchanged)
     const settingsOnly=String(input.apiKey||'')==='__keep__'&&existing&&existing.baseUrl===baseUrl&&existing.model===model;
     if(!settingsOnly){
       try{
-        const test=await fetch(`${baseUrl}/chat/completions`,{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${apiKey}`},body:JSON.stringify({model,messages:[{role:'user',content:'hi'}],max_tokens:1}),signal:AbortSignal.timeout(15000)});
+        const test=await fetch(llmChatCompletionsUrl(baseUrl),{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${apiKey}`},body:JSON.stringify(llmRequestBody({model},[{role:'user',content:'hi'}],{max_tokens:1})),signal:AbortSignal.timeout(15000)});
         const td=await test.json().catch(()=>({}));
         if(!test.ok&&test.status!==400)throw new Error(td?.error?.message||`Proxy returned ${test.status}`);
       }catch(err){return send(res,400,{message:'Could not connect to LLM proxy: '+err.message});}
     }
+    const nextConfig={accountId:id,provider,baseUrl,apiKey,model,systemPrompt:assistantInstructions(String(input.systemPrompt||'').slice(0,4000)),nativeEnabled:Boolean(input.nativeEnabled),configuredAt:existing?.configuredAt||new Date().toISOString()};
+    let n8nInstructionsSynced=false;
+    try{n8nInstructionsSynced=await syncAgenticN8nInstructions(id,nextConfig);}catch(error){return send(res,502,{message:'LLM proxy verified, but the n8n AI workflow was not updated: '+(error.message||'Unknown error')});}
     store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);
-    store.llmConfigs.push({accountId:id,baseUrl,apiKey,model,systemPrompt:String(input.systemPrompt||'').slice(0,4000),nativeEnabled:Boolean(input.nativeEnabled),configuredAt:existing?.configuredAt||new Date().toISOString()});
+    store.llmConfigs.push(nextConfig);
     await persist();
-    return send(res,200,{ok:true});
+    return send(res,200,{ok:true,n8nInstructionsSynced});
   }
   if(parts[4]==='llm'&&req.method==='DELETE'){store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);await persist();return send(res,200,{ok:true});}
   if(parts[4]==='n8n'&&parts[5]==='connect'&&!parts[6]&&req.method==='POST'){
