@@ -136,13 +136,11 @@ function LinkPreview({ body, preview }) {
     if (!instagram && !imageNode.dataset.directFallback && imageUrl) { imageNode.dataset.directFallback="true"; imageNode.src=imageUrl; return; }
     imageNode.style.display="none";
   }} />;
-  // Instagram: a full-width image above the real message text reads better
-  // than a small side-by-side card duplicating title/description the
-  // caption already carries. Fall back to a plain "Open on Instagram" link
-  // when there's no image (fetch failed, or the post genuinely has none).
-  if (instagram) return previewImage
-    ? <a className="link-preview instagram-image-preview" href={url} target="_blank" rel="noreferrer">{previewImage}</a>
-    : <a className="link-preview instagram-native-preview" href={url} target="_blank" rel="noreferrer"><div className="site-preview-mark instagram-mark" aria-hidden="true">◎</div><span><em>Instagram</em><small className="instagram-open">Open on Instagram ↗</small></span></a>;
+  // Instagram: image on top, post info (label/title/description/open link)
+  // below it, same card — this whole card renders above the message text
+  // (see MessageCard). Keep the full info block even without an image, so
+  // the card doesn't jump between a tiny fallback and a tall image card.
+  if (instagram) return <a className="link-preview instagram-native-preview" href={url} target="_blank" rel="noreferrer">{previewImage || <div className="site-preview-mark instagram-mark" aria-hidden="true">◎</div>}<span><em>Instagram</em><b>{readable(data.title || "Instagram post", 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}<small className="instagram-open">Open on Instagram ↗</small></span></a>;
   if (!hasContent) {
     let hostname = "Website", label = "Open website";
     try {
