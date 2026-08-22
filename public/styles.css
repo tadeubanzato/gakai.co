@@ -1,5 +1,5 @@
 :root{--ink:#e9edef;--muted:#9aabb4;--line:#293840;--bg:#0b141a;--panel:#111b21;--soft:#202c33;--green:#25d366;font:15px/1.4 Inter,system-ui,sans-serif;color:var(--ink);background:var(--bg)}*{box-sizing:border-box}html,body,#app{height:100%;overflow:hidden}body{margin:0}button,input,textarea{font:inherit}button{border:0;cursor:pointer}.app{height:100dvh;display:grid;grid-template-columns:260px minmax(0,1fr);overflow:hidden}.sidebar{background:var(--panel);border-right:1px solid var(--line);padding:22px 14px;display:flex;flex-direction:column;min-height:0}.logo{font-size:19px;font-weight:750;padding:0 10px 25px}.logo b{background:var(--green);color:#063b29;border-radius:9px;padding:5px 9px;margin-right:6px}.nav{background:none;color:var(--muted);text-align:left;border-radius:9px;padding:11px 13px;margin-bottom:4px}.nav.on,.nav:hover{background:var(--soft);color:var(--ink)}.account-switch{margin-top:18px;border-top:1px solid var(--line);padding-top:12px;overflow:auto}.account{width:100%;background:none;color:var(--ink);text-align:left;display:flex;gap:9px;padding:10px;border-radius:9px}.account.selected{background:var(--soft)}.account i,.pair-status i{width:9px;height:9px;border-radius:50%;background:#db9d35;margin-top:5px}.account i.good,.pair-status i{background:var(--green)}small,p{color:var(--muted)}.account small{display:block}.main{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}header{height:72px;flex:none;padding:0 28px;border-bottom:1px solid var(--line);background:var(--panel);display:flex;align-items:center;justify-content:space-between}h2{font-size:18px;margin:0}.primary{background:var(--green);color:#083d2b;font-weight:750;border-radius:9px;padding:10px 15px}.secondary{background:var(--soft);color:var(--ink);border-radius:8px;padding:9px 12px}.inbox{flex:1;min-height:0;display:grid;grid-template-columns:360px minmax(0,1fr);overflow:hidden}.chats{border-right:1px solid var(--line);overflow-y:auto;overflow-x:hidden}.chats input{margin:14px;width:calc(100% - 28px);border:0;border-radius:8px;background:var(--soft);padding:11px;color:var(--ink)}.chat{width:100%;background:none;color:var(--ink);text-align:left;padding:12px 16px;border-bottom:1px solid #1b282e;display:flex;gap:12px;align-items:center}.chat:hover,.chat.active{background:var(--soft)}.chat span{min-width:0}.chat small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:250px}.avatar{height:43px;width:43px;border-radius:50%;object-fit:cover;background:#38515d;flex:none}.avatar-letter{display:grid;place-items:center;font-weight:700}.conversation{min-height:0;display:flex;flex-direction:column;background:radial-gradient(#263a42 1px,transparent 1px),#0c171c;background-size:17px 17px}.conversation-head{height:72px;flex:none;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:11px;padding:0 18px}.back{background:none;color:var(--ink);font-size:28px}.messages{min-height:0;flex:1;overflow-y:auto;overflow-x:hidden;padding:24px;display:flex;flex-direction:column;gap:8px}.message{max-width:min(68%,620px);background:var(--soft);padding:8px 10px;border-radius:8px;align-self:flex-start;white-space:pre-wrap}.message.mine{background:#005c4b;align-self:flex-end}.message time{display:block;font-size:10px;text-align:right;color:#c4d5ccaa}.media{max-width:100%;max-height:360px;border-radius:6px;display:block;margin-bottom:4px}.conversation form{flex:none;display:flex;gap:10px;padding:12px 18px;background:var(--panel)}textarea{flex:1;resize:none;border:0;border-radius:8px;background:var(--soft);color:var(--ink);padding:10px}.blank,.empty{display:grid;place-items:center;color:var(--muted)}.empty{flex:1}.account-page{padding:26px;max-width:900px;overflow:auto}.account-card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:17px;display:flex;align-items:center;gap:13px;margin-bottom:12px}.account-card div{flex:1}.account-card p{margin:3px 0}.ok{color:var(--green)}.pairing{height:100dvh;overflow:auto;display:grid;place-items:center;padding:24px;background:linear-gradient(135deg,#0b141a,#10262b)}.pair-card{width:min(510px,100%);background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:36px;text-align:center}.eyebrow{letter-spacing:.12em;color:var(--green);font-size:11px;font-weight:800}.pair-card h1{font-size:29px;margin:10px 0}.pair-card label{display:block;text-align:left;margin:20px 0}.pair-card input{margin-top:6px;width:100%;background:var(--soft);color:var(--ink);border:1px solid #3a4c56;border-radius:8px;padding:11px}.qr{width:min(300px,80vw);aspect-ratio:1;background:#fff;border-radius:10px;padding:11px;object-fit:contain}.loading{display:grid;place-items:center;color:#60737d}.pair-card ol{text-align:left;background:#0b141a;border-radius:9px;padding:14px 16px 14px 34px;color:var(--muted)}.pair-status{color:var(--muted);font-size:13px;display:flex;gap:8px;justify-content:center}.wide{width:100%;margin-top:20px}.toast{position:fixed;right:18px;bottom:18px;background:#263b44;border:1px solid #415661;border-radius:9px;padding:12px 15px}.hint{padding:20px;text-align:center}@media(max-width:720px){html,body,#app{overflow:auto}.app{height:auto;min-height:100dvh;display:block}.sidebar{height:61px;padding:10px;display:flex;flex-direction:row;align-items:center}.logo{padding:0;margin-right:auto}.nav{display:none}.account-switch{border:0;margin:0;padding:0}.account:not(.selected){display:none}.account.selected{padding:6px}header{height:61px;padding:0 15px}.inbox{height:calc(100dvh - 122px);display:grid;grid-template-columns:1fr}.mobile-hide{display:none}.message{max-width:86%}.pair-card{padding:26px 18px}.account-card{flex-wrap:wrap}}
-.account-cog{margin-left:auto;display:grid;place-items:center;width:34px;height:34px;border-radius:8px;font-size:22px;color:#9aabb4;cursor:pointer}.account-cog:hover,.account-cog:focus{background:#34454e;color:#e9edef;outline:2px solid #4f6974}
+.account-cog{margin-left:auto;display:grid;place-items:center;width:34px;height:34px;border:0;background:transparent;border-radius:8px;font-size:20px;color:#9aabb4;cursor:pointer;transition:background .15s,color .15s}.account-cog:hover,.account-cog:focus-visible{background:#202c33;color:#e9edef;outline:none}
 
 .message-sender{display:flex;align-items:center;gap:6px;margin:-2px 0 6px;color:#8ce6cf;font-size:12px}.sender-avatar{width:20px;height:20px;border-radius:50%;object-fit:cover;background:#38515d;flex:none}.sender-letter{display:grid;place-items:center;font-size:10px;font-weight:800}
 .link-preview{display:flex;overflow:hidden;margin-top:8px;border-radius:7px;background:#0b141a;color:var(--ink);text-decoration:none;max-width:360px}.link-preview:hover{filter:brightness(1.12)}.link-preview img{width:88px;min-height:76px;object-fit:cover;background:#20343c}.link-preview span{display:flex;min-width:0;padding:7px;flex-direction:column;gap:2px}.link-preview b,.link-preview small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.link-preview small{font-size:11px}.link-preview em{color:var(--muted);font-size:10px;font-style:normal;margin-top:auto}
@@ -71,3 +71,129 @@ video.media{background:#000}audio.media-audio{display:block;width:min(100%,360px
 .services-list button[data-service="llm"].has-integration i{display:none!important}.llm-service-badge{grid-column:2;grid-row:1 / span 2;display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#25d366;color:#073c2a;font-size:14px;font-weight:900;line-height:1}
 /* Override the service detail two-column grid: the AI test is intentionally one vertical form. */
 .service-detail>.n8n-ai-test-section{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto;align-items:stretch}.service-detail>.n8n-ai-test-section input,.service-detail>.n8n-ai-test-section button{grid-column:1;width:100%;box-sizing:border-box}.service-detail>.n8n-ai-test-section .secondary{justify-self:stretch;width:100%}
+.history-control{display:flex;justify-content:center;padding:4px 0 12px}.history-control .secondary{font-size:13px}.history-control button:disabled{opacity:.65;cursor:wait}
+.conversation-react-root{min-height:0;flex:1;display:flex;flex-direction:column}.conversation-react-root>.messages{flex:1}.conversation-react-root>form{flex:none;display:flex;gap:10px;padding:12px 18px;background:var(--panel)}
+/* Account entry keeps its settings action visible without stealing account selection. */
+.account-row{position:relative;display:flex;align-items:center;gap:2px}.account-row .account{min-width:0;flex:1}.account-row .account-cog{position:absolute;right:8px;top:50%;transform:translateY(-50%);z-index:2;opacity:.82}.account-row:hover .account-cog,.account-row .account-cog:focus-visible{opacity:1}
+/* React account integrations */
+.integration-section{display:grid;gap:10px;text-align:left}.integration-section h3{display:flex;align-items:center;justify-content:space-between;gap:8px}.integration-section p{margin:0;color:var(--muted);font-size:13px}.integration-form{display:grid;gap:10px}.integration-form label{display:grid;gap:5px;font-size:13px;color:var(--muted)}.integration-form input,.integration-form textarea{width:100%;box-sizing:border-box;background:#202c33;color:#e9edef;border:1px solid #3a4c56;border-radius:8px;padding:10px;font:inherit}.integration-form textarea{resize:vertical}.integration-form .check-row{display:flex;align-items:center;gap:8px}.integration-form .check-row input{width:auto}.integration-badge{white-space:nowrap;font-size:12px;color:var(--muted)}.integration-badge.ready{color:#25d366}.integration-section a{color:#8ce6cf;overflow-wrap:anywhere}.integration-section .secondary{justify-self:start}
+.logout{margin:auto auto 0;width:min(210px,100%);padding:10px 12px;border:0;background:#c84f58;color:#fff;text-align:center;font-weight:750;border-radius:9px;cursor:pointer}.logout:hover{background:#df5d66;color:#fff}.logout:focus-visible{outline:2px solid #ffb4b8;outline-offset:3px}
+.details .danger{margin-top:28px;max-width:220px}
+.details-account-line{display:flex;align-items:center;justify-content:space-between;gap:12px}.details-account-line b{overflow-wrap:anywhere}
+.details-main>.details-card{width:100%}.details-main>.integration-section{display:grid;gap:10px}.details-main>.details-card h3{font-size:16px}
+
+/* Mobile account switcher dropdown */
+.mobile-account-switcher {
+  display: none;
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #3a4c56;
+  border-radius: 8px;
+  background: var(--soft);
+  color: var(--ink);
+  font: inherit;
+  box-sizing: border-box;
+}
+
+/* The generic header rule distributes children across the full row. Chat
+   identity needs to stay together: avatar, name/group name, then chat ID. */
+.conversation-head { justify-content: flex-start; }
+.instagram-preview { width:min(100%,420px); overflow:hidden; border-radius:8px; background:#fff; }
+.instagram-preview iframe { display:block; width:100%; min-height:480px; border:0; background:#fff; }
+.instagram-preview-copy { display:grid; gap:5px; padding:12px; background:#10252c; border-top:1px solid #31424b; color:var(--ink); }
+.instagram-preview-copy b { font-size:13px; line-height:1.35; }
+.instagram-preview-copy small { display:block; color:#b8cbc4; font-size:12px; line-height:1.45; white-space:normal; }
+.instagram-preview>a { display:block; padding:8px 10px; color:#8ce6cf; background:#123c43; font-size:12px; text-decoration:none; }
+
+/* Login's persistent-session choice is a compact control, not a full-width
+   text field like the username and password inputs above it. */
+.pair-card .check-row { display:flex; align-items:center; justify-content:center; gap:9px; margin:16px 0 4px; color:var(--muted); font-size:13px; cursor:pointer; }
+.pair-card .check-row input[type="checkbox"] { appearance:none; -webkit-appearance:none; width:18px; height:18px; min-width:18px; margin:0; padding:0; border:1px solid #526873; border-radius:5px; background:#0b141a; cursor:pointer; display:grid; place-content:center; }
+.pair-card .check-row input[type="checkbox"]::after { content:""; width:8px; height:4px; border:solid #073c2a; border-width:0 0 2px 2px; transform:rotate(-45deg) scale(0); transform-origin:center; }
+.pair-card .check-row input[type="checkbox"]:checked { background:var(--green); border-color:var(--green); }
+.pair-card .check-row input[type="checkbox"]:checked::after { transform:rotate(-45deg) scale(1); }
+.pair-card .check-row input[type="checkbox"]:focus-visible { outline:2px solid #8ce6cf; outline-offset:3px; }
+.pairing-cancel { display:block; width:min(220px,100%); margin:20px auto 0; padding:10px 15px; border-radius:9px; background:#c84f58; color:#fff; font-weight:750; }
+.pairing-cancel:hover { background:#df5d66; }
+.pairing-cancel:focus-visible { outline:2px solid #ffb4b8; outline-offset:3px; }
+
+/* React media cards keep browser-native playback controls (reliable on mobile)
+   while presenting audio/video as deliberate Gakai attachments with downloads. */
+.attachment-player { position:relative; width:min(100%,380px); margin:2px 0 6px; overflow:hidden; border:1px solid #3a535d; border-radius:10px; background:#10252c; box-shadow:0 2px 8px #0003; }
+.message.mine .attachment-player { border-color:#1b806b; background:#075244; }
+.attachment-video .message-media { display:block; width:100%; max-width:none; max-height:320px; margin:0; background:#000; border-radius:0; }
+.attachment-audio { display:grid; grid-template-columns:38px minmax(0,1fr) auto; align-items:center; gap:9px; padding:10px; }
+.attachment-audio .message-media { display:block; width:100%; min-width:0; height:34px; margin:0; }
+.media-type-icon { display:grid; place-items:center; width:38px; height:38px; border-radius:50%; background:var(--green); color:#073c2a; font-size:21px; font-weight:800; }
+.media-download { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; padding:0; color:#bff7e7; background:#ffffff12; border-radius:7px; font-size:19px; font-weight:700; text-decoration:none; }
+.media-download:hover { background:#ffffff22; color:#fff; }
+.attachment-video .media-download { margin:9px; }
+.media-loading-bar { position:absolute; left:0; right:0; bottom:0; height:3px; overflow:hidden; background:#ffffff20; pointer-events:none; }
+.media-loading-bar::after { content:""; display:block; width:42%; height:100%; background:var(--green); animation:media-loading-slide 1.1s ease-in-out infinite; }
+@keyframes media-loading-slide { from { transform:translateX(-110%); } to { transform:translateX(340%); } }
+
+/* Stable non-virtualized message rows: page history instead of absolutely
+   positioned bubbles, so variable-height media can never overlap a neighbour. */
+.message-list { display:grid; gap:8px; min-width:0; }
+.message-row { display:flex; min-width:0; padding:0 12px; justify-content:flex-start; }
+.message-row.mine { justify-content:flex-end; }
+
+/* Rich links read as a compact card: visual first, then title and description. */
+.link-preview { display:flex; flex-direction:column; width:min(100%,360px); max-width:360px; }
+.link-preview img { width:100%; height:180px; min-height:0; object-fit:cover; background:#20343c; }
+.link-preview span { width:100%; padding:10px; }
+.link-preview b,.link-preview small { white-space:normal; overflow:visible; text-overflow:clip; }
+.site-preview-mark { display:grid; place-items:center; width:100%; height:132px; background:linear-gradient(135deg,#1d3a45,#123c43); color:#bff7e7; font-size:52px; font-weight:800; }
+
+/* Details service panels must not inherit the compact two-column card forms. */
+.details-card .service-detail form.integration-form { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; }
+.details-card .service-detail form.integration-form label,.details-card .service-detail form.integration-form button { width:100%; min-width:0; box-sizing:border-box; }
+.details-card .service-detail form.integration-form-stacked { grid-template-rows:repeat(auto-fit,minmax(0,max-content)); align-items:stretch; }
+.details-card .service-detail form.integration-form-stacked .integration-submit { margin-top:4px; min-height:42px; }
+.native-ai-toggle { display:grid !important; grid-template-columns:42px minmax(0,1fr); align-items:center; gap:11px !important; padding:12px; border:1px solid #31424b; border-radius:10px; background:#0d1f27; color:var(--ink) !important; cursor:pointer; transition:border-color .15s,background .15s; }
+.native-ai-toggle:hover { border-color:#4c7170; background:#102b2d; }
+.native-ai-toggle input { position:absolute; opacity:0; pointer-events:none; }
+.native-ai-switch { width:40px; height:23px; padding:3px; border-radius:999px; background:#43535a; transition:background .18s; }
+.native-ai-switch span { display:block; width:17px; height:17px; border-radius:50%; background:#d8e4df; box-shadow:0 1px 3px #0008; transition:transform .18s; }
+.native-ai-toggle input:checked + .native-ai-switch { background:#25d366; }
+.native-ai-toggle input:checked + .native-ai-switch span { transform:translateX(17px); }
+.native-ai-toggle input:focus-visible + .native-ai-switch { outline:2px solid #bff7e7; outline-offset:3px; }
+.native-ai-copy { display:grid; gap:3px; min-width:0; }
+.native-ai-copy b { font-size:13px; }
+.native-ai-copy small { color:var(--muted); font-size:12px; line-height:1.35; }
+.llm-agent-action { margin:4px 0 14px; }
+.saved-key-mask { display:block; margin-top:2px; color:#8ce6cf; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; letter-spacing:.04em; }
+.service-detail .integration-delete { display:block; width:100%; max-width:none; margin:24px 0 0; }
+/* A check is rendered only for integrations confirmed by the account API. This
+   selector intentionally wins over old service-menu rules that hid it on click. */
+.services-list button.has-integration .integration-check { display:grid !important; grid-column:2; grid-row:1 / span 2; place-items:center; width:22px; height:22px; border-radius:50%; background:#25d366; color:#073c2a; font-size:14px; font-weight:900; font-style:normal; line-height:1; }
+.details-delete { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:24px 2px 8px; margin-top:8px; border-top:1px solid #31424b; }
+.details-delete h3 { margin:0 0 5px; font-size:15px; color:#f2b4b8; }
+.details-delete p { margin:0; max-width:600px; font-size:13px; }
+.details-delete .danger { width:auto; min-width:150px; max-width:none; margin:0; }
+@media(max-width:720px) { .details-delete { align-items:stretch; flex-direction:column; gap:14px; } .details-delete .danger { width:100%; } }
+.services-list button.has-integration i,.services-list button.has-integration.on i { display:grid!important; }
+.workflow-links { display:grid; gap:8px; margin:12px 0; }
+.workflow-links a { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:2px 12px; padding:11px; border:1px solid #31424b; border-radius:9px; background:#0d1f27; color:#8ce6cf; text-decoration:none; }
+.workflow-links a:hover { border-color:#25d366; background:#12332f; }
+.workflow-links span { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+.workflow-links b { overflow:hidden; color:var(--ink); text-overflow:ellipsis; white-space:nowrap; }
+.workflow-links em { grid-column:2; grid-row:1 / span 2; align-self:center; font-size:12px; font-style:normal; }
+
+@media(max-width:720px) {
+  .mobile-account-switcher {
+    display: block;
+  }
+  /* Fix cog overlap: on mobile the sidebar is a row, so move cog inline */
+  .account-row .account-cog {
+    position: static;
+    transform: none;
+    margin-left: auto;
+    opacity: 1;
+  }
+  /* Selected account button should not take full width on mobile */
+  .account-row .account.selected {
+    flex: 1;
+  }
+}

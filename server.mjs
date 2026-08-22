@@ -74,6 +74,7 @@ const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
 const sessions=new Map();
 const hash=value=>createHash('sha256').update(value).digest('hex');
+const sessionCookie=(token,remember)=>`home_session=${token}; HttpOnly; SameSite=Strict; Path=/${remember?"; Max-Age=2592000":""}`;
 const equalHex=(left,right)=>{try{const a=Buffer.from(left||"","hex"),b=Buffer.from(right||"","hex");return a.length===b.length&&timingSafeEqual(a,b)}catch{return false}};
 const passwordHash=value=>{const salt=randomBytes(16).toString('hex');return `${salt}:${scryptSync(value,salt,64).toString('hex')}`};
 const passwordMatches=value=>{const [salt,expected]=store.password.split(':');return timingSafeEqual(Buffer.from(expected,'hex'),scryptSync(value,salt,64))};
@@ -108,16 +109,97 @@ async function cachedMedia(path){
   return value;
 }
 const instagramPreviewCache=new Map();
-const safeInstagramPage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/(^|\.)instagram\.com$/i.test(url.hostname)?url:null}catch{return null}};
+const safeInstagramPage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/instagram\.com$/i.test(url.hostname)?url:null}catch{return null}};
 const safeInstagramImage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/(^|\.)(cdninstagram\.com|fbcdn\.net)$/i.test(url.hostname)?url:null}catch{return null}};
-const htmlMeta=(html,key)=>{const match=html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${key}["'][^>]+content=["']([^"']+)["']`,'i'))||html.match(new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${key}["']`,'i'));return match?.[1]?.replace(/&amp;/g,'&')||null};
-async function instagramPreview(value){const url=safeInstagramPage(value);if(!url)throw Object.assign(new Error('Invalid Instagram URL'),{status:400});const cached=instagramPreviewCache.get(url.href);if(cached)return cached;const response=await fetch(url,{headers:{'user-agent':'Mozilla/5.0 (compatible; Gakai/1.0)',accept:'text/html,application/xhtml+xml'},signal:AbortSignal.timeout(8000)});if(!response.ok)throw Object.assign(new Error('Instagram preview unavailable'),{status:502});const html=await response.text();const image=htmlMeta(html,'og:image'),result={title:htmlMeta(html,'og:title'),description:htmlMeta(html,'og:description'),image:safeInstagramImage(image)?.href||null};instagramPreviewCache.set(url.href,result);if(instagramPreviewCache.size>40)instagramPreviewCache.delete(instagramPreviewCache.keys().next().value);return result;}
+const htmlMeta=(html,key)=>{
+  const patterns=[
+    new RegExp(`<meta[^>]+(?:property|name)=["']${key}["'][^>]+content=["']([^"']+)["']`,'i'),
+    new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${key}["']`,'i'),
+    new RegExp(`<meta[^>]+(?:property|name)=["']${key}["'][^>]+content=["']([^"']+)["']`,'i'),
+  ];
+  for(const re of patterns){const m=html.match(re);if(m?.[1])return m[1].replace(/&/g,'&');}
+  return null;
+};
 
+function extractJSONLD(html){
+  const m=html.match(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+  if(!m)return null;
+  try{return JSON.parse(m[1])}catch{return null}
+}
+
+async function instagramPreview(value){
+  const url=safeInstagramPage(value);if(!url)throw Object.assign(new Error('Invalid Instagram URL'),{status:400});
+  const cached=instagramPreviewCache.get(url.href);if(cached)return cached;
+  const ua='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+  let html='';
+  try{
+    const response=await fetch(url,{headers:{'user-agent':ua,'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8','accept-language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(10000)});
+    if(response.ok)html=await response.text();
+  }catch{}
+  
+  let title=htmlMeta(html,'og:title')||htmlMeta(html,'twitter:title');
+  let description=htmlMeta(html,'og:description')||htmlMeta(html,'twitter:description')||htmlMeta(html,'description');
+  let image=htmlMeta(html,'og:image')||htmlMeta(html,'twitter:image')||htmlMeta(html,'og:image:secure_url');
+  
+  // Fallback to JSON-LD
+  if(!title||!description||!image){
+    const ld=extractJSONLD(html);
+    if(ld){
+      const graph=Array.isArray(ld['@graph'])?ld['@graph']:[ld];
+      for(const item of graph){
+        if(['SocialMediaPosting','VideoObject','Article','ProfilePage','MediaObject'].includes(item['@type'])){
+          title=title||item.name||item.headline||item.alternateName;
+          description=description||item.description||item.caption||item.articleBody;
+          image=image||item.image?.url||item.image?.contentUrl||(typeof item.image==='string'?item.image:null);
+        }
+      }
+    }
+  }
+  
+  // Resolve relative image URLs
+  if(image&&!image.startsWith('http')){
+    try{image=new URL(image,url.href).href}catch{image=null}
+  }
+  
+  // Strip " on Instagram" suffix
+  if(title)title=title.replace(/\s*on\s+Instagram\s*$/i,'').replace(/\s*[|\-]\s*Instagram\s*$/i,'').trim();
+  if(!title)title=null;
+  if(!description)description=null;
+  
+  const result={title,description,image:safeInstagramImage(image)?.href||null};
+  instagramPreviewCache.set(url.href,result);
+  if(instagramPreviewCache.size>40)instagramPreviewCache.delete(instagramPreviewCache.keys().next().value);
+  return result;
+}
 const externalPreviewCache=new Map();
 const privateAddress=address=>address==="::1"||address==="0.0.0.0"||address.startsWith("fe80:")||address.startsWith("fc")||address.startsWith("fd")||/^10\./.test(address)||/^127\./.test(address)||/^169\.254\./.test(address)||/^192\.168\./.test(address)||/^172\.(1[6-9]|2\d|3[01])\./.test(address);
 async function safePublicUrl(value){try{const url=new URL(value);if(!/^https?:$/.test(url.protocol)||url.hostname==="localhost"||url.hostname.endsWith(".local"))return null;const direct=isIP(url.hostname);const addresses=direct?[{address:url.hostname}]:await lookup(url.hostname,{all:true,verbatim:true});return addresses.length&&addresses.every(item=>!privateAddress(item.address))?url:null}catch{return null}}
 function n8nWebhookUrl(value){try{const url=new URL(value);return url.protocol==="https:"&&url.hostname!=="localhost"?url:null}catch{return null}}
-async function openGraphPreview(value){const url=await safePublicUrl(value);if(!url)throw Object.assign(new Error("Invalid public URL"),{status:400});const cached=externalPreviewCache.get(url.href);if(cached)return cached;const response=await fetch(url,{redirect:"manual",headers:{"user-agent":"Mozilla/5.0 (compatible; Gakai/1.0)",accept:"text/html,application/xhtml+xml"},signal:AbortSignal.timeout(8000)});if(!response.ok||response.status>=300)throw Object.assign(new Error("Link preview unavailable"),{status:502});const html=(await response.text()).slice(0,1024*1024),image=await safePublicUrl(htmlMeta(html,"og:image"));const result={title:htmlMeta(html,"og:title"),description:htmlMeta(html,"og:description"),image:image?.href||null};externalPreviewCache.set(url.href,result);if(externalPreviewCache.size>80)externalPreviewCache.delete(externalPreviewCache.keys().next().value);return result;}
+async function openGraphPreview(value){
+  const url=await safePublicUrl(value);if(!url)throw Object.assign(new Error("Invalid public URL"),{status:400});
+  const cached=externalPreviewCache.get(url.href);if(cached)return cached;
+  const ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  const response=await fetch(url,{headers:{'user-agent':ua,'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},signal:AbortSignal.timeout(10000),redirect:'follow'});
+  if(!response.ok)throw Object.assign(new Error("Link preview unavailable"),{status:502});
+  const html=(await response.text()).slice(0,1024*1024);
+  
+  let title=htmlMeta(html,'og:title')||htmlMeta(html,'twitter:title');
+  let description=htmlMeta(html,'og:description')||htmlMeta(html,'twitter:description')||htmlMeta(html,'description');
+  let image=htmlMeta(html,'og:image')||htmlMeta(html,'twitter:image')||htmlMeta(html,'og:image:secure_url');
+  
+  if(image&&!image.startsWith('http')){
+    try{image=new URL(image,url.href).href}catch{image=null}
+  }
+  
+  // Expose a plain string in the Gakai preview model. Passing a URL object
+  // across the JSON boundary was inconsistent between consumers and left the
+  // React renderer without a usable image source.
+  const safeImage=image?await safePublicUrl(image):null;
+  const result={title,description,image:safeImage?.href||null};
+  externalPreviewCache.set(url.href,result);
+  if(externalPreviewCache.size>80)externalPreviewCache.delete(externalPreviewCache.keys().next().value);
+  return result;
+}
 function account(s) { const rawStatus=s.status; return { id:s.name, label:s.config?.metadata?.['gakai.label'] || s.config?.metadata?.['waha-home.label'] || s.me?.pushName || s.name, status:['WORKING','CONNECTED','READY'].includes(rawStatus)?'WORKING':rawStatus, phone:s.me?.id?.split('@')[0] || null, profile:s.me?.pushName || null }; }
 async function accountView(session){
   const view=account(session);if(!session.me?.id)return view;
@@ -138,8 +220,11 @@ function messageView(message) {
   const senderName=participant.name||message.participantName||message.authorName||message.pushName||message.notifyName||message._data?.notifyName||null;
   const senderPicture=participant.picture||message.participantPicture||message.authorPicture||message.profilePictureUrl||null;
   const rawPreview=message.linkPreview||message.preview||message._data?.linkPreview||(message._data?.links?.[0]?{url:message._data.links[0].link||message._data.links[0].url||message.body||message.text||"",title:message._data.title||"",description:message._data.description||message._data.text||"",image:message._data.botReelPluginThumbnailCdnUrl||message._data.thumbnailHQ||message._data.thumbnailUrl||null}:null);
+  // Always pass URL if available so client can fetch OG data; only omit if no URL at all
+  const hasUrl = rawPreview && (rawPreview.url || rawPreview.canonicalUrl || rawPreview.link);
+  const hasContent = rawPreview && (rawPreview.title || rawPreview.titleText || rawPreview.description || rawPreview.desc || rawPreview.thumbnail || rawPreview.thumbnailUrl || rawPreview.image || rawPreview.imageUrl);
   return { id:message.id, timestamp:message.timestamp || 0, fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '',
-    hasMedia:Boolean(message.hasMedia), media:message.media ? {url:message.media.url || null, mimetype:message.media.mimetype || null, filename:message.media.filename || null} : null, mediaUrl:message.mediaUrl || null, vCards:Array.isArray(message.vCards)?message.vCards:(Array.isArray(message._data?.vCards)?message._data.vCards:[]), sender:senderId?{id:senderId,name:senderName,picture:senderPicture}:null, linkPreview:rawPreview?{url:rawPreview.url||rawPreview.canonicalUrl||message.body||message.text||'',title:rawPreview.title||rawPreview.titleText||'',description:rawPreview.description||rawPreview.desc||'',image:rawPreview.thumbnail||rawPreview.thumbnailUrl||rawPreview.image||rawPreview.imageUrl||null}:null, ack:message.ack, ackName:message.ackName };
+    hasMedia:Boolean(message.hasMedia), media:message.media ? {url:message.media.url || null, mimetype:message.media.mimetype || null, filename:message.media.filename || null} : null, mediaUrl:message.mediaUrl || null, vCards:Array.isArray(message.vCards)?message.vCards:(Array.isArray(message._data?.vCards)?message._data.vCards:[]), sender:senderId?{id:senderId,name:senderName,picture:senderPicture}:null, linkPreview:hasUrl?{url:rawPreview.url||rawPreview.canonicalUrl||rawPreview.link||message.body||message.text||'',title:hasContent?(rawPreview.title||rawPreview.titleText||''):'',description:hasContent?(rawPreview.description||rawPreview.desc||''):'',image:hasContent?(rawPreview.thumbnail||rawPreview.thumbnailUrl||rawPreview.image||rawPreview.imageUrl||null):null}:null, ack:message.ack, ackName:message.ackName };
 }
 const contactsListCache=new Map();
 async function contactsFor(session){
@@ -454,24 +539,48 @@ async function enrichMessage(session,message){
 
   }
   if(url.pathname==='/api/app/auth/state'&&req.method==='GET')return send(res,200,{setup:!store.password,hasUsername:Boolean(store.username),authenticated:admin(req)});
-  if(url.pathname==='/api/app/auth/setup'&&req.method==='POST'){if(store.password)return send(res,409,{message:'Administrator already configured'});const {username,password}=await readBody(req);const name=String(username||'').trim();if(name.length<3||name.length>40)return send(res,400,{message:'Use a username between 3 and 40 characters'});if(!password||password.length<10)return send(res,400,{message:'Use a password with at least 10 characters'});store.username=name;store.password=passwordHash(password);await persist();const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(201,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
-  if(url.pathname==='/api/app/auth/login'&&req.method==='POST'){const {username,password}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||'').trim()!==expectedUsername)||!passwordMatches(password||''))return send(res,401,{message:'Incorrect username or password'});const token=randomBytes(32).toString('hex');sessions.set(token,true);res.writeHead(200,{'set-cookie':`home_session=${token}; HttpOnly; SameSite=Strict; Path=/`,'content-type':'application/json'});return res.end(JSON.stringify({ok:true}));}
+  if(url.pathname==="/api/app/auth/login"&&req.method==="POST"){const {username,password,remember}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||"").trim()!==expectedUsername)||!passwordMatches(password||""))return send(res,401,{message:"Incorrect username or password"});const token=randomBytes(32).toString("hex");sessions.set(token,true);res.writeHead(200,{"set-cookie":sessionCookie(token,Boolean(remember)),"content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
+  if(url.pathname==="/api/app/auth/logout"&&req.method==="POST"){const token=cookie(req).home_session;sessions.delete(token);res.writeHead(200,{"set-cookie":"home_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0","content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==="/api/app/auth/profile"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{username:store.username||null});}
   if(url.pathname==="/api/app/auth/profile"&&req.method==="PATCH"){if(!admin(req))return send(res,401,{message:"Sign in required"});const input=await readBody(req),username=String(input.username||"").trim(),currentPassword=String(input.currentPassword||"");if(!currentPassword||!passwordMatches(currentPassword))return send(res,401,{message:"Current password is incorrect"});if(username&&(username.length<3||username.length>40))return send(res,400,{message:"Use a username between 3 and 40 characters"});if(input.newPassword&&String(input.newPassword).length<10)return send(res,400,{message:"Use a password with at least 10 characters"});if(username)store.username=username;if(input.newPassword)store.password=passwordHash(String(input.newPassword));await persist();return send(res,200,{ok:true,username:store.username});}
   if(!admin(req))return send(res,401,{message:'Sign in required'});
   if(req.method==='GET'&&url.pathname==='/api/app/link-preview'){return send(res,200,await openGraphPreview(url.searchParams.get('url')||''));}
-  if(req.method==='GET'&&url.pathname==='/api/app/link-image'){const image=await safePublicUrl(url.searchParams.get('url')||'');if(!image)return send(res,400,{message:'Invalid public image URL'});const response=await fetch(image,{redirect:'manual',headers:{'user-agent':'Mozilla/5.0 (compatible; Gakai/1.0)'},signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:'Preview image unavailable'});const type=response.headers.get('content-type')||'image/jpeg';if(!type.startsWith('image/'))return send(res,502,{message:'Invalid preview image'});const body=Buffer.from(await response.arrayBuffer());if(body.length>5*1024*1024)return send(res,413,{message:'Preview image is too large'});res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});return res.end(body);}
+  if(req.method==='GET'&&url.pathname==='/api/app/link-image'){
+  const image=await safePublicUrl(url.searchParams.get('url')||'');
+  if(!image)return send(res,400,{message:'Invalid public image URL'});
+  const ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  const response=await fetch(image,{headers:{'user-agent':ua,'accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'},signal:AbortSignal.timeout(10000),redirect:'follow'});
+  if(!response.ok)return send(res,502,{message:'Preview image unavailable'});
+  const type=response.headers.get('content-type')||'image/jpeg';
+  if(!type.startsWith('image/'))return send(res,502,{message:'Invalid preview image'});
+  const body=Buffer.from(await response.arrayBuffer());
+  if(body.length>5*1024*1024)return send(res,413,{message:'Preview image is too large'});
+  res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});
+  return res.end(body);
+}
   if(req.method==='GET'&&url.pathname==='/api/app/media'){const path=url.searchParams.get('path')||'';const range=req.headers.range;if(range){const file=await providerFile(path,{range});const body=Buffer.from(await file.arrayBuffer());const headers={'content-type':file.headers.get('content-type')||'application/octet-stream','cache-control':'private, max-age=86400','accept-ranges':file.headers.get('accept-ranges')||'bytes','content-length':String(body.length)};const contentRange=file.headers.get('content-range');if(contentRange)headers['content-range']=contentRange;res.writeHead(file.status,headers);return res.end(body)}const file=await cachedMedia(path);res.writeHead(200,{'content-type':file.type,'cache-control':'private, max-age=86400','accept-ranges':'bytes','content-length':String(file.buffer.length)});return res.end(file.buffer);}
   if (req.method==='GET' && url.pathname==='/api/app/accounts') {const sessions=await providerRequest('/api/sessions');const deleting=new Set(store.deletingAccounts||[]);const visible=sessions.filter(session=>!deleting.has(session.name));const live=new Set(sessions.map(session=>session.name));const next=(store.deletingAccounts||[]).filter(id=>live.has(id));if(next.length!==store.deletingAccounts.length){store.deletingAccounts=next;await persist()}return send(res,200,{accounts:await Promise.all(visible.map(accountView))});}
   if(req.method==='GET'&&url.pathname==='/api/app/instagram-preview'){return send(res,200,await instagramPreview(url.searchParams.get('url')||''));}
-  if(req.method==='GET'&&url.pathname==='/api/app/instagram-image'){const image=safeInstagramImage(url.searchParams.get('url')||'');if(!image)return send(res,400,{message:'Invalid Instagram image URL'});const response=await fetch(image,{headers:{'user-agent':'Mozilla/5.0 (compatible; Gakai/1.0)'},signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:'Instagram image unavailable'});const type=response.headers.get('content-type')||'image/jpeg';if(!type.startsWith('image/'))return send(res,502,{message:'Invalid Instagram image'});const body=Buffer.from(await response.arrayBuffer());if(body.length>5*1024*1024)return send(res,413,{message:'Instagram image is too large'});res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});return res.end(body);}
+  if(req.method==='GET'&&url.pathname==='/api/app/instagram-image'){
+  const image=safeInstagramImage(url.searchParams.get('url')||'');
+  if(!image)return send(res,400,{message:'Invalid Instagram image URL'});
+  const ua='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+  const response=await fetch(image,{headers:{'user-agent':ua,'accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'},signal:AbortSignal.timeout(10000),redirect:'follow'});
+  if(!response.ok)return send(res,502,{message:'Instagram image unavailable'});
+  const type=response.headers.get('content-type')||'image/jpeg';
+  if(!type.startsWith('image/'))return send(res,502,{message:'Invalid Instagram image'});
+  const body=Buffer.from(await response.arrayBuffer());
+  if(body.length>5*1024*1024)return send(res,413,{message:'Instagram image is too large'});
+  res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});
+  return res.end(body);
+}
   if (req.method==='POST' && url.pathname==='/api/app/accounts') {
     const input=await readBody(req), id=`account-${Date.now().toString(36)}`;
     const created=await providerRequest('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:id,config:config(input.label)})});
     return send(res,201,{account:account(created || {name:id,status:'STARTING',config:config(input.label)})});
   }
   const id=decodeURIComponent(parts[3] || '');
-  if (req.method==='DELETE' && parts.length===4) {if(!store.deletingAccounts.includes(id)){store.deletingAccounts.push(id);await persist()}await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:'DELETE'});return send(res,200,{ok:true});}
+  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
   if (req.method==='GET' && parts[4]==='qr') return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/auth/qr`));
   if (req.method==='POST' && parts[4]==='start') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
   if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
@@ -494,7 +603,9 @@ async function enrichMessage(session,message){
     }
   }
   if (req.method==='GET' && parts[4]==='chats') {
-    const chats=await providerRequest(`/api/${encodeURIComponent(id)}/chats/overview?limit=35`);
+    // Keep the inbox useful for multi-account workspaces without requesting an
+    // unbounded provider overview on every refresh.
+    const chats=await providerRequest(`/api/${encodeURIComponent(id)}/chats/overview?limit=100`);
     return send(res,200,chats.map(chatOverview).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
@@ -531,7 +642,7 @@ async function enrichMessage(session,message){
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
   // LLM proxy config endpoints
-  if(parts[4]==='llm'&&req.method==='GET'){const cfg=llmConfig(id);return send(res,200,cfg?{configured:true,baseUrl:cfg.baseUrl,model:cfg.model,systemPrompt:cfg.systemPrompt||'',nativeEnabled:cfg.nativeEnabled||false}:{configured:false});}
+  if(parts[4]==='llm'&&req.method==='GET'){const cfg=llmConfig(id);return send(res,200,cfg?{configured:true,baseUrl:cfg.baseUrl,model:cfg.model,systemPrompt:cfg.systemPrompt||'',nativeEnabled:cfg.nativeEnabled||false,apiKeyLength:String(cfg.apiKey||'').length,apiKeyLast4:String(cfg.apiKey||'').slice(-4)}:{configured:false});}
   if(parts[4]==='llm'&&req.method==='POST'){
     const input=await readBody(req);
     const baseUrl=String(input.baseUrl||'').trim().replace(/\/+$/,'');
@@ -561,7 +672,9 @@ async function enrichMessage(session,message){
   if(parts[4]==='n8n'&&parts[5]==='connect'&&!parts[6]&&req.method==='POST'){
     const input=await readBody(req);
     let n8nBaseUrl=normalizeN8nBaseUrl(input.n8nUrl);
-    const n8nApiKey=String(input.n8nApiKey||'').trim();
+    const existingStandard=store.n8nConnections.find(connection=>connection.accountId===id&&connection.kind==='standard');
+    const requestedApiKey=String(input.n8nApiKey||'').trim();
+    const n8nApiKey=requestedApiKey==='__keep__'?(decryptSecret(existingStandard?.n8nApiKeyEncrypted)||''):requestedApiKey;
     try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
     if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
     if(!n8nApiKey)return send(res,400,{message:'n8n API key is required'});
@@ -572,7 +685,6 @@ async function enrichMessage(session,message){
     if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='127.0.0.1'||publicUrlParsed.hostname==='::1')
       return send(res,400,{message:`Gakai resolved its callback URL as ${publicUrl}. n8n cannot call another service through its own loopback address. Open Gakai using a LAN IP, local hostname, or domain, or set GAKAI_PUBLIC_URL when using a reverse proxy.`});
     try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
-    const existingStandard=store.n8nConnections.find(connection=>connection.accountId===id&&connection.kind==='standard');
     if(existingStandard){existingStandard.n8nUrl=n8nBaseUrl;existingStandard.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);await persist();return send(res,200,{ok:true,reused:true,workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`});}
     let built;
     try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,publicUrl,kind:'standard'}); }
@@ -602,8 +714,10 @@ async function enrichMessage(session,message){
       const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name===(connection.kind==='agentic'?'n8n auto-connect (AI Agent)':'n8n auto-connect'));
       return {kind:connection.kind,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,webhookUrl:connection.webhookUrl||subscription?.url||null,active:subscription?.enabled!==false,lastDelivery:subscription?.lastDelivery||null,connectedAt:connection.connectedAt};
     });
+    const standardConnection=connections.find(connection=>connection.kind==='standard')||connections[0];
     const standard=workflows.find(w=>w.kind==='standard')||workflows[0];
-    return send(res,200,{connected:true,n8nUrl:connections.find(connection=>connection.kind==='standard')?.n8nUrl||null,...standard,workflows});
+    const storedApiKey=decryptSecret(standardConnection?.n8nApiKeyEncrypted)||'';
+    return send(res,200,{connected:true,n8nUrl:standardConnection?.n8nUrl||null,n8nApiKeyLength:storedApiKey.length,n8nApiKeyLast4:storedApiKey.slice(-4),...standard,workflows});
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='DELETE'){
     const connections=store.n8nConnections.filter(c=>c.accountId===id);
@@ -626,7 +740,9 @@ async function enrichMessage(session,message){
 }
 http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.headers.host}`); try {
   if (url.pathname === '/healthz' || url.pathname === '/readyz' || url.pathname.startsWith('/api/')) return await api(req,res,url);
-  const requested=(url.pathname==='/'||url.pathname.startsWith('/accounts/'))?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
+  // React owns application routes. Serve the shell for deep links so a direct
+  // visit to an account details page does not get treated as a missing file.
+  const requested=(url.pathname==='/'||url.pathname.startsWith('/accounts/')||url.pathname.startsWith('/details/'))?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
   if (!file.startsWith(publicDir)) return send(res,403,{message:'Forbidden'});
   const content=await readFile(file); res.writeHead(200,{'content-type':types[extname(file)]||'application/octet-stream','cache-control':'no-cache'}); res.end(content);
 } catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}${configuredPublicUrl ? ` (public URL: ${configuredPublicUrl})` : ''}`));
