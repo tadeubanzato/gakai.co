@@ -682,6 +682,14 @@ async function enrichMessage(session,message){
 
   }
   if(url.pathname==='/api/app/auth/state'&&req.method==='GET')return send(res,200,{setup:!store.password,hasUsername:Boolean(store.username),authenticated:admin(req)});
+  if(url.pathname==="/api/app/auth/setup"&&req.method==="POST"){
+    if(store.password)return send(res,409,{message:"Administrator account already exists"});
+    const input=await readBody(req),username=String(input.username||"").trim(),password=String(input.password||"");
+    if(username.length<3||username.length>40)return send(res,400,{message:"Use a username between 3 and 40 characters"});
+    if(password.length<10)return send(res,400,{message:"Use a password with at least 10 characters"});
+    store.username=username;store.password=passwordHash(password);await persist();
+    const token=randomBytes(32).toString("hex");sessions.set(token,true);res.writeHead(201,{"set-cookie":sessionCookie(token,Boolean(input.remember)),"content-type":"application/json","cache-control":"no-store"});return res.end(JSON.stringify({ok:true,username}));
+  }
   if(url.pathname==="/api/app/auth/login"&&req.method==="POST"){const {username,password,remember}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||"").trim()!==expectedUsername)||!passwordMatches(password||""))return send(res,401,{message:"Incorrect username or password"});const token=randomBytes(32).toString("hex");sessions.set(token,true);res.writeHead(200,{"set-cookie":sessionCookie(token,Boolean(remember)),"content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==="/api/app/auth/logout"&&req.method==="POST"){const token=cookie(req).home_session;sessions.delete(token);res.writeHead(200,{"set-cookie":"home_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0","content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==="/api/app/auth/profile"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{username:store.username||null});}
