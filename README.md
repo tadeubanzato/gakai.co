@@ -383,9 +383,12 @@ The launcher rebuilds the Gakai image and restarts both containers. Data in `hom
 ### Validate JavaScript (no local Node needed)
 
 ```sh
-docker compose run --rm --no-deps home node --check /app/public/app.js
+docker compose build home
+docker compose run --rm --no-deps home node --check /app/public/assets/app.js
 docker compose run --rm --no-deps home node --check /app/server.mjs
 ```
+
+`docker compose build` runs esbuild on `client/*.jsx` as part of the image build, so it catches JSX/bundling errors; `node --check` then validates the compiled, JSX-free output.
 
 ### Rebuild after changes
 
@@ -402,8 +405,11 @@ Sanitized provider payload fixtures live in `test/fixtures/providers/waha/`. Use
 ```
 gakai.co/
 ├── server.mjs              # Node HTTP server — auth, API, provider proxy, automation
+├── client/
+│   ├── app.jsx             # React browser application
+│   └── chat.jsx            # Conversation view
 ├── public/
-│   ├── app.js              # Vanilla browser application
+│   ├── assets/app.js       # esbuild output of client/ (generated, gitignored)
 │   ├── styles.css          # Dashboard styles
 │   └── index.html          # Entry document
 ├── src/
@@ -458,7 +464,8 @@ gakai.co/
 3. Add sanitized fixtures for any change that touches provider payload shapes
 4. Validate your JavaScript inside the container before opening a PR:
    ```sh
-   docker compose run --rm --no-deps home node --check /app/public/app.js
+   docker compose build home
+   docker compose run --rm --no-deps home node --check /app/public/assets/app.js
    ```
 5. Open a pull request against `main`
 
