@@ -57,7 +57,7 @@ const setup = await fetch(`${base}/api/app/auth/setup`, {
 const cookie = setup.headers.get('set-cookie').split(';')[0];
 store.deletedChats.push({ accountId, chatId: 'deleted-in-gakai@c.us', deletedAt: new Date().toISOString() });
 
-test('the inbox excludes chats with no activity in the recency window, even when fewer than 30 chats exist', async () => {
+test('the inbox excludes chats with no activity in the recency window, even when fewer chats exist than the cap', async () => {
   const response = await fetch(`${base}/api/app/accounts/${accountId}/chats`, { headers: { cookie } });
   const chats = await response.json();
 

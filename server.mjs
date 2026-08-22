@@ -105,6 +105,7 @@ const sessionRememberTtlMs=30*24*60*60*1000; // matches the cookie's own Max-Age
 // floor, the top-30 inbox pads itself out with whatever old chats exist
 // once there aren't 30 genuinely active ones.
 const inboxRecencyMs=(Number(process.env.GAKAI_INBOX_RECENCY_DAYS)||60)*24*60*60*1000;
+const inboxChatLimit=Number(process.env.GAKAI_INBOX_CHAT_LIMIT)||40;
 // Guards against a double-click or slow-retry racing two concurrent n8n
 // connect attempts for the same account: each spans several awaited n8n API
 // calls with no atomic "does a connection already exist" check in between.
@@ -816,7 +817,7 @@ async function enrichMessage(session,message){
     const chats=await allChatOverviews(id);
     const deleted=new Set((store.deletedChats||[]).filter(item=>item.accountId===id).map(item=>item.chatId));
     const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
-    const recent=chats.filter(chat=>!deleted.has(chat.id)&&hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,30);
+    const recent=chats.filter(chat=>!deleted.has(chat.id)&&hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
     return send(res,200,(await mapWithConcurrency(recent,2,chat=>enrichChatOverview(id,chat))).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
