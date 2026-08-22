@@ -100,9 +100,10 @@ Implement in this order unless the user explicitly reprioritizes:
 2. Make the smallest coherent implementation. Preserve unrelated user changes.
 3. Add or update sanitized fixtures/tests for behavior that depends on provider payloads.
 4. Validate browser JavaScript inside the application image because the host may not have Node: `docker compose build home && docker compose run --rm --no-deps home node --check /app/public/assets/app.js` (`docker compose build` runs esbuild on `client/*.jsx`, catching JSX/bundling errors; `node --check` then validates the compiled, JSX-free bundle).
-5. Rebuild and restart the changed service: `docker compose up -d --build`.
-6. Verify the live app at the URL printed by the launcher (`http://localhost:3000` unless overridden); inspect service status/logs when a change affects runtime behavior.
-7. Review `git diff --check` and `git status`. Commit focused changes on the active feature branch and push only after validation.
+5. Run the test suite: `docker build --target test -t gakai-test . && docker run --rm gakai-test`. The final runtime image intentionally ships without `package.json`/`test/` (lean production image), so tests run against the Dockerfile's `test` stage — a discardable stage built on top of the already-`npm ci`'d frontend stage, never referenced by the shipped image. Do not use `docker compose run ... npm test` — it fails with a missing `package.json` against the runtime image.
+6. Rebuild and restart the changed service: `docker compose up -d --build`.
+7. Verify the live app at the URL printed by the launcher (`http://localhost:3000` unless overridden); inspect service status/logs when a change affects runtime behavior.
+8. Review `git diff --check` and `git status`. Commit focused changes on the active feature branch and push only after validation.
 
 ## Git and release hygiene
 

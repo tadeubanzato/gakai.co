@@ -390,6 +390,15 @@ docker compose run --rm --no-deps home node --check /app/server.mjs
 
 `docker compose build` runs esbuild on `client/*.jsx` as part of the image build, so it catches JSX/bundling errors; `node --check` then validates the compiled, JSX-free output.
 
+### Run tests (no local Node needed)
+
+```sh
+docker build --target test -t gakai-test .
+docker run --rm gakai-test
+```
+
+The shipped runtime image is intentionally lean and doesn't carry `package.json` or `test/`, so tests run against the Dockerfile's `test` stage — a throwaway stage built on top of the already-`npm ci`'d frontend stage, never part of the published image.
+
 ### Rebuild after changes
 
 ```sh
@@ -414,7 +423,7 @@ gakai.co/
 │   └── index.html          # Entry document
 ├── src/
 │   ├── api/                # Planned provider-neutral API layer
-│   ├── domain/             # Planned domain model
+│   ├── domain/             # Message/chat normalization (fixture-tested)
 │   ├── providers/waha/     # Provider adapter (designed to be swapped)
 │   ├── storage/            # Planned storage abstraction
 │   ├── realtime/           # Realtime extraction target; current endpoints live in server.mjs
@@ -467,7 +476,12 @@ gakai.co/
    docker compose build home
    docker compose run --rm --no-deps home node --check /app/public/assets/app.js
    ```
-5. Open a pull request against `main`
+5. Run the test suite:
+   ```sh
+   docker build --target test -t gakai-test .
+   docker run --rm gakai-test
+   ```
+6. Open a pull request against `main`
 
 **Never commit:** `.env`, `sessions/`, `home-data/`, real WhatsApp payloads, phone numbers, or credentials.
 
