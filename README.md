@@ -64,9 +64,9 @@ The provider container is an internal implementation detail. It sits on a privat
 | HMAC-SHA512 provider webhook verification | ✅ Live |
 | SQLite state in WAL mode | ✅ Live |
 | `/healthz` and `/readyz` endpoints | ✅ Live |
-| Provider-neutral architecture | 🔄 In progress |
-| SSE / WebSocket real-time push | 🔄 Planned |
-| Single-image distribution (no external pull) | 🔄 Planned |
+| Provider-neutral architecture | 🔄 In progress — provider transport is now behind an internal adapter; message and event normalization migration continues |
+| SSE / WebSocket real-time push | 🔄 In progress — authenticated SSE with durable replay is being introduced |
+| Single-image distribution (no external pull) | 🔄 In progress — a combined-image runtime is available for validation; registry publishing remains to be added |
 
 ---
 
@@ -80,6 +80,19 @@ The provider container is an internal implementation detail. It sits on a privat
 | Port 3000 | free | configurable via `GAKAI_PORT` |
 
 No Node.js required on the host. Everything runs inside the containers.
+
+### Combined-image preview
+
+The default installation uses the proven two-container setup. To validate the
+combined Gakai image, set `GAKAI_SINGLE_IMAGE=1` when starting. It runs the
+provider privately inside the Gakai container and exposes only Gakai's port:
+
+```sh
+GAKAI_SINGLE_IMAGE=1 ./scripts/gakai-up.sh
+```
+
+This is the runtime foundation for a future published `docker pull` image. The
+repository does not yet publish or sign a registry image.
 
 ---
 
@@ -402,8 +415,10 @@ gakai.co/
 │   └── worker/             # Planned background worker
 ├── scripts/
 │   └── gakai-up.sh         # One-command launcher
-├── docker-compose.yml      # Two-container stack
-├── Dockerfile              # Gakai image (Node 22 Alpine)
+├── docker-compose.yml      # Default two-container stack
+├── docker-compose.single.yml # Combined-image preview stack
+├── Dockerfile              # Default Gakai image (Node 22 Alpine)
+├── Dockerfile.single       # Combined Gakai + internal runtime image
 └── test/fixtures/          # Sanitized provider payload fixtures
 ```
 
@@ -417,8 +432,8 @@ gakai.co/
 | Server | Native `node:http` — no framework |
 | Storage | `node:sqlite` in WAL mode — zero external dependency |
 | Auth | `node:crypto` — scrypt, HMAC, timing-safe comparison |
-| Frontend | Vanilla JS — zero build step, zero bundler |
-| Deployment | Docker Compose — two-container stack with private internal network |
+| Frontend | React, bundled with esbuild |
+| Deployment | Docker Compose — default private-provider stack; combined-image preview available |
 
 ---
 
@@ -426,9 +441,9 @@ gakai.co/
 
 1. **Provider-neutral message model** — stable domain types, fixture-based rendering tests, clean adapter interface
 2. **Durable event storage** — idempotent webhook ingestion, ordering guarantees
-3. **Real-time browser push** — SSE or WebSocket replacing the polling fallback
+3. **Real-time browser push** — authenticated SSE with a low-frequency polling fallback
 4. **Production topology** — Postgres, object storage, multi-instance health monitoring
-5. **Single-image distribution** — bundle the WhatsApp engine inside Gakai; one `docker pull`, no external dependencies
+5. **Single-image distribution** — publish and sign the combined Gakai image; one `docker pull`, no external runtime dependency
 6. **CI and signed releases** — automated builds, versioned images, changelog generation
 
 ---

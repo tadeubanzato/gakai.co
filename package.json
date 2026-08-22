@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "build": "node scripts/build-client.mjs"
+    "build": "node scripts/build-client.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.10",

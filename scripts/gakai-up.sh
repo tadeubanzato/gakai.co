@@ -94,7 +94,12 @@ fi
 export GAKAI_PORT="$port"
 export GAKAI_PUBLIC_URL="$public_url"
 
-docker compose up -d --build
+compose_file="docker-compose.yml"
+if [ "${GAKAI_SINGLE_IMAGE:-0}" = "1" ]; then
+  compose_file="docker-compose.single.yml"
+fi
+
+docker compose -f "$compose_file" up -d --build
 
 echo
 echo "Gakai is starting."

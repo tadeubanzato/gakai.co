@@ -1,0 +1,28 @@
+services:
+  gakai:
+    build:
+      context: .
+      dockerfile: Dockerfile.single
+    image: gakai:local
+    container_name: gakai
+    restart: unless-stopped
+    environment:
+      GAKAI_PROVIDER_API_KEY: ${GAKAI_PROVIDER_API_KEY:?Run ./scripts/gakai-up.sh to generate secrets}
+      GAKAI_PROVIDER_WEBHOOK_SECRET: ${GAKAI_PROVIDER_WEBHOOK_SECRET:?Run ./scripts/gakai-up.sh to generate secrets}
+      GAKAI_PROVIDER_KIND: waha
+      GAKAI_LEGACY_ADMIN_USERNAME: ${WAHA_DASHBOARD_USERNAME:-}
+      GAKAI_PUBLIC_PORT: ${GAKAI_PORT:-3000}
+      GAKAI_PUBLIC_URL: ${GAKAI_PUBLIC_URL:-}
+      WAHA_API_KEY: ${GAKAI_PROVIDER_API_KEY:?Run ./scripts/gakai-up.sh to generate secrets}
+      WAHA_DASHBOARD_ENABLED: "False"
+      WHATSAPP_SWAGGER_ENABLED: "False"
+      WAHA_PRINT_QR: "False"
+      WHATSAPP_DEFAULT_ENGINE: ${GAKAI_PROVIDER_ENGINE:-WEBJS}
+      WHATSAPP_HOOK_URL: http://127.0.0.1:3001/api/app/provider-events
+      WHATSAPP_HOOK_EVENTS: message
+      WHATSAPP_HOOK_HMAC_KEY: ${GAKAI_PROVIDER_WEBHOOK_SECRET:?Run ./scripts/gakai-up.sh to generate secrets}
+    volumes:
+      - ./sessions:/app/.sessions
+      - ./home-data:/data
+    ports:
+      - "${GAKAI_BIND_ADDRESS:-0.0.0.0}:${GAKAI_PORT:-3000}:3001"
