@@ -61,6 +61,18 @@ export function systemMessageView(message) {
   return type ? { kind: 'system', label: 'WhatsApp system message' } : null;
 }
 
+// @<numeric-id> mentions appear both in a message's own body and in the body
+// of whatever it's replying to (replyTo.body) — both need the same
+// resolution, from one combined set of ids, so a name only has to be looked
+// up once even if it appears in both places.
+export function extractMentionIds(...texts) {
+  return [...new Set(texts.flatMap(text => [...String(text || '').matchAll(/@(\d{5,})/g)].map(match => match[1])))].slice(0, 8);
+}
+
+export function resolveMentionLabels(text, labels) {
+  return String(text || '').replace(/@(\d{5,})/g, (mention, id) => labels.has(id) ? `@${labels.get(id)}` : mention);
+}
+
 export function providerMessageId(value) {
   if (typeof value === 'string' || typeof value === 'number') return String(value);
   if (!value || typeof value !== 'object') return null;

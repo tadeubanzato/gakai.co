@@ -6,7 +6,7 @@ import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac, creat
 import { DatabaseSync } from 'node:sqlite';
 import { createProviderClient } from './src/providers/index.mjs';
 import { WebSocketServer } from 'ws';
-import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, hasMessageContent, messageView as domainMessageView, providerMessageId } from './src/domain/message.mjs';
+import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, extractMentionIds, hasMessageContent, messageView as domainMessageView, providerMessageId, resolveMentionLabels } from './src/domain/message.mjs';
 import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
 import { createBoundedCache } from './src/lib/lru-cache.mjs';
 
@@ -106,6 +106,7 @@ const sessionRememberTtlMs=30*24*60*60*1000; // matches the cookie's own Max-Age
 // once there aren't 30 genuinely active ones.
 const inboxRecencyMs=(Number(process.env.GAKAI_INBOX_RECENCY_DAYS)||60)*24*60*60*1000;
 const inboxChatLimit=Number(process.env.GAKAI_INBOX_CHAT_LIMIT)||40;
+const instagramPreviewRetryMs=Number(process.env.GAKAI_INSTAGRAM_PREVIEW_RETRY_MS)||5*60*1000;
 // Guards against a double-click or slow-retry racing two concurrent n8n
 // connect attempts for the same account: each spans several awaited n8n API
 // calls with no atomic "does a connection already exist" check in between.
@@ -186,15 +187,17 @@ async function instagramPreview(value){
   const url=safeInstagramPage(value);if(!url)throw Object.assign(new Error('Invalid Instagram URL'),{status:400});
   const cached=instagramPreviewCache.get(url.href);if(cached)return cached;
   const ua='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
-  let html='';
+  let html='',fetchFailed=false;
   try{
     const response=await fetch(url,{headers:{'user-agent':ua,'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8','accept-language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(10000)});
     if(response.ok)html=await response.text();
+    else fetchFailed=true;
   }catch(error){
     // Keep the graceful empty-preview UX (a chat bubble shouldn't break over
     // a failed preview fetch) but make the failure visible in logs — this
     // used to fail silently, unlike the near-identical openGraphPreview path.
     console.error('Instagram preview fetch failed:',error.message);
+    fetchFailed=true;
   }
   
   let title=htmlMeta(html,'og:title')||htmlMeta(html,'twitter:title');
@@ -227,7 +230,11 @@ async function instagramPreview(value){
   if(!description)description=null;
   
   const result={title,description,image:safeInstagramImage(image)?.href||null};
-  instagramPreviewCache.set(url.href,result);
+  // A failed fetch (network blip, momentary block/rate-limit) was being
+  // cached as a permanent empty preview with no expiry — the exact fetch
+  // that failed once would never be retried again for that post. Retry soon
+  // instead; only cache long-lived once we actually got a real response.
+  instagramPreviewCache.set(url.href,result,fetchFailed?{ttlMs:instagramPreviewRetryMs}:undefined);
   return result;
 }
 const externalPreviewCache=createBoundedCache({limit:80});
@@ -688,12 +695,17 @@ async function enrichMessage(session,message){
     view.mentions=(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId));const id=contact.id||String(rawId);const ownNumber=ownId.replace(/@.*$/,''),mentionNumber=id.replace(/@.*$/,'');return {id,name:contact.name||mentionNumber,isMe:Boolean(ownId&&(id===ownId||mentionNumber===ownNumber))}}))).filter(mention=>mention.name);
   }
   const body=String(view.body||view.text||'');
-  const mentionIds=[...new Set([...body.matchAll(/@(\d{5,})/g)].map(match=>match[1]))].slice(0,8);
+  // A mention inside the *quoted* text (replyTo.body) was never resolved —
+  // only the main message body was — so "Replying to" previews kept showing
+  // the raw @123456 id forever. Resolve both from one combined mention set.
+  const replyBody=String(view.replyTo?.body||'');
+  const mentionIds=extractMentionIds(body,replyBody);
   if(mentionIds.length){
     const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContact(session,`${id}@lid`)]));
     const labels=new Map(contacts.map(([id,contact])=>[id,contact.name||String(contact.id||'').replace(/@(c|s|g)\.us$/,'')]).filter(([,label])=>label));
-    view.body=body.replace(/@(\d{5,})/g,(mention,id)=>labels.has(id)?`@${labels.get(id)}`:mention);
+    view.body=resolveMentionLabels(body,labels);
     view.text=view.body;
+    if(view.replyTo)view.replyTo.body=resolveMentionLabels(replyBody,labels);
   }
   return view;
 }

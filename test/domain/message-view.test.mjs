@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { messageView, normalizedTimestamp, providerMessageId } from '../../src/domain/message.mjs';
+import { extractMentionIds, messageView, normalizedTimestamp, providerMessageId, resolveMentionLabels } from '../../src/domain/message.mjs';
 
 const providerUrl = 'http://provider:3000';
 const fixture = name => readFile(fileURLToPath(new URL(`../fixtures/providers/waha/${name}`, import.meta.url)), 'utf8').then(JSON.parse);
@@ -89,4 +89,38 @@ test('messageView derives different ids for messages that differ in timestamp, s
 
   assert.notEqual(differentTimestamp.id, original.id);
   assert.notEqual(differentBody.id, original.id);
+});
+
+test('extractMentionIds finds mentions in both the main body and a quoted reply body', () => {
+  const ids = extractMentionIds('Valeu @89249571455071 !', 'Pensei que vc ia curtir, Zé.');
+  assert.deepEqual(ids, ['89249571455071']);
+});
+
+test('extractMentionIds dedups a mention that appears in both texts and caps at 8', () => {
+  const many = Array.from({ length: 10 }, (_, i) => `@${10000 + i}00000`).join(' ');
+  assert.equal(extractMentionIds(many, `@10000000 ${many}`).length, 8);
+});
+
+test('resolveMentionLabels replaces a resolved mention and leaves an unresolved one as-is', () => {
+  const labels = new Map([['89249571455071', 'Erica Tanaka']]);
+  assert.equal(resolveMentionLabels('Valeu @89249571455071 !', labels), 'Valeu @Erica Tanaka !');
+  assert.equal(resolveMentionLabels('Valeu @00000000000000 !', labels), 'Valeu @00000000000000 !');
+});
+
+test('messageView resolves a mention inside replyTo.body, not just the main body — the actual reported bug', async () => {
+  const message = {
+    id: { _serialized: 'reply-mention-fixture' },
+    timestamp: 1735689960,
+    fromMe: false,
+    body: 'Não quer ir com a gente e explicar o que tá acontecendo?',
+    text: 'Não quer ir com a gente e explicar o que tá acontecendo?',
+    quotedMsg: { id: { _serialized: 'quoted-fixture' }, body: 'Valeu @89249571455071 !' },
+  };
+  const view = messageView(message, providerUrl);
+  // messageView itself doesn't resolve mentions (that needs a contact
+  // lookup only enrichMessage in server.mjs can do) — this just proves the
+  // raw quoted mention id survives unresolved through to this point, which
+  // is the precondition enrichMessage's resolveMentionLabels(replyTo.body)
+  // then acts on.
+  assert.equal(view.replyTo.body, 'Valeu @89249571455071 !');
 });

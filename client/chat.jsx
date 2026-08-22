@@ -136,7 +136,13 @@ function LinkPreview({ body, preview }) {
     if (!instagram && !imageNode.dataset.directFallback && imageUrl) { imageNode.dataset.directFallback="true"; imageNode.src=imageUrl; return; }
     imageNode.style.display="none";
   }} />;
-  if (instagram) return <a className="link-preview instagram-native-preview" href={url} target="_blank" rel="noreferrer">{previewImage || <div className="site-preview-mark instagram-mark" aria-hidden="true">◎</div>}<span><em>Instagram</em><b>{readable(data.title || "Instagram post", 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}<small className="instagram-open">Open on Instagram ↗</small></span></a>;
+  // Instagram: a full-width image above the real message text reads better
+  // than a small side-by-side card duplicating title/description the
+  // caption already carries. Fall back to a plain "Open on Instagram" link
+  // when there's no image (fetch failed, or the post genuinely has none).
+  if (instagram) return previewImage
+    ? <a className="link-preview instagram-image-preview" href={url} target="_blank" rel="noreferrer">{previewImage}</a>
+    : <a className="link-preview instagram-native-preview" href={url} target="_blank" rel="noreferrer"><div className="site-preview-mark instagram-mark" aria-hidden="true">◎</div><span><em>Instagram</em><small className="instagram-open">Open on Instagram ↗</small></span></a>;
   if (!hasContent) {
     let hostname = "Website", label = "Open website";
     try {
@@ -158,14 +164,16 @@ function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved,
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
+  const isInstagramLink = (() => { if (!previewUrl) return false; try { return /instagram\.com$/i.test(new URL(previewUrl).hostname); } catch { return false; } })();
   const [showReactions, setShowReactions] = useState(false);
   const label = message?.replyTo?.body || (message?.replyTo?.hasMedia ? "Media attachment" : "Message");
   return <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}${message.mentions?.some(mention=>mention.isMe)?" mentioned-me":""}`}>
     {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} />}
     {message?.replyTo && <div className="reply-context"><b>Replying to</b><span>{String(label).slice(0,140)}</span></div>}
     <MediaCard message={message} accountId={accountId} chatId={chatId} onResolved={onMediaResolved} />
+    {isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
     {visibleBody && <span className="message-body">{messageBody(visibleBody,message.mentions)}</span>}
-    <LinkPreview body={body} preview={message?.linkPreview} />
+    {!isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
     {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
     {reaction && <span className="reaction-pill">{reaction}</span>}
     {!message.pending && <div className="message-actions">
