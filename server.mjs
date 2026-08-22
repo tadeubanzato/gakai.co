@@ -794,6 +794,21 @@ async function enrichMessage(session,message){
   if (req.method==='POST' && parts[4]==='start') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
   if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
   if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}/messages/read`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});return send(res,200,{ok:true});}
+  // Must be checked before the whole-chat DELETE below: both match
+  // parts[4]==='chats'&&parts[5], only this one additionally has
+  // parts[6]==='messages'&&parts[7] (a specific message under that chat).
+  if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]&&parts[6]==='messages'&&parts[7]){
+    const chatId=decodeURIComponent(parts[5]),messageId=providerMessageId(decodeURIComponent(parts[7]));
+    if(!messageId)return send(res,400,{message:'Invalid message ID'});
+    // WhatsApp "delete for me": removes the message from this account's own
+    // view (and syncs across its own linked devices, same as any other
+    // provider-driven action) — it does not remove it from another
+    // participant's WhatsApp.
+    await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,{method:'DELETE'});
+    store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));
+    await persist();
+    return send(res,200,{ok:true});
+  }
   if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){const chatId=decodeURIComponent(parts[5]);await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}`,{method:'DELETE'});store.deletedChats=(store.deletedChats||[]).filter(item=>!(item.accountId===id&&item.chatId===chatId));store.deletedChats.push({accountId:id,chatId,deletedAt:new Date().toISOString()});await persist();return send(res,200,{ok:true});}
   // Presence stays behind the dashboard proxy so the browser never receives
   // direct provider access or its API key.

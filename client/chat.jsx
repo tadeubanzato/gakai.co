@@ -154,7 +154,7 @@ function messageBody(text, mentions) {
   const parts=String(text).split(pattern);
   return parts.map((part,index)=>index%2?<mark key={index} className="own-mention">@{part}</mark>:part);
 }
-function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved, onReply, onReact, reaction }) {
+function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved, onReply, onReact, onDelete, reaction }) {
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
@@ -168,7 +168,12 @@ function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved,
     <LinkPreview body={body} preview={message?.linkPreview} />
     {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
     {reaction && <span className="reaction-pill">{reaction}</span>}
-    {!message.pending && !message.fromMe && <div className="message-actions"><button type="button" onClick={()=>onReply?.(message)}>Reply</button><button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>{showReactions&&<span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}</div>}
+    {!message.pending && <div className="message-actions">
+      {!message.fromMe && <button type="button" onClick={()=>onReply?.(message)}>Reply</button>}
+      {!message.fromMe && <button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>}
+      {!message.fromMe && showReactions && <span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}
+      <button type="button" className="message-delete" onClick={()=>onDelete?.(message)} aria-label="Delete this message for you">Delete</button>
+    </div>}
     <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}</time>
   </article>;
 }
@@ -409,6 +414,21 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   },[accountId,reactionOverrides]);
   const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800)},[sendPresence]);
 
+  // "Delete for me": removes the message from this account's own view. Does
+  // not remove it from the other participant's WhatsApp — WhatsApp's real
+  // "delete for everyone" only applies to messages you sent and within a
+  // time window, which this deliberately does not attempt.
+  const deleteMessage = useCallback(async (message) => {
+    const messageId = serializedId(message?.id); if (!messageId || !chatId) return;
+    if (!window.confirm("Delete this message for you? It won't be removed from the other person's WhatsApp.")) return;
+    try {
+      await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
+      setMessages(current => current.filter(item => serializedId(item?.id) !== messageId));
+    } catch (cause) {
+      setError(cause.message || "Could not delete this message.");
+    }
+  }, [accountId, chatId]);
+
   const deleteConversation = useCallback(async () => {
     if (!chatId || deleting || !window.confirm(`Delete the conversation with ${chat?.name || chatId}? This removes it from WhatsApp and cannot be undone.`)) return;
     setDeleting(true); setError("");
@@ -433,7 +453,7 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
       {loading && !messages.length ? <p className="chat-loading">Loading messages…</p> : <div className="message-list">
-        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
+        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
       {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>
