@@ -65,7 +65,7 @@ The provider container is an internal implementation detail. It sits on a privat
 | SQLite state in WAL mode | ✅ Live |
 | `/healthz` and `/readyz` endpoints | ✅ Live |
 | Provider-neutral architecture | 🔄 In progress — provider transport is now behind an internal adapter; message and event normalization migration continues |
-| SSE / WebSocket real-time push | 🔄 In progress — authenticated SSE with durable replay is being introduced |
+| SSE / WebSocket real-time push | ✅ Live — authenticated SSE plus WebSocket typing/presence |
 | Single-image distribution (no external pull) | 🔄 In progress — a combined-image runtime is available for validation; registry publishing remains to be added |
 
 ---
@@ -411,7 +411,7 @@ gakai.co/
 │   ├── domain/             # Planned domain model
 │   ├── providers/waha/     # Provider adapter (designed to be swapped)
 │   ├── storage/            # Planned storage abstraction
-│   ├── realtime/           # Planned SSE/WebSocket layer
+│   ├── realtime/           # Realtime extraction target; current endpoints live in server.mjs
 │   └── worker/             # Planned background worker
 ├── scripts/
 │   └── gakai-up.sh         # One-command launcher
@@ -441,7 +441,7 @@ gakai.co/
 
 1. **Provider-neutral message model** — stable domain types, fixture-based rendering tests, clean adapter interface
 2. **Durable event storage** — idempotent webhook ingestion, ordering guarantees
-3. **Real-time browser push** — authenticated SSE with a low-frequency polling fallback
+3. **Real-time browser push** — ✅ authenticated SSE and WebSocket typing/presence are live
 4. **Production topology** — Postgres, object storage, multi-instance health monitoring
 5. **Single-image distribution** — publish and sign the combined Gakai image; one `docker pull`, no external runtime dependency
 6. **CI and signed releases** — automated builds, versioned images, changelog generation

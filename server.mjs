@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { createProviderClient } from './src/providers/index.mjs';
+import { WebSocketServer } from 'ws';
 
 const port = Number(process.env.PORT || 3000);
 const configuredPublicUrl = String(process.env.GAKAI_PUBLIC_URL || '').trim().replace(/\/$/, '');
@@ -105,6 +106,19 @@ function recordAppEvent(event) {
     if (stream.accountId === event.account.id) writeSseEvent(stream.res, event, event.id);
   }
   return true;
+}
+const typingSockets=new Set();
+const presencePolls=new Map();
+const socketOpen=socket=>socket.readyState===1;
+const presenceValue=value=>String(value?.presence||value?.status||value?.state||value?.data?.presence||'').toLowerCase();
+function broadcastTyping(accountId,chatId,payload,except){for(const socket of typingSockets)if(socket!==except&&socket.accountId===accountId&&socket.chatId===chatId&&socketOpen(socket))socket.send(JSON.stringify(payload));}
+function stopPresencePoll(key){const poll=presencePolls.get(key);if(!poll)return;clearInterval(poll.timer);presencePolls.delete(key)}
+function maybeStopPresencePoll(key){if(![...typingSockets].some(socket=>`${socket.accountId}:${socket.chatId}`===key))stopPresencePoll(key)}
+function startPresencePoll(accountId,chatId){
+  const key=`${accountId}:${chatId}`;if(presencePolls.has(key))return;
+  const poll={last:'',timer:null};
+  const read=async()=>{try{await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}/subscribe`,{method:'POST'});const value=presenceValue(await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}`));if(value!==poll.last){poll.last=value;broadcastTyping(accountId,chatId,{type:'presence',accountId,chatId,presence:value||'paused'})}}catch{}};
+  poll.timer=setInterval(read,2000);presencePolls.set(key,poll);read();
 }
 const mediaCache=new Map();
 async function cachedMedia(path){
@@ -273,7 +287,7 @@ function messageView(message) {
   // Always pass URL if available so client can fetch OG data; only omit if no URL at all
   const hasUrl = rawPreview && (rawPreview.url || rawPreview.canonicalUrl || rawPreview.link);
   const hasContent = rawPreview && (rawPreview.title || rawPreview.titleText || rawPreview.description || rawPreview.desc || rawPreview.thumbnail || rawPreview.thumbnailUrl || rawPreview.image || rawPreview.imageUrl);
-  return { id:message.id, timestamp:message.timestamp || 0, fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '', system:systemMessageView(message),
+  return { id:message.id, timestamp:normalizedTimestamp(message.timestamp || message._data?.timestamp || 0), fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '', system:systemMessageView(message),
     hasMedia:Boolean(message.hasMedia), media:message.media ? {url:message.media.url || null, mimetype:message.media.mimetype || null, filename:message.media.filename || null} : null, mediaUrl:message.mediaUrl || null, vCards:Array.isArray(message.vCards)?message.vCards:(Array.isArray(message._data?.vCards)?message._data.vCards:[]), sender:senderId?{id:senderId,name:senderName,picture:senderPicture}:null, linkPreview:hasUrl?{url:rawPreview.url||rawPreview.canonicalUrl||rawPreview.link||message.body||message.text||'',title:hasContent?(rawPreview.title||rawPreview.titleText||''):'',description:hasContent?(rawPreview.description||rawPreview.desc||''):'',image:hasContent?(rawPreview.thumbnail||rawPreview.thumbnailUrl||rawPreview.image||rawPreview.imageUrl||null):null}:null, ack:message.ack, ackName:message.ackName };
 }
 const contactsListCache=new Map();
@@ -763,7 +777,7 @@ async function enrichMessage(session,message){
     // The first screen must be fast. Media download is intentionally opt-in,
     // because the provider may need to retrieve every attachment before replying.
     const downloadMedia=url.searchParams.get('media') === '1';
-    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}&offset=${offset}&downloadMedia=${downloadMedia}`);
+    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}&offset=${offset}&sortBy=timestamp&sortOrder=desc&merge=true&downloadMedia=${downloadMedia}`);
     return send(res,200,(await Promise.all(messages.map(message=>enrichMessage(id,message)))).sort((a,b) => a.timestamp - b.timestamp));
   }
   if (req.method==='GET' && parts[4]==='message-media') {
@@ -890,11 +904,21 @@ async function enrichMessage(session,message){
   }
   return send(res,404,{message:'Not found'});
 }
-http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.headers.host}`); try {
+const server=http.createServer(async (req,res)=>{ const url=new URL(req.url,`http://${req.headers.host}`); try {
   if (url.pathname === '/healthz' || url.pathname === '/readyz' || url.pathname.startsWith('/api/')) return await api(req,res,url);
   // React owns application routes. Serve the shell for deep links so a direct
   // visit to an account details page does not get treated as a missing file.
   const requested=(url.pathname==='/'||url.pathname.startsWith('/accounts/')||url.pathname.startsWith('/details/'))?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
   if (!file.startsWith(publicDir)) return send(res,403,{message:'Forbidden'});
   const content=await readFile(file); res.writeHead(200,{'content-type':types[extname(file)]||'application/octet-stream','cache-control':'no-cache'}); res.end(content);
-} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }}).listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}${configuredPublicUrl ? ` (public URL: ${configuredPublicUrl})` : ''}`));
+} catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }});
+const wss=new WebSocketServer({noServer:true});
+wss.on('connection',(socket,req)=>{
+  const url=new URL(req.url,`http://${req.headers.host}`);
+  socket.accountId=String(url.searchParams.get('accountId')||'');socket.chatId=String(url.searchParams.get('chatId')||'');typingSockets.add(socket);startPresencePoll(socket.accountId,socket.chatId);
+  socket.send(JSON.stringify({type:'ready'}));
+  socket.on('message',raw=>{try{const input=JSON.parse(String(raw));if(input.type!=='presence'||input.accountId!==socket.accountId||input.chatId!==socket.chatId||!['typing','recording','paused'].includes(input.presence))return;providerRequest(`/api/${encodeURIComponent(socket.accountId)}/presence`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chatId:socket.chatId,presence:input.presence})}).catch(()=>{});broadcastTyping(socket.accountId,socket.chatId,{type:'presence',accountId:socket.accountId,chatId:socket.chatId,presence:input.presence},socket)}catch{}});
+  socket.on('close',()=>{typingSockets.delete(socket);maybeStopPresencePoll(`${socket.accountId}:${socket.chatId}`)});
+});
+server.on('upgrade',(req,socket,head)=>{const url=new URL(req.url,`http://${req.headers.host}`);if(url.pathname!=='/api/app/ws'||!admin(req)||!url.searchParams.get('accountId')||!url.searchParams.get('chatId')){socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();return;}wss.handleUpgrade(req,socket,head,client=>wss.emit('connection',client,req));});
+server.listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}${configuredPublicUrl ? ` (public URL: ${configuredPublicUrl})` : ''}`));
