@@ -205,4 +205,5 @@ video.media{background:#000}audio.media-audio{display:block;width:min(100%,360px
 /* Live presence status from the authenticated WebSocket channel. */
 .typing-indicator{padding:0 18px 6px;color:#8ce6cf;font-size:12px;background:var(--panel)}
 .jump-to-latest{position:sticky;bottom:0;align-self:center;margin-top:auto;display:flex;align-items:center;gap:6px;background:var(--green);color:#063b29;font-weight:750;font-size:13px;border-radius:999px;padding:9px 16px;box-shadow:0 4px 14px #0007;z-index:4}
+.media-unavailable{margin:0;padding:8px 0;display:flex;align-items:center;gap:8px}.media-failed{color:#e8a33d}.media-failed button{background:var(--soft);color:var(--ink);border-radius:6px;padding:4px 9px;font-size:12px}
 .hint[role="status"]{color:var(--green)}

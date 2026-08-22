@@ -3,6 +3,7 @@
  * message/chat view model out. `server.mjs` binds `providerUrl` once and
  * re-exposes these as its original single-argument call signatures.
  */
+import { createHash } from 'node:crypto';
 
 export function avatarUrl(value, providerUrl) {
   const raw = String(value || '').trim();
@@ -59,6 +60,17 @@ export function replyView(reply) {
   return { id: providerMessageId(reply.id), body: reply.body || reply.text || '', hasMedia: Boolean(reply.hasMedia || reply.media), participant: reply.participant || null };
 }
 
+// When the provider gives no usable id at all, derive a deterministic one
+// from stable fields. A client-side per-render fallback (e.g. an array
+// index) shifts as the list reorders/merges, causing duplicate bubbles or
+// lost local UI state (an open reaction picker) across a live-poll merge.
+// Hashing stable fields here means the same input always produces the same
+// id, from any caller, on any render.
+function derivedMessageId(message, timestamp, senderId) {
+  const seed = `${timestamp}|${message.fromMe ? 'out' : 'in'}|${senderId || ''}|${message.body || message.text || ''}`;
+  return `derived_${createHash('sha1').update(seed).digest('hex').slice(0, 16)}`;
+}
+
 export function messageView(message, providerUrl) {
   const participant = message.participant && typeof message.participant === 'object' ? message.participant : {};
   const senderId = participant.id || message.participant || message.author || message.from || null;
@@ -68,8 +80,10 @@ export function messageView(message, providerUrl) {
   // Always pass URL if available so client can fetch OG data; only omit if no URL at all
   const hasUrl = rawPreview && (rawPreview.url || rawPreview.canonicalUrl || rawPreview.link);
   const hasContent = rawPreview && (rawPreview.title || rawPreview.titleText || rawPreview.description || rawPreview.desc || rawPreview.thumbnail || rawPreview.thumbnailUrl || rawPreview.image || rawPreview.imageUrl);
+  const timestamp = normalizedTimestamp(message.timestamp || message._data?.timestamp || 0);
+  const resolveMediaUrl = value => value ? avatarUrl(value, providerUrl) : null;
   return {
-    id: providerMessageId(message.id) || message.id, timestamp: normalizedTimestamp(message.timestamp || message._data?.timestamp || 0), fromMe: Boolean(message.fromMe), body: message.body || '', text: message.text || '', system: systemMessageView(message), replyTo: replyView(message.replyTo || message.quotedMsg || message._data?.replyTo),
-    hasMedia: Boolean(message.hasMedia), media: message.media ? { url: message.media.url || null, mimetype: message.media.mimetype || null, filename: message.media.filename || null } : null, mediaUrl: message.mediaUrl || null, vCards: Array.isArray(message.vCards) ? message.vCards : (Array.isArray(message._data?.vCards) ? message._data.vCards : []), sender: senderId ? { id: senderId, name: senderName, picture: senderPicture } : null, linkPreview: hasUrl ? { url: rawPreview.url || rawPreview.canonicalUrl || rawPreview.link || message.body || message.text || '', title: hasContent ? (rawPreview.title || rawPreview.titleText || '') : '', description: hasContent ? (rawPreview.description || rawPreview.desc || '') : '', image: hasContent ? (rawPreview.thumbnail || rawPreview.thumbnailUrl || rawPreview.image || rawPreview.imageUrl || null) : null } : null, ack: message.ack, ackName: message.ackName,
+    id: providerMessageId(message.id) || derivedMessageId(message, timestamp, senderId), timestamp, fromMe: Boolean(message.fromMe), body: message.body || '', text: message.text || '', system: systemMessageView(message), replyTo: replyView(message.replyTo || message.quotedMsg || message._data?.replyTo),
+    hasMedia: Boolean(message.hasMedia), media: message.media ? { url: resolveMediaUrl(message.media.url), mimetype: message.media.mimetype || null, filename: message.media.filename || null } : null, mediaUrl: resolveMediaUrl(message.mediaUrl), vCards: Array.isArray(message.vCards) ? message.vCards : (Array.isArray(message._data?.vCards) ? message._data.vCards : []), sender: senderId ? { id: senderId, name: senderName, picture: senderPicture } : null, linkPreview: hasUrl ? { url: rawPreview.url || rawPreview.canonicalUrl || rawPreview.link || message.body || message.text || '', title: hasContent ? (rawPreview.title || rawPreview.titleText || '') : '', description: hasContent ? (rawPreview.description || rawPreview.desc || '') : '', image: hasContent ? (rawPreview.thumbnail || rawPreview.thumbnailUrl || rawPreview.image || rawPreview.imageUrl || null) : null } : null, ack: message.ack, ackName: message.ackName,
   };
 }

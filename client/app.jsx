@@ -1,4 +1,5 @@
 import React,{useCallback,useEffect,useMemo,useRef,useState}from"react";
+import{runExclusive}from"./app-helpers.mjs";
 import{createRoot}from"react-dom/client";
 import{ChatPanel}from"./chat.jsx";
 
@@ -150,19 +151,29 @@ function App(){
 
   // Keep unread state server-authoritative. The badge clears only after the
   // provider has accepted the read receipt; no arbitrary client timer.
-  const handleChatClick=useCallback(async(chatItem)=>{
+  const markingReadRef=useRef(new Set());
+  const handleChatClick=useCallback((chatItem)=>{
     suppressAutoSelectRef.current=false;
     setChat(chatItem);
     if(chatItem.unreadCount && account){
-      try{
-        await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(chatItem.id)+"/read",{method:"POST"});
-        setChats(current=>current.map(c=>c.id===chatItem.id?{...c,unreadCount:0}:c));
-        load(account.id);
-      }catch(x){fail(x.message||"Could not mark this conversation as read");}
+      // A rapid double-click (or clicking away and back before the first
+      // POST resolves) must not fire two concurrent mark-as-read requests.
+      runExclusive(markingReadRef.current,chatItem.id,async()=>{
+        try{
+          await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(chatItem.id)+"/read",{method:"POST"});
+          setChats(current=>current.map(c=>c.id===chatItem.id?{...c,unreadCount:0}:c));
+          load(account.id);
+        }catch(x){fail(x.message||"Could not mark this conversation as read");}
+      });
     }
   },[account,fail,load]);
 
-  const beginPairing=async()=>{
+  const pairingLockRef=useRef(new Set());
+  const beginPairing=()=>runExclusive(pairingLockRef.current,"pairing",async()=>{
+    // Shared by the auto-pair effect below and the manual "+ Connect
+    // account" button — without this guard, clicking the button while the
+    // auto-pair effect's own call is still in flight could create two
+    // account placeholders before refresh() catches up.
     try{
       // A connection must exist before the provider can generate its QR code.
       // Start that work immediately from the user action—there is no redundant
@@ -170,7 +181,7 @@ function App(){
       const d=await api("/api/app/accounts",{method:"POST",body:JSON.stringify({label:"WhatsApp account"})});
       setAdd(false);setPairCreated(true);setPair(d.account);setAccount(d.account);refresh();
     }catch(x){fail(x.message)}
-  };
+  });
 
   // A new workspace has no reason to stop at a second "Connect WhatsApp"
   // screen. Create the first account as soon as setup is complete and let the

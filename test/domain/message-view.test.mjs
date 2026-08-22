@@ -56,3 +56,37 @@ test('normalizedTimestamp treats large numbers as milliseconds and small numbers
   assert.equal(normalizedTimestamp('2025-01-01T00:00:00Z'), Math.floor(Date.parse('2025-01-01T00:00:00Z') / 1000));
   assert.equal(normalizedTimestamp('not a date'), 0);
 });
+
+test('messageView routes a provider-relative media URL through the Gakai media proxy', async () => {
+  const message = await fixture('message-media.json');
+  const view = messageView(message, providerUrl);
+
+  assert.equal(view.media.url, '/api/app/media?path=%2Fapi%2Ffiles%2Ffixture-image.jpg');
+  assert.equal(view.media.mimetype, 'image/jpeg');
+});
+
+test('messageView leaves media.url null when the provider sends no media URL', async () => {
+  const message = await fixture('message-text.json');
+  const view = messageView(message, providerUrl);
+  assert.equal(view.media, null);
+  assert.equal(view.mediaUrl, null);
+});
+
+test('messageView derives a stable, deterministic id when the provider gives none', async () => {
+  const message = await fixture('message-no-id.json');
+  const first = messageView(message, providerUrl);
+  const second = messageView(message, providerUrl);
+
+  assert.ok(first.id.startsWith('derived_'));
+  assert.equal(first.id, second.id, 'the same input must always produce the same id, unlike a per-render array-index fallback');
+});
+
+test('messageView derives different ids for messages that differ in timestamp, sender, or body', async () => {
+  const base = await fixture('message-no-id.json');
+  const differentTimestamp = messageView({ ...base, timestamp: base.timestamp + 1 }, providerUrl);
+  const differentBody = messageView({ ...base, body: 'a different body', text: 'a different body' }, providerUrl);
+  const original = messageView(base, providerUrl);
+
+  assert.notEqual(differentTimestamp.id, original.id);
+  assert.notEqual(differentBody.id, original.id);
+});

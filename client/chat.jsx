@@ -68,16 +68,28 @@ function PlayableMedia({ kind, src, filename }) {
 function MediaCard({ message, accountId, chatId, onResolved }) {
   const src = mediaSrc(message);
   const needsMedia = Boolean(message?.hasMedia || message?.media || message?.mediaUrl);
+  // Both the resolve request and, once resolved, the media element itself
+  // used to have no error path at all — either failure left the bubble
+  // stuck on "Loading attachment…" forever with no feedback or way to retry.
+  const [resolveFailed, setResolveFailed] = useState(false);
+  const [displayFailed, setDisplayFailed] = useState(false);
+  const [retryToken, setRetryToken] = useState(0);
   useEffect(() => {
     if (!needsMedia || src || !message?.id || !accountId || !chatId) return undefined;
     let active = true;
-    api(`/api/app/accounts/${encodeURIComponent(accountId)}/message-media?chatId=${encodeURIComponent(chatId)}&messageId=${encodeURIComponent(message.id)}`).then(result => { if (active && result?.message) onResolved?.(result.message); }).catch(() => {});
+    setResolveFailed(false);
+    api(`/api/app/accounts/${encodeURIComponent(accountId)}/message-media?chatId=${encodeURIComponent(chatId)}&messageId=${encodeURIComponent(message.id)}`)
+      .then(result => { if (!active) return; if (result?.message) onResolved?.(result.message); else setResolveFailed(true); })
+      .catch(() => { if (active) setResolveFailed(true); });
     return () => { active = false; };
-  }, [accountId, chatId, message?.id, needsMedia, onResolved, src]);
+  }, [accountId, chatId, message?.id, needsMedia, onResolved, src, retryToken]);
   if (!needsMedia) return null;
   const kind = mediaKind(message), filename = message?.media?.filename || (kind === "document" ? "Attachment" : "");
-  if (!src) return <p className="media-unavailable">Loading attachment…</p>;
-  if (kind === "image") return <img className="message-media media image" src={src} alt={message.body || message.text || "Image attachment"} loading="lazy" />;
+  const retry = () => { setResolveFailed(false); setDisplayFailed(false); setRetryToken(token => token + 1); };
+  const failedNotice = <p className="media-unavailable media-failed">Couldn't load attachment <button type="button" onClick={retry}>Retry</button></p>;
+  if (!src) return resolveFailed ? failedNotice : <p className="media-unavailable">Loading attachment…</p>;
+  if (displayFailed) return failedNotice;
+  if (kind === "image") return <img className="message-media media image" src={src} alt={message.body || message.text || "Image attachment"} loading="lazy" onError={() => setDisplayFailed(true)} />;
   if (kind === "video") return <PlayableMedia kind="video" src={src} filename={filename||"video"}/>;
   if (kind === "audio") return <PlayableMedia kind="audio" src={src} filename={filename||"audio"}/>;
   return <a className="message-document" href={src} target="_blank" rel="noreferrer" download={filename}><span aria-hidden="true">▧</span><span>{filename}</span></a>;
