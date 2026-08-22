@@ -160,16 +160,28 @@ function LinkPreview({ body, preview }) {
   }
   return <a className="link-preview" href={url} target="_blank" rel="noreferrer">{previewImage}<span><b>{readable(data.title || url, 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}</span></a>;
 }
-function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved }) {
+function messageBody(text, mentions) {
+  const ownNames=(mentions||[]).filter(mention=>mention.isMe&&mention.name).map(mention=>String(mention.name));
+  if(!ownNames.length)return text;
+  const pattern=new RegExp(`@(${ownNames.map(name=>name.replace(/[.*+?^${}()|[\\]\\]/g,"\\$&")).join("|")})(?=$|\\s|[.,!?])`,`gi`);
+  const parts=String(text).split(pattern);
+  return parts.map((part,index)=>index%2?<mark key={index} className="own-mention">@{part}</mark>:part);
+}
+function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved, onReply, onReact, reaction }) {
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
-  return <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}`}>
+  const [showReactions, setShowReactions] = useState(false);
+  const label = message?.replyTo?.body || (message?.replyTo?.hasMedia ? "Media attachment" : "Message");
+  return <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}${message.mentions?.some(mention=>mention.isMe)?" mentioned-me":""}`}>
     {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} />}
+    {message?.replyTo && <div className="reply-context"><b>Replying to</b><span>{String(label).slice(0,140)}</span></div>}
     <MediaCard message={message} accountId={accountId} chatId={chatId} onResolved={onMediaResolved} />
-    {visibleBody && <span className="message-body">{visibleBody}</span>}
+    {visibleBody && <span className="message-body">{messageBody(visibleBody,message.mentions)}</span>}
     <LinkPreview body={body} preview={message?.linkPreview} />
     {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
+    {reaction && <span className="reaction-pill">{reaction}</span>}
+    {!message.pending && !message.fromMe && <div className="message-actions"><button type="button" onClick={()=>onReply?.(message)}>Reply</button><button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>{showReactions&&<span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}</div>}
     <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}</time>
   </article>;
 }
@@ -189,6 +201,8 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   const [exhausted, setExhausted] = useState(false);
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [replyingTo, setReplyingTo] = useState(null);
+  const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
   const typingSocketRef = useRef(null);
   const typingTimerRef = useRef(null);
@@ -217,7 +231,7 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     restoreAnchorRef.current = null;
     historyRestoreRef.current = null;
     olderRequestRef.current = false;
-    setMessages([]); setOffset(0); setExhausted(false); setError(""); setLoading(Boolean(chatId));
+    setMessages([]); setOffset(0); setExhausted(false); setError(""); setReplyingTo(null); setReactionOverrides({}); setLoading(Boolean(chatId));
     if (!accountId || !chatId) return undefined;
     api(endpoint(accountId, chatId)).then(result => {
       if (requestRef.current !== version) return;
@@ -330,17 +344,6 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     if (event.currentTarget.scrollTop <= 120) loadOlder();
   }, [loadOlder]);
 
-  // Short conversations may not fill the viewport enough to be scrollable.
-  // Continue paging only in that case; once it fills, further history loads
-  // happen naturally as the reader scrolls toward the top.
-  useEffect(() => {
-    if (loading || olderLoading || exhausted || !messages.length) return undefined;
-    const pane = paneRef.current;
-    if (!pane || pane.scrollTop > 120 || pane.scrollHeight > pane.clientHeight + 120) return undefined;
-    const frame = requestAnimationFrame(loadOlder);
-    return () => cancelAnimationFrame(frame);
-  }, [exhausted, loadOlder, loading, messages.length, olderLoading]);
-
   const send = useCallback(async event => {
     event.preventDefault();
     const field = event.currentTarget.elements.text;
@@ -348,19 +351,28 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     if (!text || !chatId) return;
     if(typingTimerRef.current)clearTimeout(typingTimerRef.current); sendPresence("paused");
     field.value = "";
-    const pending = { id: `pending-${Date.now()}`, body: text, fromMe: true, timestamp: Math.floor(Date.now() / 1000), pending: true };
+    const pending = { id: `pending-${Date.now()}`, body: text, fromMe: true, timestamp: Math.floor(Date.now() / 1000), pending: true, replyTo:replyingTo };
     followLatestRef.current = true;
     setMessages(current => [...current, pending]);
     try {
-      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages`, { method: "POST", body: JSON.stringify({ chatId, text }) });
+      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages`, { method: "POST", body: JSON.stringify({ chatId, text, replyTo:replyingTo?.id }) });
       const confirmed = result.message ? { ...pending, ...result.message, body: result.message.body || result.message.text || pending.body, text: result.message.text || result.message.body || pending.text || pending.body, pending: false } : null;
       setMessages(current => merge(current.filter(message => message.id !== pending.id), confirmed ? [confirmed] : []));
+      setReplyingTo(null);
       onSent?.(result.message, chat);
     } catch (cause) {
       setMessages(current => current.filter(message => message.id !== pending.id));
       setError(cause.message || "Could not send message.");
     }
-  }, [accountId, chat, chatId, onSent, sendPresence]);
+  }, [accountId, chat, chatId, onSent, replyingTo, sendPresence]);
+
+  const reactToMessage = useCallback(async (message, emoji) => {
+    const messageId=serializedId(message?.id);if(!messageId)return;
+    const previous=reactionOverrides[messageId]||"",next=previous===emoji?"":emoji;
+    setReactionOverrides(current=>({...current,[messageId]:next}));
+    try{await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(messageId)}/reaction`,{method:"POST",body:JSON.stringify({reaction:next})});}
+    catch(cause){setReactionOverrides(current=>({...current,[messageId]:previous}));setError(cause.message||"Could not update reaction.");}
+  },[accountId,reactionOverrides]);
   const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800)},[sendPresence]);
 
   const deleteConversation = useCallback(async () => {
@@ -387,11 +399,12 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
       {loading && !messages.length ? <p className="chat-loading">Loading messages…</p> : <div className="message-list">
-        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia}/></div>)}
+        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
     </div>
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
     <form className="composer" onSubmit={send}>
+      {replyingTo&&<div className="composer-reply"><span><b>Replying to</b>{String(replyingTo.body||replyingTo.text||"Message").slice(0,100)}</span><button type="button" onClick={()=>setReplyingTo(null)} aria-label="Cancel reply">×</button></div>}
       <textarea
         name="text"
         rows="1"
