@@ -8,6 +8,7 @@ import { createProviderClient } from './src/providers/index.mjs';
 import { WebSocketServer } from 'ws';
 import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, messageView as domainMessageView, providerMessageId } from './src/domain/message.mjs';
 import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
+import { createBoundedCache } from './src/lib/lru-cache.mjs';
 
 const port = Number(process.env.PORT || 3000);
 const configuredPublicUrl = String(process.env.GAKAI_PUBLIC_URL || '').trim().replace(/\/$/, '');
@@ -148,14 +149,14 @@ function startPresencePoll(accountId,chatId){
   const read=async()=>{try{await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}/subscribe`,{method:'POST'});const value=presenceValue(await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}`));if(value!==poll.last){poll.last=value;broadcastTyping(accountId,chatId,{type:'presence',accountId,chatId,presence:value||'paused'})}}catch{}};
   poll.timer=setInterval(read,2000);presencePolls.set(key,poll);read();
 }
-const mediaCache=new Map();
+const mediaCache=createBoundedCache({limit:24});
 async function cachedMedia(path){
   const cached=mediaCache.get(path);if(cached)return cached;
   const response=await providerFile(path);const value={buffer:Buffer.from(await response.arrayBuffer()),type:response.headers.get('content-type')||'application/octet-stream'};
-  if(value.buffer.length<=3*1024*1024){mediaCache.set(path,value);if(mediaCache.size>24)mediaCache.delete(mediaCache.keys().next().value)}
+  if(value.buffer.length<=3*1024*1024)mediaCache.set(path,value);
   return value;
 }
-const instagramPreviewCache=new Map();
+const instagramPreviewCache=createBoundedCache({limit:40});
 const safeInstagramPage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/instagram\.com$/i.test(url.hostname)?url:null}catch{return null}};
 const safeInstagramImage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/(^|\.)(cdninstagram\.com|fbcdn\.net)$/i.test(url.hostname)?url:null}catch{return null}};
 const htmlMeta=(html,key)=>{
@@ -182,7 +183,12 @@ async function instagramPreview(value){
   try{
     const response=await fetch(url,{headers:{'user-agent':ua,'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8','accept-language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(10000)});
     if(response.ok)html=await response.text();
-  }catch{}
+  }catch(error){
+    // Keep the graceful empty-preview UX (a chat bubble shouldn't break over
+    // a failed preview fetch) but make the failure visible in logs — this
+    // used to fail silently, unlike the near-identical openGraphPreview path.
+    console.error('Instagram preview fetch failed:',error.message);
+  }
   
   let title=htmlMeta(html,'og:title')||htmlMeta(html,'twitter:title');
   let description=htmlMeta(html,'og:description')||htmlMeta(html,'twitter:description')||htmlMeta(html,'description');
@@ -215,10 +221,9 @@ async function instagramPreview(value){
   
   const result={title,description,image:safeInstagramImage(image)?.href||null};
   instagramPreviewCache.set(url.href,result);
-  if(instagramPreviewCache.size>40)instagramPreviewCache.delete(instagramPreviewCache.keys().next().value);
   return result;
 }
-const externalPreviewCache=new Map();
+const externalPreviewCache=createBoundedCache({limit:80});
 const safePublicUrl=async value=>(await validatePublicUrl(value))?.url||null;
 const n8nWebhookUrl=async value=>(await validatePublicUrl(value,{requireHttps:true}))?.url||null;
 async function openGraphPreview(value){
@@ -244,7 +249,6 @@ async function openGraphPreview(value){
   const safeImage=image?await safePublicUrl(image):null;
   const result={title,description,image:safeImage?.href||null};
   externalPreviewCache.set(url.href,result);
-  if(externalPreviewCache.size>80)externalPreviewCache.delete(externalPreviewCache.keys().next().value);
   return result;
 }
 const avatarUrl = value => domainAvatarUrl(value, providerUrl);
@@ -257,15 +261,19 @@ async function accountView(session){
 }
 const config = label => label ? ({metadata:{'gakai.label':label}}) : {};
 const chatOverview = chat => domainChatOverview(chat, providerUrl);
-const chatPictureCache=new Map();
+const chatPictureCache=createBoundedCache({limit:500});
 const chatPictureCacheTtl=24*60*60*1000;
 function chatPictureFor(session,chatId){
   const key=`${session}:${chatId}`,cached=chatPictureCache.get(key);
-  if(cached&&cached.expiresAt>Date.now())return cached.value;
-  const entry={value:null,expiresAt:Date.now()+5*60*1000};
-  const task=providerRequest(`/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/picture?refresh=true`).then(picture=>{entry.expiresAt=Date.now()+chatPictureCacheTtl;return avatarUrl(picture?.profilePictureURL||picture?.url||picture?.profilePicture||picture)}).catch(()=>null);
-  entry.value=task;chatPictureCache.set(key,entry);
-  if(chatPictureCache.size>500)chatPictureCache.delete(chatPictureCache.keys().next().value);
+  if(cached)return cached;
+  const task=providerRequest(`/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/picture?refresh=true`).then(picture=>{
+    // Extend a resolved lookup's lifetime well past the short in-flight TTL
+    // below, so a successful picture stays cached long-term instead of being
+    // re-fetched every few minutes.
+    chatPictureCache.set(key,task,{ttlMs:chatPictureCacheTtl});
+    return avatarUrl(picture?.profilePictureURL||picture?.url||picture?.profilePicture||picture);
+  }).catch(()=>null);
+  chatPictureCache.set(key,task,{ttlMs:5*60*1000});
   return task;
 }
 async function enrichChatOverview(session,chat){const view=chatOverview(chat);if(!view.picture&&view.id)view.picture=await chatPictureFor(session,view.id);return view}
@@ -281,19 +289,21 @@ async function allChatOverviews(session){
   }
 }
 const messageView = message => domainMessageView(message, providerUrl);
-const contactsListCache=new Map();
+const profileCacheTtl=5*60*1000;
+// Previously never expired, unlike every sibling cache here — a contact's
+// display name could go stale for the life of the process.
+const contactsListCache=createBoundedCache({limit:50,ttlMs:profileCacheTtl});
 async function contactsFor(session){
   const cached=contactsListCache.get(session);if(cached)return await cached;
-  const task=providerRequest(`/api/contacts/all?session=${encodeURIComponent(session)}`).catch(error=>{contactsListCache.delete(session);throw error});contactsListCache.set(session,task);if(contactsListCache.size>50)contactsListCache.delete(contactsListCache.keys().next().value);return await task;
+  const task=providerRequest(`/api/contacts/all?session=${encodeURIComponent(session)}`).catch(error=>{contactsListCache.delete(session);throw error});contactsListCache.set(session,task);return await task;
 }
-const contactCache=new Map();
-const profilePictureCache=new Map();
-const accountIdentityCache=new Map();
-const profileCacheTtl=5*60*1000;
-async function accountIdentityFor(session){const cached=accountIdentityCache.get(session);if(cached&&cached.expiresAt>Date.now())return cached.id;try{const value=await providerRequest(`/api/sessions/${encodeURIComponent(session)}`),id=String(value?.me?.id||'');accountIdentityCache.set(session,{id,expiresAt:Date.now()+profileCacheTtl});return id}catch{return ''}}
-function profilePictureFor(session,contactId){const key=`${session}:${contactId}`,cached=profilePictureCache.get(key);if(cached&&cached.expiresAt>Date.now())return cached.value;profilePictureCache.delete(key);const task=providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`);const entry={value:task,expiresAt:Date.now()+profileCacheTtl};profilePictureCache.set(key,entry);task.catch(()=>{if(profilePictureCache.get(key)===entry)profilePictureCache.delete(key)});if(profilePictureCache.size>500)profilePictureCache.delete(profilePictureCache.keys().next().value);return task;}
+const contactCache=createBoundedCache({limit:500,ttlMs:profileCacheTtl});
+const profilePictureCache=createBoundedCache({limit:500,ttlMs:profileCacheTtl});
+const accountIdentityCache=createBoundedCache({limit:50,ttlMs:profileCacheTtl});
+async function accountIdentityFor(session){const cached=accountIdentityCache.get(session);if(cached)return cached;try{const value=await providerRequest(`/api/sessions/${encodeURIComponent(session)}`),id=String(value?.me?.id||'');accountIdentityCache.set(session,id);return id}catch{return ''}}
+function profilePictureFor(session,contactId){const key=`${session}:${contactId}`,cached=profilePictureCache.get(key);if(cached)return cached;const task=providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`);profilePictureCache.set(key,task);task.catch(()=>{if(profilePictureCache.get(key)===task)profilePictureCache.delete(key)});return task;}
 async function resolveContact(session,rawId){
-  const key=`${session}:${rawId}`,cached=contactCache.get(key);if(cached&&cached.expiresAt>Date.now())return cached.value;contactCache.delete(key);
+  const key=`${session}:${rawId}`,cached=contactCache.get(key);if(cached)return cached;
   let contactId=String(rawId||'');
   try{
     if(contactId.endsWith('@lid')){
@@ -304,19 +314,20 @@ async function resolveContact(session,rawId){
     const contacts=await contactsFor(session);
     const contact=(Array.isArray(contacts)?contacts:[]).find(item=>item.id===contactId||item.number===contactId.replace(/@.*$/,'')||item.lid===rawId)||{};
     const picture=await profilePictureFor(session,contactId);
-    const phone=contact.number||contact.phoneNumber||contact.phone||(contactId.endsWith("@c.us")?contactId.slice(0,-5):null); const value={id:contactId,phone:phone?String(phone).replace(/[^0-9]/g,""):null,name:contact.name||contact.pushName||contact.shortName||contact.verifiedName||null,status:contact.status||contact.about||contact.description||null,picture:avatarUrl(picture?.profilePictureURL||picture?.url)}; contactCache.set(key,{value,expiresAt:Date.now()+profileCacheTtl}); if(contactCache.size>500)contactCache.delete(contactCache.keys().next().value); return value;
+    const phone=contact.number||contact.phoneNumber||contact.phone||(contactId.endsWith("@c.us")?contactId.slice(0,-5):null); const value={id:contactId,phone:phone?String(phone).replace(/[^0-9]/g,""):null,name:contact.name||contact.pushName||contact.shortName||contact.verifiedName||null,status:contact.status||contact.about||contact.description||null,picture:avatarUrl(picture?.profilePictureURL||picture?.url)}; contactCache.set(key,value); return value;
   }catch{const value={id:contactId,phone:contactId.endsWith("@c.us")?contactId.slice(0,-5):null,name:null,picture:null};return value}
 }
 const automationSummary=subscription=>({id:subscription.id,accountId:subscription.accountId,name:subscription.name,url:subscription.url,productionUrl:subscription.productionUrl||subscription.url,testUrl:subscription.testUrl||null,testPhone:subscription.testPhone||null,enabled:subscription.enabled,events:subscription.events,secret:subscription.secret,createdAt:subscription.createdAt,lastDelivery:subscription.lastDelivery||null});
-async function automationFetch(subscription,event){
+async function automationFetch(subscription,event,{url:overrideUrl}={}){
+  const targetUrl=overrideUrl||subscription.url;
   const request=url=>fetchPinned(url,{requireHttps:true,method:'POST',headers:{'content-type':'application/json','x-gakai-secret':subscription.secret,'x-gakai-event-id':event.id,'user-agent':'Gakai/1.0'},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});
-  let response=await request(subscription.url);
-  if(!response.ok&&event.source==='test'&&response.status===404&&subscription.url.includes('/webhook/'))response=await request(subscription.url.replace('/webhook/','/webhook-test/'));
+  let response=await request(targetUrl);
+  if(!response.ok&&event.source==='test'&&response.status===404&&targetUrl.includes('/webhook/'))response=await request(targetUrl.replace('/webhook/','/webhook-test/'));
   return response;
 }
-async function deliverAutomation(subscription,event){subscription.secret=subscription.secret||ensureN8nKey(subscription.accountId);
+async function deliverAutomation(subscription,event,options={}){subscription.secret=subscription.secret||ensureN8nKey(subscription.accountId);
   const started=Date.now();
-  try{const response=await automationFetch(subscription,event);subscription.lastDelivery={at:new Date().toISOString(),ok:response.ok,status:response.status,durationMs:Date.now()-started};if(!response.ok)throw new Error(`Webhook returned ${response.status}`)}
+  try{const response=await automationFetch(subscription,event,options);subscription.lastDelivery={at:new Date().toISOString(),ok:response.ok,status:response.status,durationMs:Date.now()-started};if(!response.ok)throw new Error(`Webhook returned ${response.status}`)}
   catch(error){subscription.lastDelivery={at:new Date().toISOString(),ok:false,error:error.message||"Delivery failed",durationMs:Date.now()-started};throw error}
   finally{await persist()}
 }
@@ -836,10 +847,15 @@ async function enrichMessage(session,message){
   if(parts[4]==="integration-keys"&&req.method==="GET")return send(res,200,{keys:store.keys.filter(k=>k.accountId===id).map(({hash,token,...key})=>key)});
   if(parts[4]==="integration-keys"&&req.method==="POST"){const input=await readBody(req);const token=`wh_live_${randomBytes(24).toString("base64url")}`;const key={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"Integration").slice(0,80),scopes:Array.isArray(input.scopes)?input.scopes:["messages:read","messages:send"],createdAt:new Date().toISOString(),lastUsedAt:null,hash:hash(token)};store.keys.push(key);await persist();return send(res,201,{key:{...key,hash:undefined},token});}
   if(parts[4]==="automations"&&req.method==="GET")return send(res,200,{subscriptions:store.automationSubscriptions.filter(subscription=>subscription.accountId===id).map(automationSummary)});
-  if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await n8nWebhookUrl(input.url||""),secret=String(input.secret||"").trim();if(!url)return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@c.us",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await fetchPinned(url.href,{requireHttps:true,method:"POST",headers:{"content-type":"application/json","x-gakai-secret":secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
+  if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await n8nWebhookUrl(input.url||""),secret=String(input.secret||"").trim();if(!url)return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@c.us",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await automationFetch({secret,url:url.href},event);if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
   if(parts[4]==="automations"&&!parts[5]&&req.method==="POST"){const input=await readBody(req),production=await n8nWebhookUrl(input.productionUrl||input.url||""),test=await n8nWebhookUrl(input.testUrl||""),requestedSecret=String(input.secret||"").trim();if(!production)return send(res,400,{message:"Use an HTTPS n8n production webhook URL"});if(input.testUrl&&!test)return send(res,400,{message:"Use an HTTPS n8n test webhook URL"});if(requestedSecret.length>256)return send(res,400,{message:"Invalid Header Auth secret"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:production.href,productionUrl:production.href,testUrl:test?.href||null,testPhone:String(input.testPhone||"").replace(/[^0-9]/g,"")||null,enabled:true,events:["message.received"],secret:requestedSecret||ensureN8nKey(id),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}
   if(parts[4]==="automations"&&parts[5]&&req.method==="PATCH"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req);if(typeof input.enabled==="boolean")subscription.enabled=input.enabled;await persist();return send(res,200,{subscription:automationSummary(subscription)});}
-  if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@c.us`:"demo@c.us",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};try{const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});const response=await fetch(destination,{method:"POST",headers:{"content-type":"application/json","x-gakai-secret":subscription.secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true,subscription:automationSummary(subscription)})}catch(error){return send(res,502,{message:error.message||"Test delivery failed",subscription:automationSummary(subscription)})}}
+  if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@c.us`:"demo@c.us",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});
+    // Route through the same delivery path production events use so this
+    // test send updates subscription.lastDelivery like a real one does,
+    // instead of the status vanishing after a hand-rolled fetch.
+    try{await deliverAutomation(subscription,event,{url:destination});return send(res,200,{ok:true,subscription:automationSummary(subscription)})}
+    catch(error){return send(res,502,{message:error.message||"Test delivery failed",subscription:automationSummary(subscription)})}}
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
   // LLM proxy config endpoints
