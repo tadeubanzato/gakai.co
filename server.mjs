@@ -816,11 +816,17 @@ async function enrichMessage(session,message){
   if (req.method==='GET' && parts[4]==='messages') {
     const chatId=url.searchParams.get('chatId'); if (!chatId) return send(res,400,{message:'chatId is required'});
     const limit=Math.min(Math.max(Number(url.searchParams.get('limit')) || 15, 1), 60);
-    const offset=Math.max(Number(url.searchParams.get('offset')) || 0, 0);
     // The first screen must be fast. Media download is intentionally opt-in,
     // because the provider may need to retrieve every attachment before replying.
     const downloadMedia=url.searchParams.get('media') === '1';
-    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}&offset=${offset}&sortBy=timestamp&sortOrder=desc&merge=true&downloadMedia=${downloadMedia}`);
+    // `before` (the oldest currently-loaded message's timestamp) pages by a
+    // stable point in time instead of a numeric offset, which drifts and can
+    // skip a message if new ones arrive between page loads while the reader
+    // is paging back through history. WAHA has no id-based cursor, but does
+    // support filter.timestamp.lte, which is enough for a real cursor.
+    const before=Number(url.searchParams.get('before'));
+    const pagingQuery=Number.isFinite(before)&&before>0?`&filter.timestamp.lte=${Math.max(0,before-1)}`:`&offset=${Math.max(Number(url.searchParams.get('offset'))||0,0)}`;
+    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}${pagingQuery}&sortBy=timestamp&sortOrder=desc&merge=true&downloadMedia=${downloadMedia}`);
     return send(res,200,(await Promise.all(messages.map(message=>enrichMessage(id,message)))).sort((a,b) => a.timestamp - b.timestamp));
   }
   if (req.method==='GET' && parts[4]==='message-media') {

@@ -118,16 +118,27 @@ function App(){
 
   // SSE carries normalized Gakai events. Keep a low-frequency fallback for
   // provider changes that do not emit a webhook (for example, a QR lifecycle).
+  // `load` and `chats.length` are read through refs rather than as effect
+  // dependencies: chats.length changes on every load() this same effect
+  // triggers, so depending on it directly tore down and reopened the
+  // EventSource connection (and re-registered the SSE query on the server)
+  // on every chat-count change while the inbox was actively syncing.
+  const loadRef=useRef(load);
+  useEffect(()=>{loadRef.current=load},[load]);
+  const chatsLengthRef=useRef(chats.length);
+  useEffect(()=>{chatsLengthRef.current=chats.length},[chats.length]);
   useEffect(()=>{
     if(!account || account.status!=="WORKING") return;
     const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(account.id));
     const update=event=>{
-      try{const change=JSON.parse(event.data);if(change.account?.id===account.id)load(account.id)}catch{}
+      try{const change=JSON.parse(event.data);if(change.account?.id===account.id)loadRef.current(account.id)}catch{}
     };
     stream.addEventListener("gakai",update);
-    const interval=setInterval(()=>load(account.id), chats.length?60000:10000);
-    return()=>{stream.removeEventListener("gakai",update);stream.close();clearInterval(interval)};
-  },[account?.id, account?.status, chats.length, load]);
+    let timer;
+    const schedule=()=>{timer=window.setTimeout(()=>{loadRef.current(account.id);schedule()},chatsLengthRef.current?60000:10000)};
+    schedule();
+    return()=>{stream.removeEventListener("gakai",update);stream.close();window.clearTimeout(timer)};
+  },[account?.id, account?.status]);
 
   useEffect(()=>{api("/api/app/auth/state").then(setAuth).catch(x=>fail(x.message))},[fail]);
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);

@@ -1,36 +1,11 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-
-// Keep the first request small: WEBJS may need a browser-backed provider call
-// for each history page, so a large eager load makes opening chats sluggish.
-const PAGE_SIZE = 20;
-// WAHA engines may return a message id as either a string or a structured key.
-// String(object) is always "[object Object]", which made every such outgoing
-// message share one React/merge key and caused later sends to replace earlier
-// bubbles. Preserve a provider-supplied serialized value, or serialize the
-// complete key as a stable, unique client identity.
-function serializedId(value) {
-  if (typeof value === "string" || typeof value === "number") return String(value);
-  if (!value || typeof value !== "object") return "";
-  const direct = value._serialized || value.serialized;
-  if (typeof direct === "string" || typeof direct === "number") return String(direct);
-  if (typeof value.id === "string" || typeof value.id === "number") return String(value.id);
-  try { return JSON.stringify(value); } catch { return ""; }
-}
-const idFor = (message, index) => serializedId(message?.id) || `${message?.timestamp || 0}-${message?.fromMe ? "out" : "in"}-${message?.body || message?.text || "message"}-${index}`;
-const stamp = (message) => { const value=Number(message?.timestamp); if(Number.isFinite(value)&&value>0)return value; const parsed=Date.parse(message?.timestamp||""); return Number.isFinite(parsed)?Math.floor(parsed/1000):0; };
-const pageOf = (result) => Array.isArray(result) ? result : (result?.messages || []);
-const endpoint = (accountId, chatId, offset = 0) => `/api/app/accounts/${encodeURIComponent(accountId)}/messages?chatId=${encodeURIComponent(chatId)}&limit=${PAGE_SIZE}&offset=${offset}`;
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge } from "./chat-helpers.mjs";
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { "content-type": "application/json", ...(options.headers || {}) }, ...options });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.message || "Request failed");
   return data;
-}
-function merge(current, extra) {
-  const keyed = new Map();
-  [...current, ...extra].forEach((message, index) => keyed.set(idFor(message, index), message));
-  return [...keyed.values()].sort((a, b) => stamp(a) - stamp(b));
 }
 function mediaSrc(message) {
   const raw = message?.mediaUrl || message?.media?.url;
@@ -195,7 +170,6 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   const olderRequestRef = useRef(false);
   const followLatestRef = useRef(false);
   const [messages, setMessages] = useState([]);
-  const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [olderLoading, setOlderLoading] = useState(false);
   const [exhausted, setExhausted] = useState(false);
@@ -204,6 +178,9 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   const [replyingTo, setReplyingTo] = useState(null);
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
+  const [newMessageCount, setNewMessageCount] = useState(0);
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const typingSocketRef = useRef(null);
   const typingTimerRef = useRef(null);
   const chatId = chat?.id;
@@ -216,6 +193,12 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     socket.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==="presence")setRemoteTyping(value.presence==="typing"||value.presence==="recording")}catch{}};
     return()=>{if(typingSocketRef.current===socket)typingSocketRef.current=null;socket.close();setRemoteTyping(false)};
   },[accountId,chatId]);
+
+  const isNearBottom = useCallback(() => {
+    const pane = paneRef.current;
+    if (!pane) return true;
+    return pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
+  }, []);
 
   const captureAnchor = useCallback(() => {
     const pane = paneRef.current;
@@ -231,12 +214,12 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     restoreAnchorRef.current = null;
     historyRestoreRef.current = null;
     olderRequestRef.current = false;
-    setMessages([]); setOffset(0); setExhausted(false); setError(""); setReplyingTo(null); setReactionOverrides({}); setLoading(Boolean(chatId));
+    setMessages([]); setExhausted(false); setError(""); setReplyingTo(null); setReactionOverrides({}); setNewMessageCount(0); setLoading(Boolean(chatId));
     if (!accountId || !chatId) return undefined;
     api(endpoint(accountId, chatId)).then(result => {
       if (requestRef.current !== version) return;
       const page = pageOf(result).sort((a, b) => stamp(a) - stamp(b));
-      setMessages(page); setOffset(page.length); setExhausted(page.length < PAGE_SIZE);
+      setMessages(page); setExhausted(page.length < PAGE_SIZE);
     }).catch(cause => {
       if (requestRef.current === version) setError(cause.message || "Could not load messages.");
     }).finally(() => {
@@ -246,8 +229,10 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   }, [accountId, chatId]);
 
   // Keep the active conversation live without fanning requests out across the
-  // inbox. Any new sent or received message is an explicit instruction to show
-  // the latest point in the thread.
+  // inbox. A reader already at the bottom should see new messages appear
+  // there automatically (WhatsApp-style); a reader scrolled up into history
+  // should not be yanked away from it — instead surface a "jump to latest"
+  // affordance and let them decide when to come back down.
   useEffect(() => {
     if (!accountId || !chatId) return undefined;
     let active = true;
@@ -255,12 +240,15 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       try {
         const page = pageOf(await api(endpoint(accountId, chatId)));
         if (!active || !page.length) return;
-        setMessages(current => {
-          const known = new Set(current.map((message, index) => idFor(message, index)));
-          const hasNewMessage = page.some((message, index) => !known.has(idFor(message, index)));
-          if (hasNewMessage) followLatestRef.current = true;
-          return hasNewMessage ? merge(current, page) : current;
-        });
+        // Never let a background poll fight an in-flight older-history fetch
+        // over scroll position; the next tick picks up the same messages.
+        if (olderRequestRef.current) return;
+        const known = new Set(messagesRef.current.map((message, index) => idFor(message, index)));
+        const newCount = page.reduce((count, message, index) => count + (known.has(idFor(message, index)) ? 0 : 1), 0);
+        if (!newCount) return;
+        if (isNearBottom()) followLatestRef.current = true;
+        else setNewMessageCount(count => count + newCount);
+        setMessages(current => merge(current, page));
       } catch {
         // A transient provider failure should not replace the open chat with an
         // error state; the next active-chat refresh can recover naturally.
@@ -321,16 +309,18 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   }, [captureAnchor]);
   const loadOlder = useCallback(async () => {
     if (!chatId || olderLoading || exhausted || olderRequestRef.current) return;
+    const oldest = messagesRef.current[0];
+    const before = oldest ? stamp(oldest) : 0;
+    if (!before) return; // nothing loaded yet to page before
     olderRequestRef.current = true;
     const version = requestRef.current;
     const pane = paneRef.current;
     if (pane) historyRestoreRef.current = { top: pane.scrollTop, height: pane.scrollHeight };
     setOlderLoading(true); setError("");
     try {
-      const page = pageOf(await api(endpoint(accountId, chatId, offset)));
+      const page = pageOf(await api(endpoint(accountId, chatId, before)));
       if (requestRef.current !== version) return;
       setMessages(current => merge(current, page));
-      setOffset(current => current + page.length);
       setExhausted(page.length < PAGE_SIZE);
     } catch (cause) {
       if (requestRef.current === version) { historyRestoreRef.current = null; setError(cause.message || "Could not load earlier messages."); }
@@ -338,11 +328,18 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       olderRequestRef.current = false;
       if (requestRef.current === version) setOlderLoading(false);
     }
-  }, [accountId, chatId, exhausted, offset, olderLoading]);
+  }, [accountId, chatId, exhausted, olderLoading]);
 
   const maybeLoadOlder = useCallback(event => {
     if (event.currentTarget.scrollTop <= 120) loadOlder();
-  }, [loadOlder]);
+    if (isNearBottom()) setNewMessageCount(0);
+  }, [loadOlder, isNearBottom]);
+
+  const jumpToLatest = useCallback(() => {
+    setNewMessageCount(0);
+    const pane = paneRef.current;
+    if (pane) pane.scrollTop = pane.scrollHeight;
+  }, []);
 
   const send = useCallback(async event => {
     event.preventDefault();
@@ -353,6 +350,7 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     field.value = "";
     const pending = { id: `pending-${Date.now()}`, body: text, fromMe: true, timestamp: Math.floor(Date.now() / 1000), pending: true, replyTo:replyingTo };
     followLatestRef.current = true;
+    setNewMessageCount(0);
     setMessages(current => [...current, pending]);
     try {
       const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages`, { method: "POST", body: JSON.stringify({ chatId, text, replyTo:replyingTo?.id }) });
@@ -401,6 +399,7 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       {loading && !messages.length ? <p className="chat-loading">Loading messages…</p> : <div className="message-list">
         {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
+      {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
     <form className="composer" onSubmit={send}>
