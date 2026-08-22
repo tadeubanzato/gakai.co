@@ -74,6 +74,7 @@ const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CON
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
 if(!Array.isArray(store.deletedChats))store.deletedChats=[];
 if(!Array.isArray(store.messageReactions))store.messageReactions=[];
+if(!store.accountLabels||typeof store.accountLabels!=='object'||Array.isArray(store.accountLabels))store.accountLabels={};
 if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
 if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
 let migratedN8nConnections=false;for(const connection of store.n8nConnections){if(!connection.kind){connection.kind='standard';migratedN8nConnections=true}}if(migratedN8nConnections)persist();
@@ -229,7 +230,7 @@ function avatarUrl(value){
     return /^https?:$/.test(url.protocol)?url.href:null;
   }catch{return null}
 }
-function account(s) { const rawStatus=s.status; return { id:s.name, label:s.config?.metadata?.['gakai.label'] || s.config?.metadata?.['waha-home.label'] || s.me?.pushName || s.name, status:['WORKING','CONNECTED','READY'].includes(rawStatus)?'WORKING':rawStatus, phone:s.me?.id?.split('@')[0] || null, profile:s.me?.pushName || null }; }
+function account(s) { const rawStatus=s.status; return { id:s.name, label:store.accountLabels[s.name] || s.config?.metadata?.['gakai.label'] || s.config?.metadata?.['waha-home.label'] || s.me?.pushName || s.name, status:['WORKING','CONNECTED','READY'].includes(rawStatus)?'WORKING':rawStatus, phone:s.me?.id?.split('@')[0] || null, profile:s.me?.pushName || null }; }
 async function accountView(session){
   const view=account(session);if(!session.me?.id)return view;
 
@@ -485,7 +486,7 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}
 
     const webhookPath='gakai-'+accountId.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24)+(kind==='agentic'?'-ai':'');
     let accountLabel=accountId;
-    try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===accountId);if(session)accountLabel=session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||accountId;}catch{}
+    try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===accountId);if(session)accountLabel=store.accountLabels[accountId]||session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||accountId;}catch{}
     const workflowName=`Gakai – ${accountLabel}${kind==='agentic'?' (AI Agent)':''}`;
     const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),httpNodeId=makeUUID(),llmNodeId=makeUUID();
     const accountLlm=kind==='agentic'?llmConfig(accountId):null;
@@ -756,10 +757,11 @@ async function enrichMessage(session,message){
   if (req.method==='POST' && url.pathname==='/api/app/accounts') {
     const input=await readBody(req), id=`account-${Date.now().toString(36)}`;
     const created=await providerRequest('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:id,config:config(input.label)})});
+    const label=String(input.label||'WhatsApp account').trim().slice(0,80);if(label){store.accountLabels[id]=label;await persist();}
     return send(res,201,{account:account(created || {name:id,status:'STARTING',config:config(input.label)})});
   }
   const id=decodeURIComponent(parts[3] || '');
-  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.deletedChats=(store.deletedChats||[]).filter(item=>item.accountId!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
+  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);delete store.accountLabels[id];store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.deletedChats=(store.deletedChats||[]).filter(item=>item.accountId!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
   if (req.method==='GET' && parts[4]==='qr') return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/auth/qr`));
   if (req.method==='POST' && parts[4]==='start') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
   if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
@@ -818,7 +820,7 @@ async function enrichMessage(session,message){
     const sent=await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,chatId:input.chatId,text:input.text.trim(),...(replyTo?{reply_to:replyTo}:{})})});
     return send(res,200,{message:messageView(sent || {})});
   }
-  if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req);const session=await providerRequest(`/api/sessions/${encodeURIComponent(id)}`);const next={...(session.config||{}),metadata:{...(session.config?.metadata||{}),'gakai.label':String(input.label||'WhatsApp account').slice(0,80)}};await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({config:next})});return send(res,200,{ok:true});}
+  if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req),label=String(input.label||'').trim().slice(0,80);if(!label)return send(res,400,{message:'Account name is required'});store.accountLabels[id]=label;await persist();try{const session=await providerRequest(`/api/sessions/${encodeURIComponent(id)}`),next={...(session.config||{}),metadata:{...(session.config?.metadata||{}),'gakai.label':label}};await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({config:next})});}catch{}return send(res,200,{ok:true,label});}
   if(parts[4]==="integration-keys"&&parts[5]==="n8n"&&req.method==="GET"){const key=store.keys.find(k=>k.accountId===id&&k.name==="n8n integration");return send(res,200,{token:key?.token||null});}
   if(parts[4]==="integration-keys"&&parts[5]==="n8n"&&req.method==="POST"){let key=store.keys.find(k=>k.accountId===id&&k.name==="n8n integration");const token=`wh_live_${randomBytes(24).toString("base64url")}`;if(key){key.token=token;key.hash=hash(token);key.lastUsedAt=null}else{key={id:randomBytes(8).toString("hex"),accountId:id,name:"n8n integration",scopes:["messages:read","messages:send"],createdAt:new Date().toISOString(),lastUsedAt:null,token,hash:hash(token)}}store.keys=store.keys.filter(item=>item===key||!(item.accountId===id&&item.name==="n8n integration"));store.keys.push(key);await persist();return send(res,200,{token});}
   if(parts[4]==="integration-keys"&&req.method==="GET")return send(res,200,{keys:store.keys.filter(k=>k.accountId===id).map(({hash,token,...key})=>key)});
