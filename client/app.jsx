@@ -90,6 +90,7 @@ function App(){
   const settingsRef=useRef(null);
   const chatListRef=useRef(null);
   const suppressAutoSelectRef=useRef(false);
+  const autoPairStartedRef=useRef(false);
 
   const fail=useCallback(x=>{setNote(x);setTimeout(()=>setNote(""),4500)},[]);
   
@@ -160,6 +161,15 @@ function App(){
     }catch(x){fail(x.message)}
   };
 
+  // A new workspace has no reason to stop at a second "Connect WhatsApp"
+  // screen. Create the first account as soon as setup is complete and let the
+  // pairing view show the QR code directly.
+  useEffect(()=>{
+    if(!accountsReady||accounts.length||pair||autoPairStartedRef.current)return;
+    autoPairStartedRef.current=true;
+    beginPairing();
+  },[accountsReady,accounts.length,pair]);
+
   const cancelPairing=useCallback(async()=>{
     const pending=pair, createdHere=pairCreated;
     setPair();setPairCreated(false);
@@ -190,7 +200,7 @@ function App(){
   if(!auth.authenticated)return <Login setup={!!auth.setup} done={()=>location.reload()} fail={fail}/>;
   if(!accountsReady)return <main className="pairing">Loading your workspace…</main>;
   if(pair)return <Pairing account={pair} onCancel={cancelPairing} onLinked={x=>{setPair();setPairCreated(false);setAccount(x);refresh()}}/>;
-  if((add||!accounts.length)&&!pair)return <main className="pairing"><section className="pair-card"><span className="eyebrow">CONNECT WHATSAPP</span><h1>Connect your WhatsApp</h1><p>Gakai will generate a secure QR code immediately. Scan it from WhatsApp to link this account.</p><ol><li>Open WhatsApp on your phone</li><li>Choose <b>Linked devices</b></li><li>Tap <b>Link a device</b> and scan</li></ol><button className="primary wide" onClick={beginPairing}>Connect WhatsApp</button>{accounts.length?<button className="nav wide" onClick={()=>setAdd(false)}>Cancel</button>:null}</section></main>;
+  if((add||!accounts.length)&&!pair)return <main className="pairing"><section className="pair-card"><span className="eyebrow">CONNECT WHATSAPP</span><h1>Preparing your QR code…</h1><p>Gakai is creating a secure WhatsApp connection. The QR code will appear here automatically.</p><div className="qr loading" role="status">Starting WhatsApp…</div>{accounts.length?<button className="nav wide" onClick={()=>setAdd(false)}>Cancel</button>:null}</section></main>;
   const closeSettings=()=>{history.pushState({},"","/");setSettings(false)};
   const accountDeleted=async()=>{history.replaceState({},"","/");setSettings(false);setChat();await refresh()};
   if(settings&&account)return <Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>;
