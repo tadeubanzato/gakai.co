@@ -27,6 +27,12 @@ export const pageOf = (result) => Array.isArray(result) ? result : (result?.mess
 // a timestamp cursor doesn't).
 export const endpoint = (accountId, chatId, before) => `/api/app/accounts/${encodeURIComponent(accountId)}/messages?chatId=${encodeURIComponent(chatId)}&limit=${PAGE_SIZE}${before ? `&before=${before}` : ""}`;
 
+// After a failed send, restore the composer's text only if the reader
+// hasn't typed something new in the meantime — never stomp over that.
+export function nextComposerValue(currentValue, failedText) {
+  return currentValue ? currentValue : failedText;
+}
+
 export function merge(current, extra) {
   const keyed = new Map();
   [...current, ...extra].forEach((message, index) => keyed.set(idFor(message, index), message));

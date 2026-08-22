@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge } from "./chat-helpers.mjs";
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue } from "./chat-helpers.mjs";
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { "content-type": "application/json", ...(options.headers || {}) }, ...options });
@@ -188,10 +188,33 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   useEffect(()=>{
     setRemoteTyping(false); if(!accountId||!chatId)return undefined;
     const protocol=window.location.protocol==="https:"?"wss":"ws";
-    const socket=new WebSocket(`${protocol}://${window.location.host}/api/app/ws?accountId=${encodeURIComponent(accountId)}&chatId=${encodeURIComponent(chatId)}`);
-    typingSocketRef.current=socket;
-    socket.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==="presence")setRemoteTyping(value.presence==="typing"||value.presence==="recording")}catch{}};
-    return()=>{if(typingSocketRef.current===socket)typingSocketRef.current=null;socket.close();setRemoteTyping(false)};
+    const url=`${protocol}://${window.location.host}/api/app/ws?accountId=${encodeURIComponent(accountId)}&chatId=${encodeURIComponent(chatId)}`;
+    let stopped=false, reconnectTimer=null, attempt=0;
+    // Typing/presence had no reconnect at all: once the socket dropped
+    // (server restart, network blip, idle timeout), it silently stopped
+    // working for the rest of the chat session. Reconnect with capped
+    // exponential backoff, reset once a connection actually succeeds.
+    const connect=()=>{
+      const socket=new WebSocket(url);
+      typingSocketRef.current=socket;
+      socket.onopen=()=>{attempt=0};
+      socket.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==="presence")setRemoteTyping(value.presence==="typing"||value.presence==="recording")}catch{}};
+      socket.onclose=()=>{
+        if(typingSocketRef.current===socket)typingSocketRef.current=null;
+        setRemoteTyping(false);
+        if(stopped)return;
+        const delay=Math.min(1000*2**attempt,15000);
+        attempt+=1;
+        reconnectTimer=window.setTimeout(connect,delay);
+      };
+    };
+    connect();
+    return()=>{
+      stopped=true;
+      if(reconnectTimer)window.clearTimeout(reconnectTimer);
+      if(typingSocketRef.current){typingSocketRef.current.onclose=null;typingSocketRef.current.close();typingSocketRef.current=null}
+      setRemoteTyping(false);
+    };
   },[accountId,chatId]);
 
   const isNearBottom = useCallback(() => {
@@ -360,6 +383,7 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       onSent?.(result.message, chat);
     } catch (cause) {
       setMessages(current => current.filter(message => message.id !== pending.id));
+      if (field) field.value = nextComposerValue(field.value, text);
       setError(cause.message || "Could not send message.");
     }
   }, [accountId, chat, chatId, onSent, replyingTo, sendPresence]);
