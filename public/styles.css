@@ -100,10 +100,20 @@ video.media{background:#000}
 .details-card .service-detail form.integration-form label,.details-card .service-detail form.integration-form button { width:100%; min-width:0; box-sizing:border-box; }
 .details-card .service-detail form.integration-form-stacked { grid-template-rows:repeat(auto-fit,minmax(0,max-content)); align-items:stretch; }
 .details-card .service-detail form.integration-form-stacked .integration-submit { margin-top:4px; min-height:42px; }
-.checkbox-field { display:flex; flex-direction:row; justify-content:flex-start; align-items:flex-start; text-align:left; gap:10px; padding:12px; border:1px solid #31424b; border-radius:10px; background:#0d1f27; color:var(--ink); cursor:pointer; margin:0 0 14px; }
+/* The whole card is the control — a big toggle button with a circular check
+   fixed to the left column and its text fixed to the right column. A CSS
+   grid with explicit columns is used instead of flex `order` so the circle
+   can never end up on the wrong side regardless of source order. */
+.checkbox-field { display:grid; grid-template-columns:21px minmax(0,1fr); align-items:start; text-align:left; gap:10px; padding:12px; border:1px solid #31424b; border-radius:10px; background:#0d1f27; color:var(--ink); cursor:pointer; margin:0 0 14px; transition:border-color .15s,background .15s,transform .05s; -webkit-tap-highlight-color:transparent; }
 .checkbox-field:hover { border-color:#4c7170; background:#102b2d; }
-.checkbox-field input { order:0; flex:none; width:16px; height:16px; margin:2px 0 0; accent-color:#25d366; }
-.checkbox-field span { order:1; display:grid; gap:3px; min-width:0; text-align:left; }
+.checkbox-field:active { transform:scale(.99); }
+.checkbox-field:has(input:checked) { border-color:#25d366; background:#0f2b23; }
+.checkbox-field:has(input:checked):hover { border-color:#2fe377; background:#123526; }
+.checkbox-field input[type="checkbox"] { grid-column:1; grid-row:1; appearance:none; -webkit-appearance:none; width:21px; height:21px; margin:1px 0 0; border-radius:50%; border:2px solid #4c7170; background-color:transparent; background-repeat:no-repeat; background-position:center; background-size:12px; cursor:pointer; transition:background-color .15s,border-color .15s; }
+.checkbox-field input[type="checkbox"]:hover { border-color:#8ce6cf; }
+.checkbox-field input[type="checkbox"]:checked { border-color:#25d366; background-color:#25d366; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23083d2b' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='3.5 8.3 6.6 11.4 12.5 4.6'/%3E%3C/svg%3E"); }
+.checkbox-field input[type="checkbox"]:focus-visible { outline:2px solid #25d366; outline-offset:2px; }
+.checkbox-field span { grid-column:2; grid-row:1; display:grid; gap:3px; min-width:0; text-align:left; }
 .checkbox-field b { font-size:13px; }
 .checkbox-field small { color:var(--muted); font-size:12px; line-height:1.35; }
 .llm-agent-action, .n8n-test-action, .llm-test-action { margin:4px 0 14px; }
