@@ -111,7 +111,14 @@ video.media{background:#000}
 .native-ai-copy { display:grid; gap:3px; min-width:0; }
 .native-ai-copy b { font-size:13px; }
 .native-ai-copy small { color:var(--muted); font-size:12px; line-height:1.35; }
-.llm-agent-action { margin:4px 0 14px; }
+.llm-agent-action, .n8n-test-action, .llm-test-action { margin:4px 0 14px; }
+.llm-test-reply { margin:14px 0 0; padding:10px 12px; border-radius:8px; background:#0d1f27; color:var(--ink); font-size:13px; white-space:pre-wrap; }
+.modal-overlay { position:fixed; inset:0; background:rgba(6,12,15,.72); display:grid; place-items:center; z-index:50; padding:20px; }
+.modal-card { width:min(420px,100%); background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:22px; }
+.modal-card h3 { margin:0 0 6px; }
+.modal-card > p { margin:0 0 16px; font-size:13px; }
+.modal-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:4px; }
+.modal-error { margin:14px 0 0; padding:10px 12px; border-radius:8px; background:#3a1e22; color:#ffb4b4; font-size:13px; }
 .saved-key-mask { display:block; margin-top:2px; color:#8ce6cf; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; letter-spacing:.04em; }
 .service-detail .integration-delete { display:block; width:100%; max-width:none; margin:24px 0 0; }
 /* A check is rendered only for integrations confirmed by the account API. This

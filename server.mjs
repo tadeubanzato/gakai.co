@@ -1011,7 +1011,7 @@ async function enrichMessage(session,message){
     if(!connections.length)return send(res,200,{connected:false});
     const workflows=connections.map(connection=>{
       const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name===(connection.kind==='agentic'?'n8n auto-connect (AI Agent)':'n8n auto-connect'));
-      return {kind:connection.kind,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,webhookUrl:connection.webhookUrl||subscription?.url||null,active:subscription?.enabled!==false,lastDelivery:subscription?.lastDelivery||null,connectedAt:connection.connectedAt};
+      return {kind:connection.kind,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,webhookUrl:connection.webhookUrl||subscription?.url||null,subscriptionId:subscription?.id||null,active:subscription?.enabled!==false,lastDelivery:subscription?.lastDelivery||null,connectedAt:connection.connectedAt};
     });
     const standardConnection=connections.find(connection=>connection.kind==='standard')||connections[0];
     const standard=workflows.find(w=>w.kind==='standard')||workflows[0];
