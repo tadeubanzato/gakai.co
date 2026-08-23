@@ -31,10 +31,10 @@ function llmConfigFor(accountId) {
   return { accountId, provider: 'omniroute', baseUrl: `http://127.0.0.1:${mockLlmProxyPort}`, apiKey: 'test-key', model: 'test-model', systemPrompt: '', nativeEnabled: true, configuredAt: new Date().toISOString() };
 }
 
-async function postWebhookEvent(accountId, messageId) {
+async function postWebhookEvent(accountId, messageId, payloadOverrides = {}) {
   const body = JSON.stringify({
     event: 'message', session: accountId,
-    payload: { id: { _serialized: messageId }, from: '5511999999999@c.us', fromMe: false, body: 'hello', text: 'hello', timestamp: Math.floor(Date.now() / 1000), hasMedia: false },
+    payload: { id: { _serialized: messageId }, from: '5511999999999@c.us', fromMe: false, body: 'hello', text: 'hello', timestamp: Math.floor(Date.now() / 1000), hasMedia: false, ...payloadOverrides },
   });
   const signature = createHmac('sha512', 'test-webhook-secret').update(body).digest('hex');
   const response = await fetch(`${base}/api/app/provider-events`, {
@@ -86,4 +86,16 @@ test('a disabled n8n AI Agent automation does not suppress the native LLM reply'
   const before = llmHits;
   await postWebhookEvent(accountId, 'msg-3');
   assert.equal(llmHits, before + 1, 'only an enabled AI Agent automation should suppress native replies');
+});
+
+test('a "message" event with no body, text, or media is not dispatched to native AI reply', async () => {
+  // Mirrors the inbox's ghost-timestamp finding (WAHA/WEBJS can touch a
+  // chat/message with no real content behind it) — if that ever reaches the
+  // webhook path, it must not trigger an AI reply either.
+  const accountId = 'ghost-event-account';
+  store.llmConfigs.push(llmConfigFor(accountId));
+
+  const before = llmHits;
+  await postWebhookEvent(accountId, 'msg-ghost', { body: '', text: '', hasMedia: false });
+  assert.equal(llmHits, before, 'a contentless event must not trigger a native AI reply');
 });

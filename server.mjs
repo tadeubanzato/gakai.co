@@ -364,6 +364,11 @@ async function deliverAutomation(subscription,event,options={}){subscription.sec
 async function dispatchAutomationEvent(payload){
   if(payload?.event!=="message"||payload?.payload?.fromMe)return;const accountId=String(payload.session||"");if(!accountId)return;
   const message=messageView(payload.payload||{}),chatId=payload.payload?.from||payload.payload?.chatId||null,kind=String(chatId||"").endsWith("@g.us")?"group":"direct";
+  // Defends against the same WAHA/WEBJS resync-touch phenomenon found in the
+  // inbox filter (a chat's timestamp bumped with no real message behind it):
+  // a "message" event with no body, text, or media isn't a real message —
+  // don't fire an AI reply or automation for it either way.
+  if(!message.body&&!message.text&&!message.hasMedia)return;
   const chat={id:chatId,kind,name:payload.payload?.chatName||payload.payload?._data?.chatName||payload.payload?._data?.notifyName||null};
   if(message.sender?.id){const contact=await resolveContact(accountId,message.sender.id);message.sender={...message.sender,phone:contact.phone||null,name:message.sender.name||contact.name||null};if(kind==="direct")chat.phone=contact.phone||null;}
   // payload.payload.id is frequently a structured WAHA id object, not a
