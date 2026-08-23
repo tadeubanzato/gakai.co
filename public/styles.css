@@ -100,19 +100,13 @@ video.media{background:#000}
 .details-card .service-detail form.integration-form label,.details-card .service-detail form.integration-form button { width:100%; min-width:0; box-sizing:border-box; }
 .details-card .service-detail form.integration-form-stacked { grid-template-rows:repeat(auto-fit,minmax(0,max-content)); align-items:stretch; }
 .details-card .service-detail form.integration-form-stacked .integration-submit { margin-top:4px; min-height:42px; }
-.native-ai-toggle { display:grid !important; grid-template-columns:42px minmax(0,1fr); align-items:center; gap:11px !important; padding:12px; border:1px solid #31424b; border-radius:10px; background:#0d1f27; color:var(--ink) !important; cursor:pointer; transition:border-color .15s,background .15s; }
-.native-ai-toggle:hover { border-color:#4c7170; background:#102b2d; }
-.native-ai-toggle input { position:absolute; opacity:0; pointer-events:none; }
-.native-ai-switch { width:40px; height:23px; padding:3px; border-radius:999px; background:#43535a; transition:background .18s; }
-.native-ai-switch span { display:block; width:17px; height:17px; border-radius:50%; background:#d8e4df; box-shadow:0 1px 3px #0008; transition:transform .18s; }
-.native-ai-toggle input:checked + .native-ai-switch { background:#25d366; }
-.native-ai-toggle input:checked + .native-ai-switch span { transform:translateX(17px); }
-.native-ai-toggle input:focus-visible + .native-ai-switch { outline:2px solid #bff7e7; outline-offset:3px; }
-.native-ai-copy { display:grid; gap:3px; min-width:0; }
-.native-ai-copy b { font-size:13px; }
-.native-ai-copy small { color:var(--muted); font-size:12px; line-height:1.35; }
+.checkbox-field { display:flex; align-items:flex-start; gap:10px; padding:12px; border:1px solid #31424b; border-radius:10px; background:#0d1f27; color:var(--ink); cursor:pointer; margin:0 0 14px; }
+.checkbox-field:hover { border-color:#4c7170; background:#102b2d; }
+.checkbox-field input { flex:none; width:16px; height:16px; margin:2px 0 0; accent-color:#25d366; }
+.checkbox-field span { display:grid; gap:3px; min-width:0; }
+.checkbox-field b { font-size:13px; }
+.checkbox-field small { color:var(--muted); font-size:12px; line-height:1.35; }
 .llm-agent-action, .n8n-test-action, .llm-test-action { margin:4px 0 14px; }
-.n8n-reply-toggle { margin:0 0 14px; }
 .hint-inline { margin:0 0 14px; font-size:12px; }
 .llm-test-reply { margin:14px 0 0; padding:10px 12px; border-radius:8px; background:#0d1f27; color:var(--ink); font-size:13px; white-space:pre-wrap; }
 .modal-overlay { position:fixed; inset:0; background:rgba(6,12,15,.72); display:grid; place-items:center; z-index:50; padding:20px; }
