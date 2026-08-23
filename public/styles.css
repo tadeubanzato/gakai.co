@@ -112,6 +112,7 @@ video.media{background:#000}
 .native-ai-copy b { font-size:13px; }
 .native-ai-copy small { color:var(--muted); font-size:12px; line-height:1.35; }
 .llm-agent-action, .n8n-test-action, .llm-test-action { margin:4px 0 14px; }
+.n8n-reply-toggle { margin:0 0 14px; }
 .llm-test-reply { margin:14px 0 0; padding:10px 12px; border-radius:8px; background:#0d1f27; color:var(--ink); font-size:13px; white-space:pre-wrap; }
 .modal-overlay { position:fixed; inset:0; background:rgba(6,12,15,.72); display:grid; place-items:center; z-index:50; padding:20px; }
 .modal-card { width:min(420px,100%); background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:22px; }

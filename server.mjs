@@ -6,7 +6,7 @@ import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac, creat
 import { DatabaseSync } from 'node:sqlite';
 import { createProviderClient } from './src/providers/index.mjs';
 import { WebSocketServer } from 'ws';
-import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, extractMentionIds, hasMessageContent, messageView as domainMessageView, providerMessageId, resolveMentionLabels } from './src/domain/message.mjs';
+import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, extractMentionIds, hasMessageContent, mentionsIdentity, messageView as domainMessageView, providerMessageId, resolveMentionLabels } from './src/domain/message.mjs';
 import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
 import { createBoundedCache } from './src/lib/lru-cache.mjs';
 import { decodeHtmlEntities } from './src/lib/html.mjs';
@@ -361,6 +361,15 @@ async function deliverAutomation(subscription,event,options={}){subscription.sec
   catch(error){subscription.lastDelivery={at:new Date().toISOString(),ok:false,error:error.message||"Delivery failed",durationMs:Date.now()-started};throw error}
   finally{await persist()}
 }
+// The Gakai-managed n8n subscriptions (created by the Settings n8n connect
+// flow) are meant for messages the account owner needs to act on
+// personally — a direct message, or a group message where they're
+// explicitly @-tagged — not every message in every group the account
+// happens to be in. A hand-authored automation added through the generic
+// automations API is unaffected: that's a deliberate integration the user
+// built for their own purpose, which may well want every message.
+const N8N_REPLY_SUBSCRIPTION_NAMES=new Set(['n8n auto-connect','n8n auto-connect (AI Agent)']);
+
 async function dispatchAutomationEvent(payload){
   if(payload?.event!=="message"||payload?.payload?.fromMe)return;const accountId=String(payload.session||"");if(!accountId)return;
   const message=messageView(payload.payload||{}),chatId=payload.payload?.from||payload.payload?.chatId||null,kind=String(chatId||"").endsWith("@g.us")?"group":"direct";
@@ -380,8 +389,13 @@ async function dispatchAutomationEvent(payload){
   // reconnecting clients a small durable replay window and avoids exposing raw
   // provider payloads outside the adapter boundary.
   if (!recordAppEvent(event)) return;
+  let ownMentioned=kind==="direct";
+  if(!ownMentioned&&Array.isArray(payload.payload?._data?.mentionedJidList)&&payload.payload._data.mentionedJidList.length){
+    ownMentioned=mentionsIdentity(payload.payload._data.mentionedJidList,await accountIdentityFor(accountId));
+  }
+  const subscriptions=store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)&&(!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)||ownMentioned));
   await Promise.allSettled([
-    ...store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)).map(subscription=>deliverAutomation(subscription,event)),
+    ...subscriptions.map(subscription=>deliverAutomation(subscription,event)),
     hasEnabledAgenticN8n(accountId)?Promise.resolve():dispatchLLMReply(accountId,event)
   ]);
 }

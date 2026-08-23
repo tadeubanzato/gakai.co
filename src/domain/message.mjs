@@ -73,6 +73,21 @@ export function resolveMentionLabels(text, labels) {
   return String(text || '').replace(/@(\d{5,})/g, (mention, id) => labels.has(id) ? `@${labels.get(id)}` : mention);
 }
 
+// Whether a message's raw @-mention jid list (message._data.mentionedJidList)
+// includes the account's own identity. Mentions can come back as either a
+// `@c.us` or `@lid` jid depending on the engine, so compare both the full
+// jid and the number-only portion — the same dual check enrichMessage's
+// per-mention isMe flag already uses, kept in sync here for the n8n/native
+// reply dispatch's DM-or-tagged scoping.
+export function mentionsIdentity(mentionedJidList, ownId) {
+  if (!ownId || !Array.isArray(mentionedJidList) || !mentionedJidList.length) return false;
+  const ownNumber = ownId.replace(/@.*$/, '');
+  return mentionedJidList.some(rawId => {
+    const id = String(rawId || '');
+    return id === ownId || id.replace(/@.*$/, '') === ownNumber;
+  });
+}
+
 export function providerMessageId(value) {
   if (typeof value === 'string' || typeof value === 'number') return String(value);
   if (!value || typeof value !== 'object') return null;

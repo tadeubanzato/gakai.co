@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { extractMentionIds, messageView, normalizedTimestamp, providerMessageId, resolveMentionLabels } from '../../src/domain/message.mjs';
+import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, providerMessageId, resolveMentionLabels } from '../../src/domain/message.mjs';
 
 const providerUrl = 'http://provider:3000';
 const fixture = name => readFile(fileURLToPath(new URL(`../fixtures/providers/waha/${name}`, import.meta.url)), 'utf8').then(JSON.parse);
@@ -123,4 +123,17 @@ test('messageView resolves a mention inside replyTo.body, not just the main body
   // is the precondition enrichMessage's resolveMentionLabels(replyTo.body)
   // then acts on.
   assert.equal(view.replyTo.body, 'Valeu @89249571455071 !');
+});
+
+test('mentionsIdentity matches an exact jid and a same-number jid on a different domain (@lid vs @c.us)', () => {
+  assert.equal(mentionsIdentity(['5511999999999@c.us'], '5511999999999@c.us'), true);
+  assert.equal(mentionsIdentity(['5511999999999@lid'], '5511999999999@c.us'), true, 'the same engine can report the own identity as either @c.us or @lid');
+  assert.equal(mentionsIdentity(['5511999999999@c.us'], '5511999999999@lid'), true);
+});
+
+test('mentionsIdentity is false when the mention list is empty, missing the account, or ownId is unknown', () => {
+  assert.equal(mentionsIdentity([], '5511999999999@c.us'), false);
+  assert.equal(mentionsIdentity(['5511000000000@c.us'], '5511999999999@c.us'), false);
+  assert.equal(mentionsIdentity(['5511999999999@c.us'], ''), false, 'an unresolved own identity must never be treated as a match');
+  assert.equal(mentionsIdentity(undefined, '5511999999999@c.us'), false);
 });
