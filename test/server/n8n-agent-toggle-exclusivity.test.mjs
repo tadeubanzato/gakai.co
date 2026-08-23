@@ -74,11 +74,14 @@ const setup = await fetch(`${base}/api/app/auth/setup`, {
 });
 const cookie = setup.headers.get('set-cookie').split(';')[0];
 
-function seedAccount(accountId, { nativeEnabled, agenticEnabled }) {
+function seedAccount(accountId, { nativeEnabled, agenticEnabled, standardEnabled }) {
   resetWorkflow();
   store.llmConfigs.push({ accountId, provider: 'omniroute', baseUrl: 'https://proxy.example/v1', apiKey: 'test-key', model: 'test-model', systemPrompt: '', nativeEnabled, configuredAt: new Date().toISOString() });
   store.n8nConnections.push({ accountId, kind: 'agentic', n8nUrl: mockN8nUrl, n8nApiKeyEncrypted: encryptSecret('mock-n8n-api-key'), workflowId: storedWorkflow.id, workflowName: storedWorkflow.name, webhookUrl: `${mockN8nUrl}/webhook/gakai-test-account-ai`, inboundCredentialId: 'cred-inbound', llmCredentialId: 'cred-llm', inboundSecret: 'secret', connectedAt: new Date().toISOString() });
   store.automationSubscriptions.push({ id: `sub-${accountId}`, accountId, name: 'n8n auto-connect (AI Agent)', url: `${mockN8nUrl}/webhook/gakai-test-account-ai`, productionUrl: `${mockN8nUrl}/webhook/gakai-test-account-ai`, testUrl: null, testPhone: null, enabled: agenticEnabled, events: ['message.received'], secret: 'secret', createdAt: new Date().toISOString(), lastDelivery: null });
+  if (standardEnabled !== undefined) {
+    store.automationSubscriptions.push({ id: `sub-standard-${accountId}`, accountId, name: 'n8n auto-connect', url: `${mockN8nUrl}/webhook/gakai-test-account`, productionUrl: `${mockN8nUrl}/webhook/gakai-test-account`, testUrl: null, testPhone: null, enabled: standardEnabled, events: ['message.received'], secret: 'secret', createdAt: new Date().toISOString(), lastDelivery: null });
+  }
 }
 
 test('POST /n8n/connect/ai on an already-connected agentic workflow re-enables it, syncs it, and turns native replies off', async () => {
@@ -127,6 +130,70 @@ test('saving the LLM proxy form (baseUrl/model/instructions) never resets native
   const config = store.llmConfigs.find(c => c.accountId === accountId);
   assert.equal(config.nativeEnabled, true, 'the full-form save must not silently turn nativeEnabled off just because the field is absent from this request');
   assert.equal(config.systemPrompt, 'updated instructions');
+});
+
+// The plain "standard" n8n automation (its default Set node just echoes the
+// inbound message back, but the workflow is the user's own to customize in
+// n8n) is a deliberately separate concept from native/agentic AI replies —
+// it must never be part of that mutual-exclusivity dance in either
+// direction. Only native and agentic are two faces of the same "Gakai
+// answers using the LLM proxy" toggle and stay exclusive of each other.
+test('PATCH /automations/:id enabling the standard n8n subscription leaves an enabled AI Agent subscription and native replies untouched', async () => {
+  const accountId = 'agent-toggle-standard-independent';
+  seedAccount(accountId, { nativeEnabled: true, agenticEnabled: true, standardEnabled: false });
+  const standardSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect');
+
+  const response = await fetch(`${base}/api/app/accounts/${accountId}/automations/${standardSub.id}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(response.status, 200);
+
+  assert.equal(store.automationSubscriptions.find(s => s.id === standardSub.id).enabled, true);
+  const agenticSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect (AI Agent)');
+  assert.equal(agenticSub.enabled, true, 'enabling the standard n8n subscription must not disable the AI Agent subscription');
+  const config = store.llmConfigs.find(c => c.accountId === accountId);
+  assert.equal(config.nativeEnabled, true, 'enabling the standard n8n subscription must not disable native replies');
+});
+
+test('POST /n8n/connect/ai leaves an enabled standard n8n subscription untouched when enabling AI Agent replies', async () => {
+  const accountId = 'agent-toggle-agentic-independent';
+  seedAccount(accountId, { nativeEnabled: false, agenticEnabled: false, standardEnabled: true });
+
+  const response = await fetch(`${base}/api/app/accounts/${accountId}/n8n/connect/ai`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: '{}' });
+  assert.equal(response.status, 200);
+
+  const standardSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect');
+  assert.equal(standardSub.enabled, true, 'the standard n8n subscription must stay enabled — it is independent of AI Agent replies');
+});
+
+test('PATCH /llm/native leaves an enabled standard n8n subscription untouched when enabling native replies', async () => {
+  const accountId = 'agent-toggle-native-independent';
+  seedAccount(accountId, { nativeEnabled: false, agenticEnabled: false, standardEnabled: true });
+
+  const response = await fetch(`${base}/api/app/accounts/${accountId}/llm/native`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ nativeEnabled: true }),
+  });
+  assert.equal(response.status, 200);
+
+  const standardSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect');
+  assert.equal(standardSub.enabled, true, 'the standard n8n subscription must stay enabled — it is independent of native replies');
+});
+
+test('PATCH /automations/:id enabling a hand-authored automation does not disturb any AI reply path', async () => {
+  const accountId = 'agent-toggle-hand-authored-unaffected';
+  seedAccount(accountId, { nativeEnabled: true, agenticEnabled: false, standardEnabled: false });
+  store.automationSubscriptions.push({ id: `sub-custom-${accountId}`, accountId, name: 'My custom automation', url: `${mockN8nUrl}/webhook/custom`, productionUrl: `${mockN8nUrl}/webhook/custom`, testUrl: null, testPhone: null, enabled: false, events: ['message.received'], secret: 'secret', createdAt: new Date().toISOString(), lastDelivery: null });
+
+  const response = await fetch(`${base}/api/app/accounts/${accountId}/automations/sub-custom-${accountId}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(response.status, 200);
+
+  const config = store.llmConfigs.find(c => c.accountId === accountId);
+  assert.equal(config.nativeEnabled, true, 'a hand-authored automation is not a reply path and must not turn native replies off');
 });
 
 test('POST /n8n/connect/ai requires an LLM proxy to be configured first', async () => {

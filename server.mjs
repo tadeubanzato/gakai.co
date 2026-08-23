@@ -342,13 +342,18 @@ async function automationFetch(subscription,event,{url:overrideUrl}={}){
 // webhook) generate a reply without ever calling back into Gakai's own
 // API — Gakai already made this request and is the only side that needs to
 // know how to reach the WhatsApp provider.
+// Returns the reply text that was sent (or null if there was nothing to
+// send) so callers — in particular the "Send test message" endpoint — can
+// show the caller what the automation actually produced, not just whether
+// the webhook call succeeded.
 async function sendAutomationReply(response,accountId,chatId){
-  if(!chatId)return;
   let reply='';
-  try{const data=await response.json();reply=String(data?.reply||data?.text||data?.output||'').trim();}catch{return;}
-  if(!reply)return;
+  try{const data=await response.json();reply=String(data?.reply||data?.text||data?.output||'').trim();}catch{return null;}
+  if(!reply)return null;
+  if(!chatId)return reply;
   try{await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:accountId,chatId,text:reply})});}
   catch(error){console.error('Failed to send automation reply:',error.message);}
+  return reply;
 }
 async function deliverAutomation(subscription,event,options={}){subscription.secret=subscription.secret||ensureN8nKey(subscription.accountId);
   const started=Date.now();
@@ -356,7 +361,7 @@ async function deliverAutomation(subscription,event,options={}){subscription.sec
     const response=await automationFetch(subscription,event,options);
     subscription.lastDelivery={at:new Date().toISOString(),ok:response.ok,status:response.status,durationMs:Date.now()-started};
     if(!response.ok)throw new Error(`Webhook returned ${response.status}`);
-    await sendAutomationReply(response,subscription.accountId,event.chat?.id);
+    return await sendAutomationReply(response,subscription.accountId,event.chat?.id);
   }
   catch(error){subscription.lastDelivery={at:new Date().toISOString(),ok:false,error:error.message||"Delivery failed",durationMs:Date.now()-started};throw error}
   finally{await persist()}
@@ -455,6 +460,20 @@ function llmConfig(accountId){return store.llmConfigs.find(c=>c.accountId===acco
 // native dispatch is skipped, so an inbound message never gets two
 // independent AI replies.
 function hasEnabledAgenticN8n(accountId){return store.automationSubscriptions.some(item=>item.accountId===accountId&&item.enabled&&item.name==='n8n auto-connect (AI Agent)');}
+// Native LLM replies and the n8n AI Agent workflow are two faces of the same
+// thing — Gakai answering automatically using the configured LLM proxy — so
+// only one may be live at a time. The plain "standard" n8n automation is a
+// separate, independent concept: a generic webhook subscription the user
+// customizes for their own purposes in n8n (its default Set node just echoes
+// the inbound message back as a placeholder, but what it actually does is
+// entirely up to the workflow the user builds). Enabling or disabling it
+// must never touch native or agentic replies, and vice versa — each of the
+// three toggles only ever affects itself and, for native/agentic, the other
+// one of that pair.
+function disableTheOtherAiReplyPath(accountId,keep){
+  if(keep!=='native'){const config=llmConfig(accountId);if(config)config.nativeEnabled=false;}
+  if(keep!=='agentic'){const sub=store.automationSubscriptions.find(item=>item.accountId===accountId&&item.name==='n8n auto-connect (AI Agent)');if(sub)sub.enabled=false;}
+}
 const llmProviders=new Set(['omniroute','litellm']);
 function inferLlmProvider(baseUrl,requested){
   if(llmProviders.has(requested))return requested;
@@ -972,7 +991,7 @@ async function enrichMessage(session,message){
     // Route through the same delivery path production events use so this
     // test send updates subscription.lastDelivery like a real one does,
     // instead of the status vanishing after a hand-rolled fetch.
-    try{await deliverAutomation(subscription,event,{url:destination});return send(res,200,{ok:true,subscription:automationSummary(subscription)})}
+    try{const reply=await deliverAutomation(subscription,event,{url:destination});return send(res,200,{ok:true,reply,subscription:automationSummary(subscription)})}
     catch(error){return send(res,502,{message:error.message||"Test delivery failed",subscription:automationSummary(subscription)})}}
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
@@ -1019,11 +1038,8 @@ async function enrichMessage(session,message){
     if(!config)return send(res,404,{message:'Save an LLM proxy before enabling native replies'});
     const input=await readBody(req);
     config.nativeEnabled=Boolean(input.nativeEnabled);
-    // Mutual exclusivity: only one reply path may be live at a time.
-    if(config.nativeEnabled){
-      const agenticSub=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect (AI Agent)');
-      if(agenticSub)agenticSub.enabled=false;
-    }
+    // Mutual exclusivity: native and the n8n AI Agent are the same reply, twice.
+    if(config.nativeEnabled)disableTheOtherAiReplyPath(id,'native');
     await persist();
     return send(res,200,{ok:true,nativeEnabled:config.nativeEnabled});
   }
@@ -1090,8 +1106,8 @@ async function enrichMessage(session,message){
         }
         const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect (AI Agent)');
         if(subscription)subscription.enabled=true;
-        // Mutual exclusivity: only one reply path may be live at a time.
-        if(config.nativeEnabled)config.nativeEnabled=false;
+        // Mutual exclusivity: native and the n8n AI Agent are the same reply, twice.
+        disableTheOtherAiReplyPath(id,'agentic');
         await persist();
         return send(res,200,{ok:true,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,activationWarning});
       }catch(error){return send(res,error.status||502,{message:'Failed to enable n8n AI Agent replies: '+(error.message||'Unknown error')});}
