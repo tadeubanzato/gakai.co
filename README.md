@@ -263,8 +263,6 @@ gakai.example.com {
 }
 ```
 
-> If you use n8n auto-connect from a publicly accessible Gakai instance, set `GAKAI_PUBLIC_URL=https://gakai.example.com` so n8n can reach Gakai's webhook endpoint.
-
 ---
 
 ## Environment Variables
@@ -275,7 +273,6 @@ All variables are optional. The launcher sets safe defaults automatically.
 |---|---|---|
 | `GAKAI_PORT` | `3000` | Host port Gakai listens on |
 | `GAKAI_BIND_ADDRESS` | `0.0.0.0` | Network interface (`127.0.0.1` for local-only) |
-| `GAKAI_PUBLIC_URL` | _(auto-derived)_ | Full public URL — set this when behind a reverse proxy |
 | `GAKAI_PROVIDER_API_KEY` | _(auto-generated)_ | Internal credential between Gakai and its provider |
 | `GAKAI_PROVIDER_WEBHOOK_SECRET` | _(auto-generated)_ | HMAC key for verifying provider webhook payloads |
 

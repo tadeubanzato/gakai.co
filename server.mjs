@@ -12,41 +12,6 @@ import { createBoundedCache } from './src/lib/lru-cache.mjs';
 import { decodeHtmlEntities } from './src/lib/html.mjs';
 
 const port = Number(process.env.PORT || 3000);
-const configuredPublicUrl = String(process.env.GAKAI_PUBLIC_URL || '').trim().replace(/\/$/, '');
-const publicPort = Number(process.env.GAKAI_PUBLIC_PORT || port);
-
-function requestPublicUrl(req) {
-  // Explicit configuration always wins. This is ideal for Cloudflare Tunnel,
-  // reverse proxies, or any deployment with a stable public hostname.
-  if (configuredPublicUrl) return configuredPublicUrl;
-
-  // Reverse proxies such as Cloudflare normally provide the original scheme/host.
-  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
-  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
-
-  // Without a reverse proxy, use exactly what the user used to open Gakai:
-  // hostname.local, LAN IP, DNS hostname, custom domain, etc.
-  const host = forwardedHost || String(req.headers.host || '').trim();
-  const protocol = forwardedProto || 'http';
-
-  if (host) return `${protocol}://${host}`.replace(/\/$/, '');
-
-  // Last-resort fallback. This keeps local-only Gakai usable, although an
-  // external n8n instance cannot call a loopback address.
-  return `http://127.0.0.1:${publicPort}`;
-}
-// A loopback address is unreachable from any other host by definition. A
-// ".local" mDNS/Bonjour hostname only resolves for a client on the same LAN
-// segment that also performs mDNS lookups itself — n8n Cloud, a Docker
-// container, or most VMs don't, so baking one into a generated workflow's
-// outbound "Send Reply" node produces a getaddrinfo ENOTFOUND at delivery
-// time, not at connect time when it's easy to catch and explain.
-function invalidN8nCallbackHost(publicUrl) {
-  const hostname = new URL(publicUrl).hostname;
-  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]' || hostname.endsWith('.local'))
-    return `Gakai resolved its callback URL as ${publicUrl}, which n8n cannot reach from outside this machine's own network stack. Open Gakai using its LAN IP address (for example http://192.168.1.20:3000) or a real domain, or set GAKAI_PUBLIC_URL for a fixed callback URL.`;
-  return null;
-}
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
 const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
 const providerWebhookSecret=process.env.GAKAI_PROVIDER_WEBHOOK_SECRET || "";
@@ -362,14 +327,37 @@ async function resolveContact(session,rawId){
 const automationSummary=subscription=>({id:subscription.id,accountId:subscription.accountId,name:subscription.name,url:subscription.url,productionUrl:subscription.productionUrl||subscription.url,testUrl:subscription.testUrl||null,testPhone:subscription.testPhone||null,enabled:subscription.enabled,events:subscription.events,secret:subscription.secret,createdAt:subscription.createdAt,lastDelivery:subscription.lastDelivery||null});
 async function automationFetch(subscription,event,{url:overrideUrl}={}){
   const targetUrl=overrideUrl||subscription.url;
-  const request=url=>fetchPinned(url,{requireHttps:true,method:'POST',headers:{'content-type':'application/json','x-gakai-secret':subscription.secret,'x-gakai-event-id':event.id,'user-agent':'Gakai/1.0'},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});
+  // 45s, not automationFetch's old 10s: a workflow that responds
+  // synchronously with a reply (see deliverAutomation) holds this same
+  // connection open through however long its own logic — an LLM call in
+  // particular — takes to finish.
+  const request=url=>fetchPinned(url,{requireHttps:true,method:'POST',headers:{'content-type':'application/json','x-gakai-secret':subscription.secret,'x-gakai-event-id':event.id,'user-agent':'Gakai/1.0'},body:JSON.stringify(event),signal:AbortSignal.timeout(45000)});
   let response=await request(targetUrl);
   if(!response.ok&&event.source==='test'&&response.status===404&&targetUrl.includes('/webhook/'))response=await request(targetUrl.replace('/webhook/','/webhook-test/'));
   return response;
 }
+// If the automation responded synchronously with a reply, send it back
+// through WhatsApp the same way a native LLM reply does. This is what lets
+// an automation (the Gakai-managed n8n templates, or any hand-authored
+// webhook) generate a reply without ever calling back into Gakai's own
+// API — Gakai already made this request and is the only side that needs to
+// know how to reach the WhatsApp provider.
+async function sendAutomationReply(response,accountId,chatId){
+  if(!chatId)return;
+  let reply='';
+  try{const data=await response.json();reply=String(data?.reply||data?.text||data?.output||'').trim();}catch{return;}
+  if(!reply)return;
+  try{await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:accountId,chatId,text:reply})});}
+  catch(error){console.error('Failed to send automation reply:',error.message);}
+}
 async function deliverAutomation(subscription,event,options={}){subscription.secret=subscription.secret||ensureN8nKey(subscription.accountId);
   const started=Date.now();
-  try{const response=await automationFetch(subscription,event,options);subscription.lastDelivery={at:new Date().toISOString(),ok:response.ok,status:response.status,durationMs:Date.now()-started};if(!response.ok)throw new Error(`Webhook returned ${response.status}`)}
+  try{
+    const response=await automationFetch(subscription,event,options);
+    subscription.lastDelivery={at:new Date().toISOString(),ok:response.ok,status:response.status,durationMs:Date.now()-started};
+    if(!response.ok)throw new Error(`Webhook returned ${response.status}`);
+    await sendAutomationReply(response,subscription.accountId,event.chat?.id);
+  }
   catch(error){subscription.lastDelivery={at:new Date().toISOString(),ok:false,error:error.message||"Delivery failed",durationMs:Date.now()-started};throw error}
   finally{await persist()}
 }
@@ -516,30 +504,133 @@ async function syncN8nLlmCredential(connection,n8nApiKey,config){
   }
 }
 
-// Repairs a generated workflow's outbound "Send Reply" node in place if its
-// URL no longer matches the current, validated callback host — the fix for
-// an already-created workflow that baked in a loopback or ".local" address
-// before invalidN8nCallbackHost existed (or before the host it was created
-// under changed). A no-op, and no extra n8n write, when the URL is already
-// current.
-async function repairSendReplyUrl(n8nUrl,n8nApiKey,workflowId,publicUrl){
-  const workflow=await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(workflowId)}`);
-  const sendReply=workflow?.nodes?.find(node=>node.name==='Send Reply'&&node.type==='n8n-nodes-base.httpRequest');
-  if(!sendReply)return false;
-  const nextUrl=`${publicUrl}/api/integrations/v1/messages`;
-  if(sendReply.parameters?.url===nextUrl)return false;
-  sendReply.parameters={...(sendReply.parameters||{}),url:nextUrl};
-  await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(workflowId)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({name:workflow.name,nodes:workflow.nodes,connections:workflow.connections,settings:workflow.settings||{executionOrder:'v1'}})});
+// Builds the node/connection graph for one Gakai-managed n8n workflow:
+// Webhook -> [Set | AI Agent] -> Respond to Webhook.
+//
+// The workflow replies by responding synchronously to the same inbound
+// webhook call Gakai already made to deliver the message — n8n's Webhook
+// node holds the HTTP connection open (responseMode: 'responseNode') until
+// the "Respond to Webhook" node runs, and its JSON body becomes the
+// response Gakai reads back. This deliberately avoids an *outbound* call
+// from n8n back into Gakai's own API: that direction requires n8n to know
+// an address for Gakai, and there is no address Gakai can hand it that's
+// guaranteed reachable — not a LAN IP, not a `.local` hostname, not even
+// 127.0.0.1 (which from n8n's own process always means n8n's own host, never
+// Gakai's). Gakai is always the one making the request here, and it already
+// knows how to reach the WhatsApp provider — so only Gakai ever needs to
+// know an address, regardless of whether n8n runs on the same machine, the
+// same LAN, or n8n Cloud on the other side of the world.
+function buildN8nWorkflowGraph({kind,webhookPath,inboundCred,accountLlm,llmCred,systemPrompt}){
+  const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),respondNodeId=makeUUID(),llmNodeId=makeUUID();
+  const webhookNode={
+    id:webhookNodeId,
+    name:'Webhook',
+    type:'n8n-nodes-base.webhook',
+    typeVersion:2.1,
+    position:[250,300],
+    parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'responseNode',options:{}},
+    credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}
+  };
+  const respondNode={
+    id:respondNodeId,
+    name:'Respond to Webhook',
+    type:'n8n-nodes-base.respondToWebhook',
+    typeVersion:1.4,
+    position:[1000,300],
+    parameters:{
+      respondWith:'json',
+      responseBody:"={{ { reply: $json.output || $json.reply || $json.text || $json.message_body || '' } }}"
+    }
+  };
+  let nodes,connections;
+  if(accountLlm){
+    const agentNode={
+      id:middleNodeId,
+      name:'AI Agent',
+      type:'@n8n/n8n-nodes-langchain.agent',
+      typeVersion:3.1,
+      position:[625,300],
+      parameters:{
+        promptType:'define',
+        text:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}",
+        options:{systemMessage:systemPrompt}
+      }
+    };
+    const llmNode={
+      id:llmNodeId,
+      name:'OpenAI Chat Model',
+      type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',
+      typeVersion:1.3,
+      position:[625,500],
+      parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},
+      credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}
+    };
+    nodes=[webhookNode,agentNode,llmNode,respondNode];
+    connections={Webhook:{main:[[{node:'AI Agent',type:'main',index:0}]]},'OpenAI Chat Model':{ai_languageModel:[[{node:'AI Agent',type:'ai_languageModel',index:0}]]},'AI Agent':{main:[[{node:'Respond to Webhook',type:'main',index:0}]]}};
+  }else{
+    const setNode={
+      id:middleNodeId,
+      name:'Set',
+      type:'n8n-nodes-base.set',
+      typeVersion:3.4,
+      position:[625,300],
+      parameters:{
+        assignments:{assignments:[
+          {id:makeUUID(),name:'message_body',type:'string',value:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}"}
+        ]},
+        options:{}
+      }
+    };
+    nodes=[webhookNode,setNode,respondNode];
+    connections={Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Respond to Webhook',type:'main',index:0}]]}};
+  }
+  return {nodes,connections};
+}
+
+// Upgrades an already-created workflow still using the old outbound
+// "Send Reply" HTTP node to the current synchronous-response shape, reusing
+// its existing inbound credential and (for the agentic kind) LLM credential
+// so nothing needs re-authorizing. A no-op if the workflow already has no
+// Send Reply node. Cleans up the now-orphaned outbound bearer credential.
+async function repairN8nWorkflowGraph(n8nUrl,n8nApiKey,connection,accountId){
+  const workflow=await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`);
+  const webhookNode=workflow?.nodes?.find(node=>node.name==='Webhook'&&node.type==='n8n-nodes-base.webhook');
+  const oldHttpNode=workflow?.nodes?.find(node=>node.name==='Send Reply'&&node.type==='n8n-nodes-base.httpRequest');
+  if(!webhookNode||!oldHttpNode)return false;
+  const inboundCred=webhookNode.credentials?.httpHeaderAuth;
+  if(!inboundCred?.id)return false;
+  const accountLlm=connection.kind==='agentic'?llmConfig(accountId):null;
+  let llmCred=null;
+  if(accountLlm){
+    const modelNode=workflow.nodes.find(node=>node.name==='OpenAI Chat Model'&&node.type==='@n8n/n8n-nodes-langchain.lmChatOpenAi');
+    llmCred=modelNode?.credentials?.openAiApi;
+    if(!llmCred?.id)return false;
+  }
+  const {nodes,connections}=buildN8nWorkflowGraph({
+    kind:connection.kind,
+    webhookPath:webhookNode.parameters?.path,
+    inboundCred,
+    accountLlm,
+    llmCred,
+    systemPrompt:accountLlm?assistantInstructions(accountLlm.systemPrompt):undefined
+  });
+  await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({name:workflow.name,nodes,connections,settings:workflow.settings||{executionOrder:'v1'}})});
+  await publishN8nWorkflow(n8nUrl,n8nApiKey,connection.workflowId);
+  if(oldHttpNode.credentials?.httpBearerAuth?.id)await deleteN8nCredentialQuietly(n8nUrl,n8nApiKey,oldHttpNode.credentials.httpBearerAuth.id);
   return true;
 }
 
 // Keep Gakai's LLM settings and the generated n8n AI Agent in lockstep.
 // We fetch first so any customer edits to other workflow nodes remain intact.
-async function syncAgenticN8nInstructions(accountId,config,publicUrl){
+async function syncAgenticN8nInstructions(accountId,config){
   const connection=store.n8nConnections.find(item=>item.accountId===accountId&&item.kind==='agentic');
   if(!connection)return false;
   const n8nApiKey=decryptSecret(connection.n8nApiKeyEncrypted);
   if(!n8nApiKey)throw new Error('Reauthorize n8n before updating the AI Agent settings');
+  // Upgrade a legacy workflow shape (the old direct-callback Send Reply
+  // node) before touching anything else, so the fetch below sees the
+  // current node names.
+  await repairN8nWorkflowGraph(connection.n8nUrl,n8nApiKey,connection,accountId).catch(error=>console.error('Failed to upgrade n8n AI Agent workflow shape:',error.message));
   const workflow=await n8nRequest(connection.n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`);
   const agent=workflow?.nodes?.find(node=>node.name==='AI Agent'&&node.type==='@n8n/n8n-nodes-langchain.agent');
   const model=workflow?.nodes?.find(node=>node.name==='OpenAI Chat Model'&&node.type==='@n8n/n8n-nodes-langchain.lmChatOpenAi');
@@ -549,14 +640,6 @@ async function syncAgenticN8nInstructions(accountId,config,publicUrl){
   agent.parameters={...(agent.parameters||{}),options:{...(agent.parameters?.options||{}),systemMessage:assistantInstructions(config.systemPrompt)}};
   model.parameters={...(model.parameters||{}),model:{...(typeof model.parameters?.model==='object'?model.parameters.model:{}),__rl:true,mode:'list',value:config.model}};
   model.credentials={...(model.credentials||{}),openAiApi:{id:credential.id,name:credential.name}};
-  // Piggyback the Send Reply node's outbound URL onto this same fetch+PUT
-  // cycle if it's drifted from the current, validated callback host (see
-  // repairSendReplyUrl) — a self-healing repair every time the AI Agent
-  // settings are saved, without a second n8n round trip.
-  if(publicUrl){
-    const sendReply=workflow?.nodes?.find(node=>node.name==='Send Reply'&&node.type==='n8n-nodes-base.httpRequest');
-    if(sendReply)sendReply.parameters={...(sendReply.parameters||{}),url:`${publicUrl}/api/integrations/v1/messages`};
-  }
   await n8nRequest(connection.n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({name:workflow.name,nodes:workflow.nodes,connections:workflow.connections,settings:workflow.settings||{executionOrder:'v1'}})});
   await publishN8nWorkflow(connection.n8nUrl,n8nApiKey,connection.workflowId);
   connection.llmCredentialId=credential.id;
@@ -564,111 +647,33 @@ async function syncAgenticN8nInstructions(accountId,config,publicUrl){
   return true;
 }
 
-// Builds one n8n workflow (Webhook -> [Set | AI Agent] -> Send Reply) and its
-// dedicated credentials. Used both for the initial n8n connect and for creating
-// the paired AI Agent workflow once LiteLLM is configured. Never mutates an
-// existing n8n workflow; each call creates a brand-new one.
-async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}){
+// Builds one n8n workflow (Webhook -> [Set | AI Agent] -> Respond to Webhook)
+// and its dedicated credentials. Used both for the initial n8n connect and
+// for creating the paired AI Agent workflow once LiteLLM is configured.
+// Never mutates an existing n8n workflow; each call creates a brand-new one.
+async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,kind}){
   const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
-  const integrationToken='wh_n8n_'+randomBytes(24).toString('base64url');
-  let inboundCred=null,outboundCred=null,llmCred=null,workflow=null;
+  let inboundCred=null,llmCred=null,workflow=null;
   try{
     inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Inbound Secret – ${accountId}${kind==='agentic'?' (AI Agent)':''}`,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});
-    outboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Bearer Token – ${accountId}${kind==='agentic'?' (AI Agent)':''}`,type:'httpBearerAuth',data:{token:integrationToken}})});
 
     const webhookPath='gakai-'+accountId.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24)+(kind==='agentic'?'-ai':'');
     let accountLabel=accountId;
     try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===accountId);if(session)accountLabel=store.accountLabels[accountId]||session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||accountId;}catch{}
     const workflowName=`Gakai – ${accountLabel}${kind==='agentic'?' (AI Agent)':''}`;
-    const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),httpNodeId=makeUUID(),llmNodeId=makeUUID();
     const accountLlm=kind==='agentic'?llmConfig(accountId):null;
-    let nodes,connections;
-
-    const webhookNode={
-      id:webhookNodeId,
-      name:'Webhook',
-      type:'n8n-nodes-base.webhook',
-      typeVersion:2.1,
-      position:[250,300],
-      parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'onReceived',options:{}},
-      credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}
-    };
-
-    const httpNode={
-      id:httpNodeId,
-      name:'Send Reply',
-      type:'n8n-nodes-base.httpRequest',
-      typeVersion:4.2,
-      position:[1000,300],
-      parameters:{
-        method:'POST',
-        url:`${publicUrl}/api/integrations/v1/messages`,
-        authentication:'genericCredentialType',
-        genericAuthType:'httpBearerAuth',
-        sendBody:true,
-        contentType:'json',
-        specifyBody:'keypair',
-        bodyParameters:{
-          parameters:[
-            {
-              name:'chatId',
-              value:"={{ $('Webhook').item.json.body.chat.id }}"
-            },
-            {
-              name:'text',
-              value:"={{ $json.output || $json.reply || $json.text || $json.message_body || '' }}"
-            }
-          ]
-        },
-        options:{}
-      },
-      credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}
-    };
-
     if(accountLlm){
       // n8n's OpenAI credential uses `url` for an OpenAI-compatible base endpoint.
       llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${accountId}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,url:accountLlm.baseUrl}})});
-      const systemPrompt=assistantInstructions(accountLlm.systemPrompt);
-      const agentNode={
-        id:middleNodeId,
-        name:'AI Agent',
-        type:'@n8n/n8n-nodes-langchain.agent',
-        typeVersion:3.1,
-        position:[625,300],
-        parameters:{
-          promptType:'define',
-          text:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}",
-          options:{systemMessage:systemPrompt}
-        }
-      };
-      const llmNode={
-        id:llmNodeId,
-        name:'OpenAI Chat Model',
-        type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',
-        typeVersion:1.3,
-        position:[625,500],
-        parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},
-        credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}
-      };
-      nodes=[webhookNode,agentNode,llmNode,httpNode];
-      connections={Webhook:{main:[[{node:'AI Agent',type:'main',index:0}]]},'OpenAI Chat Model':{ai_languageModel:[[{node:'AI Agent',type:'ai_languageModel',index:0}]]},'AI Agent':{main:[[{node:'Send Reply',type:'main',index:0}]]}};
-    }else{
-      const setNode={
-        id:middleNodeId,
-        name:'Set',
-        type:'n8n-nodes-base.set',
-        typeVersion:3.4,
-        position:[625,300],
-        parameters:{
-          assignments:{assignments:[
-            {id:makeUUID(),name:'message_body',type:'string',value:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}"}
-          ]},
-          options:{}
-        }
-      };
-      nodes=[webhookNode,setNode,httpNode];
-      connections={Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Send Reply',type:'main',index:0}]]}};
     }
+    const {nodes,connections}=buildN8nWorkflowGraph({
+      kind,
+      webhookPath,
+      inboundCred,
+      accountLlm,
+      llmCred,
+      systemPrompt:accountLlm?assistantInstructions(accountLlm.systemPrompt):undefined
+    });
 
     const workflowBody={name:workflowName,nodes,connections,settings:{executionOrder:'v1'}};
     workflow=await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(workflowBody)});
@@ -682,14 +687,13 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}
     return {
       workflowId,workflowName,
       webhookUrl:`${n8nBaseUrl}/webhook/${webhookPath}`,
-      inboundSecret,integrationToken,activationWarning,
-      inboundCredentialId:String(inboundCred.id),outboundCredentialId:String(outboundCred.id),llmCredentialId:llmCred?String(llmCred.id):null,
+      inboundSecret,activationWarning,
+      inboundCredentialId:String(inboundCred.id),llmCredentialId:llmCred?String(llmCred.id):null,
       agentic:Boolean(accountLlm)
     };
   }catch(err){
     await deleteN8nWorkflowQuietly(n8nBaseUrl,n8nApiKey,workflow?.id);
     await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,llmCred?.id);
-    await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,outboundCred?.id);
     await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,inboundCred?.id);
     throw err;
   }
@@ -698,7 +702,7 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}
 // Creates the paired AI Agent workflow for an account that already has a
 // standard n8n connection, reusing the same n8n instance/API key on file.
 // Leaves the existing standard workflow untouched. Routes live delivery to
-async function createAgenticN8nWorkflow(accountId,req){
+async function createAgenticN8nWorkflow(accountId){
   const standard=store.n8nConnections.find(c=>c.accountId===accountId&&c.kind==='standard');
   if(!standard)throw Object.assign(new Error('No existing n8n integration is available'),{status:409});
   if(store.n8nConnections.some(c=>c.accountId===accountId&&c.kind==='agentic'))throw Object.assign(new Error('The AI workflow already exists'),{status:409});
@@ -706,19 +710,14 @@ async function createAgenticN8nWorkflow(accountId,req){
   if(!n8nApiKey)throw Object.assign(new Error('Reauthorize the existing n8n integration with its API key before creating an AI workflow'),{status:409});
   // Verify the stored n8n connection before creating anything.
   await n8nRequest(standard.n8nUrl,n8nApiKey,'/workflows?limit=1');
-  const publicUrl=requestPublicUrl(req);
-  const callbackError=invalidN8nCallbackHost(publicUrl);
-  if(callbackError)throw Object.assign(new Error(callbackError),{status:400});
-  const built=await createN8nWorkflow({n8nBaseUrl:standard.n8nUrl,n8nApiKey,accountId,publicUrl,kind:'agentic'});
+  const built=await createN8nWorkflow({n8nBaseUrl:standard.n8nUrl,n8nApiKey,accountId,kind:'agentic'});
   const connectedAt=new Date().toISOString();
-  store.keys=store.keys.filter(k=>!(k.accountId===accountId&&k.name==='n8n auto-connect (AI Agent)'));
-  store.keys.push({id:randomBytes(8).toString('hex'),accountId,name:'n8n auto-connect (AI Agent)',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:built.integrationToken,hash:hash(built.integrationToken)});
   // The generated AI workflow is deliberately isolated: it receives no live
   // events until a later explicit activation step, and never alters the
   // existing n8n workflow or its automation subscription.
   store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.accountId===accountId&&item.name==='n8n auto-connect (AI Agent)'));
   store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId,name:'n8n auto-connect (AI Agent)',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:false,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
-  store.n8nConnections.push({accountId,kind:'agentic',n8nUrl:standard.n8nUrl,n8nApiKeyEncrypted:standard.n8nApiKeyEncrypted,workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
+  store.n8nConnections.push({accountId,kind:'agentic',n8nUrl:standard.n8nUrl,n8nApiKeyEncrypted:standard.n8nApiKeyEncrypted,workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,connectedAt});
   await persist();
   return built;
 }
@@ -1003,14 +1002,7 @@ async function enrichMessage(session,message){
     }
     const nextConfig={accountId:id,provider,baseUrl,apiKey,model,systemPrompt:assistantInstructions(String(input.systemPrompt||'').slice(0,4000)),nativeEnabled:Boolean(input.nativeEnabled),configuredAt:existing?.configuredAt||new Date().toISOString()};
     let n8nInstructionsSynced=false;
-    // Pass the current, validated callback host along so a stale/broken
-    // Send Reply node (e.g. one created under a since-changed or unreachable
-    // hostname) self-heals the next time AI Agent settings are saved,
-    // without needing the whole n8n integration recreated. Skip it silently
-    // if the current host itself isn't reachable — that's an unrelated
-    // network-topology problem, not a reason to fail the LLM proxy save.
-    const callbackHost=invalidN8nCallbackHost(requestPublicUrl(req))?null:requestPublicUrl(req);
-    try{n8nInstructionsSynced=await syncAgenticN8nInstructions(id,nextConfig,callbackHost);}catch(error){return send(res,502,{message:'LLM proxy verified, but the n8n AI workflow was not updated: '+(error.message||'Unknown error')});}
+    try{n8nInstructionsSynced=await syncAgenticN8nInstructions(id,nextConfig);}catch(error){return send(res,502,{message:'LLM proxy verified, but the n8n AI workflow was not updated: '+(error.message||'Unknown error')});}
     store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);
     store.llmConfigs.push(nextConfig);
     await persist();
@@ -1028,34 +1020,26 @@ async function enrichMessage(session,message){
       try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
       if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
       if(!n8nApiKey)return send(res,400,{message:'n8n API key is required'});
-      // Use the URL the user actually used to reach Gakai unless an explicit
-      // GAKAI_PUBLIC_URL override is configured (for example behind a reverse proxy).
-      const publicUrl=requestPublicUrl(req);
-      const callbackError=invalidN8nCallbackHost(publicUrl);
-      if(callbackError)return send(res,400,{message:callbackError});
       try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
       if(existingStandard){
         existingStandard.n8nUrl=n8nBaseUrl;existingStandard.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);
-        // Reconnecting is also the repair path for a workflow whose Send
-        // Reply node baked in a stale/unreachable host (see
-        // invalidN8nCallbackHost) — fix it in place rather than requiring
-        // the whole integration to be deleted and recreated.
-        try{await repairSendReplyUrl(n8nBaseUrl,n8nApiKey,existingStandard.workflowId,publicUrl);}catch(error){console.error('Failed to repair n8n Send Reply URL:',error.message);}
+        // Reconnecting is also the repair path for a workflow still on the
+        // old outbound-callback shape (see repairN8nWorkflowGraph) — fix it
+        // in place rather than requiring the whole integration to be
+        // deleted and recreated.
+        try{await repairN8nWorkflowGraph(n8nBaseUrl,n8nApiKey,existingStandard,id);}catch(error){console.error('Failed to upgrade n8n workflow shape:',error.message);}
         await persist();return send(res,200,{ok:true,reused:true,workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`});
       }
       let built;
-      try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,publicUrl,kind:'standard'}); }
+      try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,kind:'standard'}); }
       catch(err){ return send(res,502,{message:'Failed to configure n8n: '+(err.message||'Unknown n8n error')}); }
       const connectedAt=new Date().toISOString();
-      // Remove old n8n auto-connect key for this account
-      store.keys=store.keys.filter(k=>!(k.accountId===id&&k.name==='n8n auto-connect'));
-      store.keys.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:built.integrationToken,hash:hash(built.integrationToken)});
       // Create/replace automation subscription (remove all for this account, then re-add the new one)
       store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);
       store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:true,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
       // Remove old connections for this account (both kinds) and start fresh with the standard workflow
       store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
-      store.n8nConnections.push({accountId:id,kind:'standard',n8nUrl:n8nBaseUrl,n8nApiKeyEncrypted:encryptSecret(n8nApiKey),workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
+      store.n8nConnections.push({accountId:id,kind:'standard',n8nUrl:n8nBaseUrl,n8nApiKeyEncrypted:encryptSecret(n8nApiKey),workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,connectedAt});
       await persist();
       return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${built.workflowId}`,webhookUrl:built.webhookUrl,connectedAt,activationWarning:built.activationWarning});
     })();
@@ -1067,7 +1051,7 @@ async function enrichMessage(session,message){
     if(n8nConnectLocks.has(lockKey))return send(res,409,{message:'A connection attempt is already in progress for this account'});
     const attempt=(async()=>{
       if(!llmConfig(id))return send(res,400,{message:'Connect an LLM proxy before creating an AI workflow'});
-      try{const built=await createAgenticN8nWorkflow(id,req);if(!built)return send(res,409,{message:'Connect n8n first, or AI replies are already enabled'});return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic')?.n8nUrl+'/workflow/'+built.workflowId,activationWarning:built.activationWarning});}
+      try{const built=await createAgenticN8nWorkflow(id);if(!built)return send(res,409,{message:'Connect n8n first, or AI replies are already enabled'});return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic')?.n8nUrl+'/workflow/'+built.workflowId,activationWarning:built.activationWarning});}
       catch(error){return send(res,error.status||502,{message:'Failed to create n8n AI workflow: '+(error.message||'Unknown error')});}
     })();
     n8nConnectLocks.set(lockKey,attempt);
@@ -1121,6 +1105,6 @@ wss.on('connection',(socket,req)=>{
   socket.on('close',()=>{typingSockets.delete(socket);maybeStopPresencePoll(`${socket.accountId}:${socket.chatId}`)});
 });
 server.on('upgrade',(req,socket,head)=>{const url=new URL(req.url,`http://${req.headers.host}`);if(url.pathname!=='/api/app/ws'||!admin(req)||!url.searchParams.get('accountId')||!url.searchParams.get('chatId')){socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();return;}wss.handleUpgrade(req,socket,head,client=>wss.emit('connection',client,req));});
-server.listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}${configuredPublicUrl ? ` (public URL: ${configuredPublicUrl})` : ''}`));
+server.listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}`));
 
-export { server, readBody, store, sessions, invalidN8nCallbackHost };
+export { server, readBody, store, sessions, buildN8nWorkflowGraph, sendAutomationReply };
