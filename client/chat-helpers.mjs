@@ -33,6 +33,23 @@ export function nextComposerValue(currentValue, failedText) {
   return currentValue ? currentValue : failedText;
 }
 
+// Merge a provider send-ack onto the optimistic pending message. WAHA's
+// sendText ack doesn't echo back the quoted message being replied to, so
+// resultMessage.replyTo comes back null/absent — preserve the client's own
+// pending.replyTo (already known from the reader's Reply click) instead of
+// losing the reply context the moment the ack arrives.
+export function confirmSentMessage(pending, resultMessage) {
+  if (!resultMessage) return null;
+  return {
+    ...pending,
+    ...resultMessage,
+    body: resultMessage.body || resultMessage.text || pending.body,
+    text: resultMessage.text || resultMessage.body || pending.text || pending.body,
+    replyTo: resultMessage.replyTo || pending.replyTo,
+    pending: false,
+  };
+}
+
 export function merge(current, extra) {
   const keyed = new Map();
   [...current, ...extra].forEach((message, index) => keyed.set(idFor(message, index), message));

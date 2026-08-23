@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue } from "./chat-helpers.mjs";
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage } from "./chat-helpers.mjs";
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { "content-type": "application/json", ...(options.headers || {}) }, ...options });
@@ -400,7 +400,7 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     setMessages(current => [...current, pending]);
     try {
       const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages`, { method: "POST", body: JSON.stringify({ chatId, text, replyTo:replyingTo?.id }) });
-      const confirmed = result.message ? { ...pending, ...result.message, body: result.message.body || result.message.text || pending.body, text: result.message.text || result.message.body || pending.text || pending.body, pending: false } : null;
+      const confirmed = confirmSentMessage(pending, result.message);
       setMessages(current => merge(current.filter(message => message.id !== pending.id), confirmed ? [confirmed] : []));
       setReplyingTo(null);
       onSent?.(result.message, chat);
