@@ -263,8 +263,6 @@ gakai.example.com {
 }
 ```
 
-> If you use n8n auto-connect from a publicly accessible Gakai instance, set `GAKAI_PUBLIC_URL=https://gakai.example.com` so n8n can reach Gakai's webhook endpoint.
-
 ---
 
 ## Environment Variables
@@ -275,7 +273,6 @@ All variables are optional. The launcher sets safe defaults automatically.
 |---|---|---|
 | `GAKAI_PORT` | `3000` | Host port Gakai listens on |
 | `GAKAI_BIND_ADDRESS` | `0.0.0.0` | Network interface (`127.0.0.1` for local-only) |
-| `GAKAI_PUBLIC_URL` | _(auto-derived)_ | Full public URL — set this when behind a reverse proxy |
 | `GAKAI_PROVIDER_API_KEY` | _(auto-generated)_ | Internal credential between Gakai and its provider |
 | `GAKAI_PROVIDER_WEBHOOK_SECRET` | _(auto-generated)_ | HMAC key for verifying provider webhook payloads |
 
@@ -383,9 +380,21 @@ The launcher rebuilds the Gakai image and restarts both containers. Data in `hom
 ### Validate JavaScript (no local Node needed)
 
 ```sh
-docker compose run --rm --no-deps home node --check /app/public/app.js
+docker compose build home
+docker compose run --rm --no-deps home node --check /app/public/assets/app.js
 docker compose run --rm --no-deps home node --check /app/server.mjs
 ```
+
+`docker compose build` runs esbuild on `client/*.jsx` as part of the image build, so it catches JSX/bundling errors; `node --check` then validates the compiled, JSX-free output.
+
+### Run tests (no local Node needed)
+
+```sh
+docker build --target test -t gakai-test .
+docker run --rm gakai-test
+```
+
+The shipped runtime image is intentionally lean and doesn't carry `package.json` or `test/`, so tests run against the Dockerfile's `test` stage — a throwaway stage built on top of the already-`npm ci`'d frontend stage, never part of the published image.
 
 ### Rebuild after changes
 
@@ -402,13 +411,16 @@ Sanitized provider payload fixtures live in `test/fixtures/providers/waha/`. Use
 ```
 gakai.co/
 ├── server.mjs              # Node HTTP server — auth, API, provider proxy, automation
+├── client/
+│   ├── app.jsx             # React browser application
+│   └── chat.jsx            # Conversation view
 ├── public/
-│   ├── app.js              # Vanilla browser application
+│   ├── assets/app.js       # esbuild output of client/ (generated, gitignored)
 │   ├── styles.css          # Dashboard styles
 │   └── index.html          # Entry document
 ├── src/
 │   ├── api/                # Planned provider-neutral API layer
-│   ├── domain/             # Planned domain model
+│   ├── domain/             # Message/chat normalization (fixture-tested)
 │   ├── providers/waha/     # Provider adapter (designed to be swapped)
 │   ├── storage/            # Planned storage abstraction
 │   ├── realtime/           # Realtime extraction target; current endpoints live in server.mjs
@@ -458,9 +470,15 @@ gakai.co/
 3. Add sanitized fixtures for any change that touches provider payload shapes
 4. Validate your JavaScript inside the container before opening a PR:
    ```sh
-   docker compose run --rm --no-deps home node --check /app/public/app.js
+   docker compose build home
+   docker compose run --rm --no-deps home node --check /app/public/assets/app.js
    ```
-5. Open a pull request against `main`
+5. Run the test suite:
+   ```sh
+   docker build --target test -t gakai-test .
+   docker run --rm gakai-test
+   ```
+6. Open a pull request against `main`
 
 **Never commit:** `.env`, `sessions/`, `home-data/`, real WhatsApp payloads, phone numbers, or credentials.
 

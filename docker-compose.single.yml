@@ -11,8 +11,6 @@ services:
       GAKAI_PROVIDER_WEBHOOK_SECRET: ${GAKAI_PROVIDER_WEBHOOK_SECRET:?Run ./scripts/gakai-up.sh to generate secrets}
       GAKAI_PROVIDER_KIND: waha
       GAKAI_LEGACY_ADMIN_USERNAME: ${WAHA_DASHBOARD_USERNAME:-}
-      GAKAI_PUBLIC_PORT: ${GAKAI_PORT:-3000}
-      GAKAI_PUBLIC_URL: ${GAKAI_PUBLIC_URL:-}
       WAHA_API_KEY: ${GAKAI_PROVIDER_API_KEY:?Run ./scripts/gakai-up.sh to generate secrets}
       WAHA_DASHBOARD_ENABLED: "False"
       WHATSAPP_SWAGGER_ENABLED: "False"

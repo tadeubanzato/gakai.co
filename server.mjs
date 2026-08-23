@@ -4,35 +4,14 @@ import { extname, join, normalize } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
 import { createProviderClient } from './src/providers/index.mjs';
 import { WebSocketServer } from 'ws';
+import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, extractMentionIds, hasMessageContent, mentionsIdentity, messageView as domainMessageView, providerMessageId, resolveMentionLabels } from './src/domain/message.mjs';
+import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
+import { createBoundedCache } from './src/lib/lru-cache.mjs';
+import { decodeHtmlEntities } from './src/lib/html.mjs';
 
 const port = Number(process.env.PORT || 3000);
-const configuredPublicUrl = String(process.env.GAKAI_PUBLIC_URL || '').trim().replace(/\/$/, '');
-const publicPort = Number(process.env.GAKAI_PUBLIC_PORT || port);
-
-function requestPublicUrl(req) {
-  // Explicit configuration always wins. This is ideal for Cloudflare Tunnel,
-  // reverse proxies, or any deployment with a stable public hostname.
-  if (configuredPublicUrl) return configuredPublicUrl;
-
-  // Reverse proxies such as Cloudflare normally provide the original scheme/host.
-  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
-  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
-
-  // Without a reverse proxy, use exactly what the user used to open Gakai:
-  // hostname.local, LAN IP, DNS hostname, custom domain, etc.
-  const host = forwardedHost || String(req.headers.host || '').trim();
-  const protocol = forwardedProto || 'http';
-
-  if (host) return `${protocol}://${host}`.replace(/\/$/, '');
-
-  // Last-resort fallback. This keeps local-only Gakai usable, although an
-  // external n8n instance cannot call a loopback address.
-  return `http://127.0.0.1:${publicPort}`;
-}
 const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
 const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
 const providerWebhookSecret=process.env.GAKAI_PROVIDER_WEBHOOK_SECRET || "";
@@ -70,7 +49,17 @@ db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5
 let legacy={username:null,password:null,keys:[]};try{legacy=JSON.parse(await readFile(dataFile,"utf8"))}catch{}
 const savedState=db.prepare("SELECT data FROM app_state WHERE id=1").get();
 let store=savedState?JSON.parse(savedState.data):legacy;
-const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
+// Reactions/deleted-chat records otherwise only ever grow (including for
+// accounts that no longer exist, before the account-delete cleanup below
+// existed) and are never useful past a retention window.
+const retentionMs=365*24*60*60*1000;
+function pruneStore(){
+  const now=Date.now();
+  const keep=(items,dateField)=>items.filter(item=>{const at=Date.parse(item[dateField]);return !Number.isFinite(at)||now-at<retentionMs});
+  if(Array.isArray(store.messageReactions))store.messageReactions=keep(store.messageReactions,'reactedAt');
+  if(Array.isArray(store.deletedChats))store.deletedChats=keep(store.deletedChats,'deletedAt');
+}
+const persist=()=>{pruneStore();db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
 if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
 if(!Array.isArray(store.deletedChats))store.deletedChats=[];
 if(!Array.isArray(store.messageReactions))store.messageReactions=[];
@@ -82,17 +71,41 @@ if(!Array.isArray(store.llmConfigs))store.llmConfigs=[];
 if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.automationSubscriptions?.length||legacy.deletingAccounts?.length))persist();
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
+// token -> { issuedAt, remember }. TTL-checked in admin(), not just presence-
+// checked, and cleared wholesale on a password change so a leaked token
+// doesn't survive it.
 const sessions=new Map();
+const sessionTtlMs=Number(process.env.GAKAI_SESSION_TTL_MS)||24*60*60*1000;
+const sessionRememberTtlMs=30*24*60*60*1000; // matches the cookie's own Max-Age=2592000 below
+// A chat with no activity in this window doesn't belong in the inbox — the
+// provider's chat list can include threads deleted directly on the phone
+// (Gakai never hears about that) or otherwise gone stale; without a recency
+// floor, the top-30 inbox pads itself out with whatever old chats exist
+// once there aren't 30 genuinely active ones.
+const inboxRecencyMs=(Number(process.env.GAKAI_INBOX_RECENCY_DAYS)||60)*24*60*60*1000;
+const inboxChatLimit=Number(process.env.GAKAI_INBOX_CHAT_LIMIT)||40;
+const instagramPreviewRetryMs=Number(process.env.GAKAI_INSTAGRAM_PREVIEW_RETRY_MS)||5*60*1000;
+// Guards against a double-click or slow-retry racing two concurrent n8n
+// connect attempts for the same account: each spans several awaited n8n API
+// calls with no atomic "does a connection already exist" check in between.
+const n8nConnectLocks=new Map();
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const sessionCookie=(token,remember)=>`home_session=${token}; HttpOnly; SameSite=Strict; Path=/${remember?"; Max-Age=2592000":""}`;
 const equalHex=(left,right)=>{try{const a=Buffer.from(left||"","hex"),b=Buffer.from(right||"","hex");return a.length===b.length&&timingSafeEqual(a,b)}catch{return false}};
 const passwordHash=value=>{const salt=randomBytes(16).toString('hex');return `${salt}:${scryptSync(value,salt,64).toString('hex')}`};
 const passwordMatches=value=>{const [salt,expected]=store.password.split(':');return timingSafeEqual(Buffer.from(expected,'hex'),scryptSync(value,salt,64))};
 const cookie=req=>Object.fromEntries((req.headers.cookie||'').split(';').map(x=>x.trim().split('=').map(decodeURIComponent)).filter(x=>x.length===2));
-const admin=req=>sessions.has(cookie(req).home_session);
+const issueSession=remember=>{const token=randomBytes(32).toString('hex');sessions.set(token,{issuedAt:Date.now(),remember:Boolean(remember)});return token};
+const admin=req=>{
+  const token=cookie(req).home_session;
+  const session=sessions.get(token);
+  if(!session)return false;
+  if(Date.now()-session.issuedAt>(session.remember?sessionRememberTtlMs:sessionTtlMs)){sessions.delete(token);return false}
+  return true;
+};
 const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8' };
 const send = (res, status, data) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'}); res.end(JSON.stringify(data)); };
-async function readBody(req) { let value='',size=0; for await (const chunk of req){size+=chunk.length;if(size>1024*1024)throw Object.assign(new Error('Request body too large'),{status:413});value+=chunk;} req.rawBody=value; return value ? JSON.parse(value) : {}; }
+async function readBody(req) { const chunks=[]; let size=0; for await (const chunk of req){size+=chunk.length;if(size>1024*1024)throw Object.assign(new Error('Request body too large'),{status:413});chunks.push(chunk);} req.rawBody=Buffer.concat(chunks).toString('utf8'); return req.rawBody ? JSON.parse(req.rawBody) : {}; }
 const providerRequest = provider.request;
 const providerFile = provider.file;
 const liveEventStreams = new Set();
@@ -122,14 +135,14 @@ function startPresencePoll(accountId,chatId){
   const read=async()=>{try{await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}/subscribe`,{method:'POST'});const value=presenceValue(await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}`));if(value!==poll.last){poll.last=value;broadcastTyping(accountId,chatId,{type:'presence',accountId,chatId,presence:value||'paused'})}}catch{}};
   poll.timer=setInterval(read,2000);presencePolls.set(key,poll);read();
 }
-const mediaCache=new Map();
+const mediaCache=createBoundedCache({limit:24});
 async function cachedMedia(path){
   const cached=mediaCache.get(path);if(cached)return cached;
   const response=await providerFile(path);const value={buffer:Buffer.from(await response.arrayBuffer()),type:response.headers.get('content-type')||'application/octet-stream'};
-  if(value.buffer.length<=3*1024*1024){mediaCache.set(path,value);if(mediaCache.size>24)mediaCache.delete(mediaCache.keys().next().value)}
+  if(value.buffer.length<=3*1024*1024)mediaCache.set(path,value);
   return value;
 }
-const instagramPreviewCache=new Map();
+const instagramPreviewCache=createBoundedCache({limit:40});
 const safeInstagramPage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/instagram\.com$/i.test(url.hostname)?url:null}catch{return null}};
 const safeInstagramImage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/(^|\.)(cdninstagram\.com|fbcdn\.net)$/i.test(url.hostname)?url:null}catch{return null}};
 const htmlMeta=(html,key)=>{
@@ -138,7 +151,7 @@ const htmlMeta=(html,key)=>{
     new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${key}["']`,'i'),
     new RegExp(`<meta[^>]+(?:property|name)=["']${key}["'][^>]+content=["']([^"']+)["']`,'i'),
   ];
-  for(const re of patterns){const m=html.match(re);if(m?.[1])return m[1].replace(/&/g,'&');}
+  for(const re of patterns){const m=html.match(re);if(m?.[1])return decodeHtmlEntities(m[1]);}
   return null;
 };
 
@@ -152,11 +165,18 @@ async function instagramPreview(value){
   const url=safeInstagramPage(value);if(!url)throw Object.assign(new Error('Invalid Instagram URL'),{status:400});
   const cached=instagramPreviewCache.get(url.href);if(cached)return cached;
   const ua='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
-  let html='';
+  let html='',fetchFailed=false;
   try{
     const response=await fetch(url,{headers:{'user-agent':ua,'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8','accept-language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(10000)});
     if(response.ok)html=await response.text();
-  }catch{}
+    else fetchFailed=true;
+  }catch(error){
+    // Keep the graceful empty-preview UX (a chat bubble shouldn't break over
+    // a failed preview fetch) but make the failure visible in logs — this
+    // used to fail silently, unlike the near-identical openGraphPreview path.
+    console.error('Instagram preview fetch failed:',error.message);
+    fetchFailed=true;
+  }
   
   let title=htmlMeta(html,'og:title')||htmlMeta(html,'twitter:title');
   let description=htmlMeta(html,'og:description')||htmlMeta(html,'twitter:description')||htmlMeta(html,'description');
@@ -188,48 +208,42 @@ async function instagramPreview(value){
   if(!description)description=null;
   
   const result={title,description,image:safeInstagramImage(image)?.href||null};
-  instagramPreviewCache.set(url.href,result);
-  if(instagramPreviewCache.size>40)instagramPreviewCache.delete(instagramPreviewCache.keys().next().value);
+  // A failed fetch (network blip, momentary block/rate-limit) was being
+  // cached as a permanent empty preview with no expiry — the exact fetch
+  // that failed once would never be retried again for that post. Retry soon
+  // instead; only cache long-lived once we actually got a real response.
+  instagramPreviewCache.set(url.href,result,fetchFailed?{ttlMs:instagramPreviewRetryMs}:undefined);
   return result;
 }
-const externalPreviewCache=new Map();
-const privateAddress=address=>address==="::1"||address==="0.0.0.0"||address.startsWith("fe80:")||address.startsWith("fc")||address.startsWith("fd")||/^10\./.test(address)||/^127\./.test(address)||/^169\.254\./.test(address)||/^192\.168\./.test(address)||/^172\.(1[6-9]|2\d|3[01])\./.test(address);
-async function safePublicUrl(value){try{const url=new URL(value);if(!/^https?:$/.test(url.protocol)||url.hostname==="localhost"||url.hostname.endsWith(".local"))return null;const direct=isIP(url.hostname);const addresses=direct?[{address:url.hostname}]:await lookup(url.hostname,{all:true,verbatim:true});return addresses.length&&addresses.every(item=>!privateAddress(item.address))?url:null}catch{return null}}
-function n8nWebhookUrl(value){try{const url=new URL(value);return url.protocol==="https:"&&url.hostname!=="localhost"?url:null}catch{return null}}
+const externalPreviewCache=createBoundedCache({limit:80});
+const safePublicUrl=async value=>(await validatePublicUrl(value))?.url||null;
+const n8nWebhookUrl=async value=>(await validatePublicUrl(value,{requireHttps:true}))?.url||null;
 async function openGraphPreview(value){
-  const url=await safePublicUrl(value);if(!url)throw Object.assign(new Error("Invalid public URL"),{status:400});
+  const validated=await validatePublicUrl(value);if(!validated)throw Object.assign(new Error("Invalid public URL"),{status:400});
+  const url=validated.url;
   const cached=externalPreviewCache.get(url.href);if(cached)return cached;
   const ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  const response=await fetch(url,{headers:{'user-agent':ua,'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},signal:AbortSignal.timeout(10000),redirect:'follow'});
+  const response=await fetchPinned(value,{headers:{'user-agent':ua,'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},signal:AbortSignal.timeout(10000)});
   if(!response.ok)throw Object.assign(new Error("Link preview unavailable"),{status:502});
   const html=(await response.text()).slice(0,1024*1024);
-  
+
   let title=htmlMeta(html,'og:title')||htmlMeta(html,'twitter:title');
   let description=htmlMeta(html,'og:description')||htmlMeta(html,'twitter:description')||htmlMeta(html,'description');
   let image=htmlMeta(html,'og:image')||htmlMeta(html,'twitter:image')||htmlMeta(html,'og:image:secure_url');
-  
+
   if(image&&!image.startsWith('http')){
     try{image=new URL(image,url.href).href}catch{image=null}
   }
-  
+
   // Expose a plain string in the Gakai preview model. Passing a URL object
   // across the JSON boundary was inconsistent between consumers and left the
   // React renderer without a usable image source.
   const safeImage=image?await safePublicUrl(image):null;
   const result={title,description,image:safeImage?.href||null};
   externalPreviewCache.set(url.href,result);
-  if(externalPreviewCache.size>80)externalPreviewCache.delete(externalPreviewCache.keys().next().value);
   return result;
 }
-function avatarUrl(value){
-  const raw=String(value||'').trim();
-  if(/^data:image\//i.test(raw))return raw;
-  try{
-    const url=new URL(raw,providerUrl);
-    if(url.pathname.startsWith('/api/files/'))return `/api/app/media?path=${encodeURIComponent(`${url.pathname}${url.search}`)}`;
-    return /^https?:$/.test(url.protocol)?url.href:null;
-  }catch{return null}
-}
+const avatarUrl = value => domainAvatarUrl(value, providerUrl);
 function account(s) { const rawStatus=s.status; return { id:s.name, label:store.accountLabels[s.name] || s.config?.metadata?.['gakai.label'] || s.config?.metadata?.['waha-home.label'] || s.me?.pushName || s.name, status:['WORKING','CONNECTED','READY'].includes(rawStatus)?'WORKING':rawStatus, phone:s.me?.id?.split('@')[0] || null, profile:s.me?.pushName || null }; }
 async function accountView(session){
   const view=account(session);if(!session.me?.id)return view;
@@ -237,26 +251,39 @@ async function accountView(session){
   try{const contacts=await providerRequest(`/api/contacts/all?session=${encodeURIComponent(session.name)}`);const self=(Array.isArray(contacts)?contacts:[]).find(contact=>contact.id===session.me.id||contact.number===session.me.id.split("@")[0])||{};const photo=await providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(session.me.id)}&session=${encodeURIComponent(session.name)}`);view.picture=avatarUrl(photo?.profilePictureURL||photo?.url);view.mentionNames=[view.label,view.profile,self.name,self.pushName,self.shortName,view.phone].filter(Boolean)}catch{view.picture=null;view.mentionNames=[view.label,view.profile,view.phone].filter(Boolean)}
   return view;
 }
-function normalizedTimestamp(value){const numeric=Number(value);if(Number.isFinite(numeric)&&numeric>0)return numeric>1e12?Math.floor(numeric/1000):numeric;const parsed=Date.parse(value);return Number.isFinite(parsed)?Math.floor(parsed/1000):0;}
 const config = label => label ? ({metadata:{'gakai.label':label}}) : {};
-function chatTimestamp(chat){return normalizedTimestamp(chat.lastMessage?.timestamp || chat.lastMessage?._data?.timestamp || chat._chat?.lastMessage?.timestamp || chat._chat?.lastMessage?._data?.timestamp || chat.timestamp || chat._chat?.timestamp || 0)}
-function chatOverview(chat) {
-  return { id:chat.id, name:chat.name, picture:avatarUrl(chat.picture), unreadCount:Number(chat.unreadCount ?? chat.unreadMessagesCount ?? chat._chat?.unreadCount ?? 0) || 0,
-    timestamp:chatTimestamp(chat),
-    lastMessage:chat.lastMessage ? {body:chat.lastMessage.body || '', text:chat.lastMessage.text || '', timestamp:normalizedTimestamp(chat.lastMessage.timestamp || chat.lastMessage._data?.timestamp || 0), hasMedia:Boolean(chat.lastMessage.hasMedia)} : null };
-}
-const chatPictureCache=new Map();
+const chatOverview = chat => domainChatOverview(chat, providerUrl);
+const chatPictureCache=createBoundedCache({limit:500});
 const chatPictureCacheTtl=24*60*60*1000;
 function chatPictureFor(session,chatId){
   const key=`${session}:${chatId}`,cached=chatPictureCache.get(key);
-  if(cached&&cached.expiresAt>Date.now())return cached.value;
-  const entry={value:null,expiresAt:Date.now()+5*60*1000};
-  const task=providerRequest(`/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/picture?refresh=true`).then(picture=>{entry.expiresAt=Date.now()+chatPictureCacheTtl;return avatarUrl(picture?.profilePictureURL||picture?.url||picture?.profilePicture||picture)}).catch(()=>null);
-  entry.value=task;chatPictureCache.set(key,entry);
-  if(chatPictureCache.size>500)chatPictureCache.delete(chatPictureCache.keys().next().value);
+  if(cached)return cached;
+  const task=providerRequest(`/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/picture?refresh=true`).then(picture=>{
+    // Extend a resolved lookup's lifetime well past the short in-flight TTL
+    // below, so a successful picture stays cached long-term instead of being
+    // re-fetched every few minutes.
+    chatPictureCache.set(key,task,{ttlMs:chatPictureCacheTtl});
+    return avatarUrl(picture?.profilePictureURL||picture?.url||picture?.profilePicture||picture);
+  }).catch(()=>null);
+  chatPictureCache.set(key,task,{ttlMs:5*60*1000});
   return task;
 }
-async function enrichChatOverview(session,chat){const view=chatOverview(chat);if(!view.picture&&view.id)view.picture=await chatPictureFor(session,view.id);return view}
+async function enrichChatOverview(session,chat){
+  const view=chatOverview(chat);
+  if(!view.picture&&view.id)view.picture=await chatPictureFor(session,view.id);
+  // Same bug as enrichMessage's main body, different location: the inbox
+  // list's "last message" preview text never resolved @123456 mentions
+  // either — it went straight from chatOverview() to the client untouched.
+  if(view.lastMessage){
+    const mentionIds=extractMentionIds(view.lastMessage.body,view.lastMessage.text);
+    if(mentionIds.length){
+      const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContact(session,`${id}@lid`)]));
+      const labels=new Map(contacts.map(([id,contact])=>[id,contact.name||String(contact.id||'').replace(/@(c|s|g)\.us$/,'')]).filter(([,label])=>label));
+      view.lastMessage={...view.lastMessage,body:resolveMentionLabels(view.lastMessage.body,labels),text:resolveMentionLabels(view.lastMessage.text,labels)};
+    }
+  }
+  return view;
+}
 async function mapWithConcurrency(values,limit,worker){const result=new Array(values.length);let next=0;await Promise.all(Array.from({length:Math.min(limit,values.length)},async()=>{while(next<values.length){const index=next++;result[index]=await worker(values[index])}}));return result}
 async function allChatOverviews(session){
   const limit=100,all=[];let offset=0;
@@ -268,45 +295,22 @@ async function allChatOverviews(session){
     offset+=page.length;
   }
 }
-function systemMessageView(message){
-  const data=message._data||{},type=String(message.type||data.type||data.subtype||'').toLowerCase();
-  if(type==='call_log'){
-    const video=Boolean(data.isVideoCall),outcome=String(data.callOutcome||'').replace(/_/g,' ').toLowerCase();
-    const duration=Number(data.callDuration||0),minutes=Math.floor(duration/60),seconds=duration%60;
-    const length=duration>0?` · ${minutes?`${minutes}m `:''}${seconds}s`:'';
-    return {kind:'call',label:`${video?'Video':'Voice'} call${outcome?` · ${outcome}`:''}${length}`};
-  }
-  if(type==='gp2')return {kind:'group-event',label:'Group activity'};
-  if(type==='e2e_notification')return {kind:'security',label:'Messages are end-to-end encrypted'};
-  return type?{kind:'system',label:'WhatsApp system message'}:null;
-}
-function providerMessageId(value){if(typeof value==='string'||typeof value==='number')return String(value);if(!value||typeof value!=='object')return null;const id=value._serialized||value.serialized||value.id;return typeof id==='string'||typeof id==='number'?String(id):null}
-function replyView(reply){if(!reply||typeof reply!=='object')return null;return {id:providerMessageId(reply.id),body:reply.body||reply.text||'',hasMedia:Boolean(reply.hasMedia||reply.media),participant:reply.participant||null}}
-function messageView(message) {
-  const participant=message.participant && typeof message.participant==='object'?message.participant:{};
-  const senderId=participant.id||message.participant||message.author||message.from||null;
-  const senderName=participant.name||message.participantName||message.authorName||message.pushName||message.notifyName||message._data?.notifyName||null;
-  const senderPicture=avatarUrl(participant.picture||message.participantPicture||message.authorPicture||message.profilePictureUrl);
-  const rawPreview=message.linkPreview||message.preview||message._data?.linkPreview||(message._data?.links?.[0]?{url:message._data.links[0].link||message._data.links[0].url||message.body||message.text||"",title:message._data.title||"",description:message._data.description||message._data.text||"",image:message._data.botReelPluginThumbnailCdnUrl||message._data.thumbnailHQ||message._data.thumbnailUrl||null}:null);
-  // Always pass URL if available so client can fetch OG data; only omit if no URL at all
-  const hasUrl = rawPreview && (rawPreview.url || rawPreview.canonicalUrl || rawPreview.link);
-  const hasContent = rawPreview && (rawPreview.title || rawPreview.titleText || rawPreview.description || rawPreview.desc || rawPreview.thumbnail || rawPreview.thumbnailUrl || rawPreview.image || rawPreview.imageUrl);
-  return { id:providerMessageId(message.id)||message.id, timestamp:normalizedTimestamp(message.timestamp || message._data?.timestamp || 0), fromMe:Boolean(message.fromMe), body:message.body || '', text:message.text || '', system:systemMessageView(message), replyTo:replyView(message.replyTo||message.quotedMsg||message._data?.replyTo),
-    hasMedia:Boolean(message.hasMedia), media:message.media ? {url:message.media.url || null, mimetype:message.media.mimetype || null, filename:message.media.filename || null} : null, mediaUrl:message.mediaUrl || null, vCards:Array.isArray(message.vCards)?message.vCards:(Array.isArray(message._data?.vCards)?message._data.vCards:[]), sender:senderId?{id:senderId,name:senderName,picture:senderPicture}:null, linkPreview:hasUrl?{url:rawPreview.url||rawPreview.canonicalUrl||rawPreview.link||message.body||message.text||'',title:hasContent?(rawPreview.title||rawPreview.titleText||''):'',description:hasContent?(rawPreview.description||rawPreview.desc||''):'',image:hasContent?(rawPreview.thumbnail||rawPreview.thumbnailUrl||rawPreview.image||rawPreview.imageUrl||null):null}:null, ack:message.ack, ackName:message.ackName };
-}
-const contactsListCache=new Map();
+const messageView = message => domainMessageView(message, providerUrl);
+const profileCacheTtl=5*60*1000;
+// Previously never expired, unlike every sibling cache here — a contact's
+// display name could go stale for the life of the process.
+const contactsListCache=createBoundedCache({limit:50,ttlMs:profileCacheTtl});
 async function contactsFor(session){
   const cached=contactsListCache.get(session);if(cached)return await cached;
-  const task=providerRequest(`/api/contacts/all?session=${encodeURIComponent(session)}`).catch(error=>{contactsListCache.delete(session);throw error});contactsListCache.set(session,task);if(contactsListCache.size>50)contactsListCache.delete(contactsListCache.keys().next().value);return await task;
+  const task=providerRequest(`/api/contacts/all?session=${encodeURIComponent(session)}`).catch(error=>{contactsListCache.delete(session);throw error});contactsListCache.set(session,task);return await task;
 }
-const contactCache=new Map();
-const profilePictureCache=new Map();
-const accountIdentityCache=new Map();
-const profileCacheTtl=5*60*1000;
-async function accountIdentityFor(session){const cached=accountIdentityCache.get(session);if(cached&&cached.expiresAt>Date.now())return cached.id;try{const value=await providerRequest(`/api/sessions/${encodeURIComponent(session)}`),id=String(value?.me?.id||'');accountIdentityCache.set(session,{id,expiresAt:Date.now()+profileCacheTtl});return id}catch{return ''}}
-function profilePictureFor(session,contactId){const key=`${session}:${contactId}`,cached=profilePictureCache.get(key);if(cached&&cached.expiresAt>Date.now())return cached.value;profilePictureCache.delete(key);const task=providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`);const entry={value:task,expiresAt:Date.now()+profileCacheTtl};profilePictureCache.set(key,entry);task.catch(()=>{if(profilePictureCache.get(key)===entry)profilePictureCache.delete(key)});if(profilePictureCache.size>500)profilePictureCache.delete(profilePictureCache.keys().next().value);return task;}
+const contactCache=createBoundedCache({limit:500,ttlMs:profileCacheTtl});
+const profilePictureCache=createBoundedCache({limit:500,ttlMs:profileCacheTtl});
+const accountIdentityCache=createBoundedCache({limit:50,ttlMs:profileCacheTtl});
+async function accountIdentityFor(session){const cached=accountIdentityCache.get(session);if(cached)return cached;try{const value=await providerRequest(`/api/sessions/${encodeURIComponent(session)}`),id=String(value?.me?.id||'');accountIdentityCache.set(session,id);return id}catch{return ''}}
+function profilePictureFor(session,contactId){const key=`${session}:${contactId}`,cached=profilePictureCache.get(key);if(cached)return cached;const task=providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`);profilePictureCache.set(key,task);task.catch(()=>{if(profilePictureCache.get(key)===task)profilePictureCache.delete(key)});return task;}
 async function resolveContact(session,rawId){
-  const key=`${session}:${rawId}`,cached=contactCache.get(key);if(cached&&cached.expiresAt>Date.now())return cached.value;contactCache.delete(key);
+  const key=`${session}:${rawId}`,cached=contactCache.get(key);if(cached)return cached;
   let contactId=String(rawId||'');
   try{
     if(contactId.endsWith('@lid')){
@@ -317,35 +321,97 @@ async function resolveContact(session,rawId){
     const contacts=await contactsFor(session);
     const contact=(Array.isArray(contacts)?contacts:[]).find(item=>item.id===contactId||item.number===contactId.replace(/@.*$/,'')||item.lid===rawId)||{};
     const picture=await profilePictureFor(session,contactId);
-    const phone=contact.number||contact.phoneNumber||contact.phone||(contactId.endsWith("@c.us")?contactId.slice(0,-5):null); const value={id:contactId,phone:phone?String(phone).replace(/[^0-9]/g,""):null,name:contact.name||contact.pushName||contact.shortName||contact.verifiedName||null,status:contact.status||contact.about||contact.description||null,picture:avatarUrl(picture?.profilePictureURL||picture?.url)}; contactCache.set(key,{value,expiresAt:Date.now()+profileCacheTtl}); if(contactCache.size>500)contactCache.delete(contactCache.keys().next().value); return value;
+    const phone=contact.number||contact.phoneNumber||contact.phone||(contactId.endsWith("@c.us")?contactId.slice(0,-5):null); const value={id:contactId,phone:phone?String(phone).replace(/[^0-9]/g,""):null,name:contact.name||contact.pushName||contact.shortName||contact.verifiedName||null,status:contact.status||contact.about||contact.description||null,picture:avatarUrl(picture?.profilePictureURL||picture?.url)}; contactCache.set(key,value); return value;
   }catch{const value={id:contactId,phone:contactId.endsWith("@c.us")?contactId.slice(0,-5):null,name:null,picture:null};return value}
 }
 const automationSummary=subscription=>({id:subscription.id,accountId:subscription.accountId,name:subscription.name,url:subscription.url,productionUrl:subscription.productionUrl||subscription.url,testUrl:subscription.testUrl||null,testPhone:subscription.testPhone||null,enabled:subscription.enabled,events:subscription.events,secret:subscription.secret,createdAt:subscription.createdAt,lastDelivery:subscription.lastDelivery||null});
-async function automationFetch(subscription,event){
-  const request=url=>fetch(url,{method:'POST',headers:{'content-type':'application/json','x-gakai-secret':subscription.secret,'x-gakai-event-id':event.id,'user-agent':'Gakai/1.0'},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});
-  let response=await request(subscription.url);
-  if(!response.ok&&event.source==='test'&&response.status===404&&subscription.url.includes('/webhook/'))response=await request(subscription.url.replace('/webhook/','/webhook-test/'));
+async function automationFetch(subscription,event,{url:overrideUrl}={}){
+  const targetUrl=overrideUrl||subscription.url;
+  // 45s, not automationFetch's old 10s: a workflow that responds
+  // synchronously with a reply (see deliverAutomation) holds this same
+  // connection open through however long its own logic — an LLM call in
+  // particular — takes to finish.
+  const request=url=>fetchPinned(url,{requireHttps:true,method:'POST',headers:{'content-type':'application/json','x-gakai-secret':subscription.secret,'x-gakai-event-id':event.id,'user-agent':'Gakai/1.0'},body:JSON.stringify(event),signal:AbortSignal.timeout(45000)});
+  let response=await request(targetUrl);
+  if(!response.ok&&event.source==='test'&&response.status===404&&targetUrl.includes('/webhook/'))response=await request(targetUrl.replace('/webhook/','/webhook-test/'));
   return response;
 }
-async function deliverAutomation(subscription,event){subscription.secret=subscription.secret||ensureN8nKey(subscription.accountId);
+// If the automation responded synchronously with a reply, send it back
+// through WhatsApp the same way a native LLM reply does. This is what lets
+// an automation (the Gakai-managed n8n templates, or any hand-authored
+// webhook) generate a reply without ever calling back into Gakai's own
+// API — Gakai already made this request and is the only side that needs to
+// know how to reach the WhatsApp provider.
+// Returns the reply text that was sent (or null if there was nothing to
+// send) so callers — in particular the "Send test message" endpoint — can
+// show the caller what the automation actually produced, not just whether
+// the webhook call succeeded.
+async function sendAutomationReply(response,accountId,chatId){
+  let reply='';
+  try{const data=await response.json();reply=String(data?.reply||data?.text||data?.output||'').trim();}catch{return null;}
+  if(!reply)return null;
+  if(!chatId)return reply;
+  try{await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:accountId,chatId,text:reply})});}
+  catch(error){console.error('Failed to send automation reply:',error.message);}
+  return reply;
+}
+// A 404 from an n8n webhook path is most often the ordinary "this workflow
+// exists but was never activated/published" case, not a wrong URL — n8n's
+// own JSON error body already says so via its `hint`/`message` fields, so
+// surface that instead of a bare, confusing status code.
+async function describeWebhookFailure(response){
+  let detail='';
+  try{const body=await response.json();detail=String(body?.hint||body?.message||'').trim();}catch{}
+  if(response.status===404)return detail?`This n8n workflow isn't reachable: ${detail}`:"This n8n workflow isn't published yet. Activate it in n8n (the toggle in the top-right of the workflow editor), then try again.";
+  return detail?`Webhook returned ${response.status}: ${detail}`:`Webhook returned ${response.status}`;
+}
+async function deliverAutomation(subscription,event,options={}){subscription.secret=subscription.secret||ensureN8nKey(subscription.accountId);
   const started=Date.now();
-  try{const response=await automationFetch(subscription,event);subscription.lastDelivery={at:new Date().toISOString(),ok:response.ok,status:response.status,durationMs:Date.now()-started};if(!response.ok)throw new Error(`Webhook returned ${response.status}`)}
+  try{
+    const response=await automationFetch(subscription,event,options);
+    subscription.lastDelivery={at:new Date().toISOString(),ok:response.ok,status:response.status,durationMs:Date.now()-started};
+    if(!response.ok)throw new Error(await describeWebhookFailure(response));
+    return await sendAutomationReply(response,subscription.accountId,event.chat?.id);
+  }
   catch(error){subscription.lastDelivery={at:new Date().toISOString(),ok:false,error:error.message||"Delivery failed",durationMs:Date.now()-started};throw error}
   finally{await persist()}
 }
+// The Gakai-managed n8n subscriptions (created by the Settings n8n connect
+// flow) are meant for messages the account owner needs to act on
+// personally — a direct message, or a group message where they're
+// explicitly @-tagged — not every message in every group the account
+// happens to be in. A hand-authored automation added through the generic
+// automations API is unaffected: that's a deliberate integration the user
+// built for their own purpose, which may well want every message.
+const N8N_REPLY_SUBSCRIPTION_NAMES=new Set(['n8n auto-connect','n8n auto-connect (AI Agent)']);
+
 async function dispatchAutomationEvent(payload){
   if(payload?.event!=="message"||payload?.payload?.fromMe)return;const accountId=String(payload.session||"");if(!accountId)return;
   const message=messageView(payload.payload||{}),chatId=payload.payload?.from||payload.payload?.chatId||null,kind=String(chatId||"").endsWith("@g.us")?"group":"direct";
+  // Defends against the same WAHA/WEBJS resync-touch phenomenon found in the
+  // inbox filter (a chat's timestamp bumped with no real message behind it):
+  // a "message" event with no body, text, or media isn't a real message —
+  // don't fire an AI reply or automation for it either way.
+  if(!message.body&&!message.text&&!message.hasMedia)return;
   const chat={id:chatId,kind,name:payload.payload?.chatName||payload.payload?._data?.chatName||payload.payload?._data?.notifyName||null};
   if(message.sender?.id){const contact=await resolveContact(accountId,message.sender.id);message.sender={...message.sender,phone:contact.phone||null,name:message.sender.name||contact.name||null};if(kind==="direct")chat.phone=contact.phone||null;}
-  const event={id:`evt_${payload.payload?.id||randomBytes(12).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
+  // payload.payload.id is frequently a structured WAHA id object, not a
+  // string — `${object}` stringifies to "[object Object]" for every message,
+  // which collided every inbound event onto the same app_events primary key
+  // after the first one. Resolve it the same way the rest of the codebase does.
+  const event={id:`evt_${providerMessageId(payload.payload?.id)||randomBytes(12).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
   // Persist before notifying the browser or downstream automation. This gives
   // reconnecting clients a small durable replay window and avoids exposing raw
   // provider payloads outside the adapter boundary.
   if (!recordAppEvent(event)) return;
+  let ownMentioned=kind==="direct";
+  if(!ownMentioned&&Array.isArray(payload.payload?._data?.mentionedJidList)&&payload.payload._data.mentionedJidList.length){
+    ownMentioned=mentionsIdentity(payload.payload._data.mentionedJidList,await accountIdentityFor(accountId));
+  }
+  const subscriptions=store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)&&(!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)||ownMentioned));
   await Promise.allSettled([
-    ...store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)).map(subscription=>deliverAutomation(subscription,event)),
-    dispatchLLMReply(accountId,event)
+    ...subscriptions.map(subscription=>deliverAutomation(subscription,event)),
+    hasEnabledAgenticN8n(accountId)?Promise.resolve():dispatchLLMReply(accountId,event)
   ]);
 }
 
@@ -399,6 +465,25 @@ function makeUUID() {
   return `${b.slice(0,8)}-${b.slice(8,12)}-${b.slice(12,16)}-${b.slice(16,20)}-${b.slice(20,32)}`;
 }
 function llmConfig(accountId){return store.llmConfigs.find(c=>c.accountId===accountId)||null;}
+// An account can have both native LLM auto-reply and a generated n8n AI
+// Agent workflow configured. When both are live, the n8n AI Agent wins and
+// native dispatch is skipped, so an inbound message never gets two
+// independent AI replies.
+function hasEnabledAgenticN8n(accountId){return store.automationSubscriptions.some(item=>item.accountId===accountId&&item.enabled&&item.name==='n8n auto-connect (AI Agent)');}
+// Native LLM replies and the n8n AI Agent workflow are two faces of the same
+// thing — Gakai answering automatically using the configured LLM proxy — so
+// only one may be live at a time. The plain "standard" n8n automation is a
+// separate, independent concept: a generic webhook subscription the user
+// customizes for their own purposes in n8n (its default Set node just echoes
+// the inbound message back as a placeholder, but what it actually does is
+// entirely up to the workflow the user builds). Enabling or disabling it
+// must never touch native or agentic replies, and vice versa — each of the
+// three toggles only ever affects itself and, for native/agentic, the other
+// one of that pair.
+function disableTheOtherAiReplyPath(accountId,keep){
+  if(keep!=='native'){const config=llmConfig(accountId);if(config)config.nativeEnabled=false;}
+  if(keep!=='agentic'){const sub=store.automationSubscriptions.find(item=>item.accountId===accountId&&item.name==='n8n auto-connect (AI Agent)');if(sub)sub.enabled=false;}
+}
 const llmProviders=new Set(['omniroute','litellm']);
 function inferLlmProvider(baseUrl,requested){
   if(llmProviders.has(requested))return requested;
@@ -427,7 +512,6 @@ function llmRequestBody(config,messages,extra={}){
 }
 const defaultAssistantInstructions=`You are the WhatsApp assistant for this business.
 
-Reply only to messages from approved phone numbers: +15551234567 and +15557654321. For everyone else, do not send a reply.
 Use a friendly, warm, professional tone. Keep replies concise and natural for WhatsApp. Answer customer questions, help with scheduling and next steps, and ask one clear follow-up question when information is missing.
 Do not make up facts, prices, availability, or promises. If a request needs a human, say that you will pass it on. Reply with only the message text—no labels, markdown, or explanation.`;
 function assistantInstructions(value){return String(value||'').trim()||defaultAssistantInstructions;}
@@ -449,6 +533,122 @@ async function syncN8nLlmCredential(connection,n8nApiKey,config){
   }
 }
 
+// Builds the node/connection graph for one Gakai-managed n8n workflow:
+// Webhook -> [Set | AI Agent] -> Respond to Webhook.
+//
+// The workflow replies by responding synchronously to the same inbound
+// webhook call Gakai already made to deliver the message — n8n's Webhook
+// node holds the HTTP connection open (responseMode: 'responseNode') until
+// the "Respond to Webhook" node runs, and its JSON body becomes the
+// response Gakai reads back. This deliberately avoids an *outbound* call
+// from n8n back into Gakai's own API: that direction requires n8n to know
+// an address for Gakai, and there is no address Gakai can hand it that's
+// guaranteed reachable — not a LAN IP, not a `.local` hostname, not even
+// 127.0.0.1 (which from n8n's own process always means n8n's own host, never
+// Gakai's). Gakai is always the one making the request here, and it already
+// knows how to reach the WhatsApp provider — so only Gakai ever needs to
+// know an address, regardless of whether n8n runs on the same machine, the
+// same LAN, or n8n Cloud on the other side of the world.
+function buildN8nWorkflowGraph({kind,webhookPath,inboundCred,accountLlm,llmCred,systemPrompt}){
+  const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),respondNodeId=makeUUID(),llmNodeId=makeUUID();
+  const webhookNode={
+    id:webhookNodeId,
+    name:'Webhook',
+    type:'n8n-nodes-base.webhook',
+    typeVersion:2.1,
+    position:[250,300],
+    parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'responseNode',options:{}},
+    credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}
+  };
+  const respondNode={
+    id:respondNodeId,
+    name:'Respond to Webhook',
+    type:'n8n-nodes-base.respondToWebhook',
+    typeVersion:1.4,
+    position:[1000,300],
+    parameters:{
+      respondWith:'json',
+      responseBody:"={{ { reply: $json.output || $json.reply || $json.text || $json.message_body || '' } }}"
+    }
+  };
+  let nodes,connections;
+  if(accountLlm){
+    const agentNode={
+      id:middleNodeId,
+      name:'AI Agent',
+      type:'@n8n/n8n-nodes-langchain.agent',
+      typeVersion:3.1,
+      position:[625,300],
+      parameters:{
+        promptType:'define',
+        text:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}",
+        options:{systemMessage:systemPrompt}
+      }
+    };
+    const llmNode={
+      id:llmNodeId,
+      name:'OpenAI Chat Model',
+      type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',
+      typeVersion:1.3,
+      position:[625,500],
+      parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},
+      credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}
+    };
+    nodes=[webhookNode,agentNode,llmNode,respondNode];
+    connections={Webhook:{main:[[{node:'AI Agent',type:'main',index:0}]]},'OpenAI Chat Model':{ai_languageModel:[[{node:'AI Agent',type:'ai_languageModel',index:0}]]},'AI Agent':{main:[[{node:'Respond to Webhook',type:'main',index:0}]]}};
+  }else{
+    const setNode={
+      id:middleNodeId,
+      name:'Set',
+      type:'n8n-nodes-base.set',
+      typeVersion:3.4,
+      position:[625,300],
+      parameters:{
+        assignments:{assignments:[
+          {id:makeUUID(),name:'message_body',type:'string',value:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}"}
+        ]},
+        options:{}
+      }
+    };
+    nodes=[webhookNode,setNode,respondNode];
+    connections={Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Respond to Webhook',type:'main',index:0}]]}};
+  }
+  return {nodes,connections};
+}
+
+// Upgrades an already-created workflow still using the old outbound
+// "Send Reply" HTTP node to the current synchronous-response shape, reusing
+// its existing inbound credential and (for the agentic kind) LLM credential
+// so nothing needs re-authorizing. A no-op if the workflow already has no
+// Send Reply node. Cleans up the now-orphaned outbound bearer credential.
+async function repairN8nWorkflowGraph(n8nUrl,n8nApiKey,connection,accountId){
+  const workflow=await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`);
+  const webhookNode=workflow?.nodes?.find(node=>node.name==='Webhook'&&node.type==='n8n-nodes-base.webhook');
+  const oldHttpNode=workflow?.nodes?.find(node=>node.name==='Send Reply'&&node.type==='n8n-nodes-base.httpRequest');
+  if(!webhookNode||!oldHttpNode)return false;
+  const inboundCred=webhookNode.credentials?.httpHeaderAuth;
+  if(!inboundCred?.id)return false;
+  const accountLlm=connection.kind==='agentic'?llmConfig(accountId):null;
+  let llmCred=null;
+  if(accountLlm){
+    const modelNode=workflow.nodes.find(node=>node.name==='OpenAI Chat Model'&&node.type==='@n8n/n8n-nodes-langchain.lmChatOpenAi');
+    llmCred=modelNode?.credentials?.openAiApi;
+    if(!llmCred?.id)return false;
+  }
+  const {nodes,connections}=buildN8nWorkflowGraph({
+    kind:connection.kind,
+    webhookPath:webhookNode.parameters?.path,
+    inboundCred,
+    accountLlm,
+    llmCred,
+    systemPrompt:accountLlm?assistantInstructions(accountLlm.systemPrompt):undefined
+  });
+  await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({name:workflow.name,nodes,connections,settings:workflow.settings||{executionOrder:'v1'}})});
+  await publishN8nWorkflow(n8nUrl,n8nApiKey,connection.workflowId);
+  if(oldHttpNode.credentials?.httpBearerAuth?.id)await deleteN8nCredentialQuietly(n8nUrl,n8nApiKey,oldHttpNode.credentials.httpBearerAuth.id);
+  return true;
+}
+
 // Keep Gakai's LLM settings and the generated n8n AI Agent in lockstep.
 // We fetch first so any customer edits to other workflow nodes remain intact.
 async function syncAgenticN8nInstructions(accountId,config){
@@ -456,6 +656,10 @@ async function syncAgenticN8nInstructions(accountId,config){
   if(!connection)return false;
   const n8nApiKey=decryptSecret(connection.n8nApiKeyEncrypted);
   if(!n8nApiKey)throw new Error('Reauthorize n8n before updating the AI Agent settings');
+  // Upgrade a legacy workflow shape (the old direct-callback Send Reply
+  // node) before touching anything else, so the fetch below sees the
+  // current node names.
+  await repairN8nWorkflowGraph(connection.n8nUrl,n8nApiKey,connection,accountId).catch(error=>console.error('Failed to upgrade n8n AI Agent workflow shape:',error.message));
   const workflow=await n8nRequest(connection.n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`);
   const agent=workflow?.nodes?.find(node=>node.name==='AI Agent'&&node.type==='@n8n/n8n-nodes-langchain.agent');
   const model=workflow?.nodes?.find(node=>node.name==='OpenAI Chat Model'&&node.type==='@n8n/n8n-nodes-langchain.lmChatOpenAi');
@@ -472,111 +676,33 @@ async function syncAgenticN8nInstructions(accountId,config){
   return true;
 }
 
-// Builds one n8n workflow (Webhook -> [Set | AI Agent] -> Send Reply) and its
-// dedicated credentials. Used both for the initial n8n connect and for creating
-// the paired AI Agent workflow once LiteLLM is configured. Never mutates an
-// existing n8n workflow; each call creates a brand-new one.
-async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}){
+// Builds one n8n workflow (Webhook -> [Set | AI Agent] -> Respond to Webhook)
+// and its dedicated credentials. Used both for the initial n8n connect and
+// for creating the paired AI Agent workflow once LiteLLM is configured.
+// Never mutates an existing n8n workflow; each call creates a brand-new one.
+async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,kind}){
   const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
-  const integrationToken='wh_n8n_'+randomBytes(24).toString('base64url');
-  let inboundCred=null,outboundCred=null,llmCred=null,workflow=null;
+  let inboundCred=null,llmCred=null,workflow=null;
   try{
     inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Inbound Secret – ${accountId}${kind==='agentic'?' (AI Agent)':''}`,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});
-    outboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Bearer Token – ${accountId}${kind==='agentic'?' (AI Agent)':''}`,type:'httpBearerAuth',data:{token:integrationToken}})});
 
     const webhookPath='gakai-'+accountId.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24)+(kind==='agentic'?'-ai':'');
     let accountLabel=accountId;
     try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===accountId);if(session)accountLabel=store.accountLabels[accountId]||session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||accountId;}catch{}
     const workflowName=`Gakai – ${accountLabel}${kind==='agentic'?' (AI Agent)':''}`;
-    const webhookNodeId=makeUUID(),middleNodeId=makeUUID(),httpNodeId=makeUUID(),llmNodeId=makeUUID();
     const accountLlm=kind==='agentic'?llmConfig(accountId):null;
-    let nodes,connections;
-
-    const webhookNode={
-      id:webhookNodeId,
-      name:'Webhook',
-      type:'n8n-nodes-base.webhook',
-      typeVersion:2.1,
-      position:[250,300],
-      parameters:{httpMethod:'POST',path:webhookPath,authentication:'headerAuth',responseMode:'onReceived',options:{}},
-      credentials:{httpHeaderAuth:{id:String(inboundCred.id),name:inboundCred.name}}
-    };
-
-    const httpNode={
-      id:httpNodeId,
-      name:'Send Reply',
-      type:'n8n-nodes-base.httpRequest',
-      typeVersion:4.2,
-      position:[1000,300],
-      parameters:{
-        method:'POST',
-        url:`${publicUrl}/api/integrations/v1/messages`,
-        authentication:'genericCredentialType',
-        genericAuthType:'httpBearerAuth',
-        sendBody:true,
-        contentType:'json',
-        specifyBody:'keypair',
-        bodyParameters:{
-          parameters:[
-            {
-              name:'chatId',
-              value:"={{ $('Webhook').item.json.body.chat.id }}"
-            },
-            {
-              name:'text',
-              value:"={{ $json.output || $json.reply || $json.text || $json.message_body || '' }}"
-            }
-          ]
-        },
-        options:{}
-      },
-      credentials:{httpBearerAuth:{id:String(outboundCred.id),name:outboundCred.name}}
-    };
-
     if(accountLlm){
       // n8n's OpenAI credential uses `url` for an OpenAI-compatible base endpoint.
       llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${accountId}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,url:accountLlm.baseUrl}})});
-      const systemPrompt=assistantInstructions(accountLlm.systemPrompt);
-      const agentNode={
-        id:middleNodeId,
-        name:'AI Agent',
-        type:'@n8n/n8n-nodes-langchain.agent',
-        typeVersion:3.1,
-        position:[625,300],
-        parameters:{
-          promptType:'define',
-          text:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}",
-          options:{systemMessage:systemPrompt}
-        }
-      };
-      const llmNode={
-        id:llmNodeId,
-        name:'OpenAI Chat Model',
-        type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',
-        typeVersion:1.3,
-        position:[625,500],
-        parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},
-        credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}
-      };
-      nodes=[webhookNode,agentNode,llmNode,httpNode];
-      connections={Webhook:{main:[[{node:'AI Agent',type:'main',index:0}]]},'OpenAI Chat Model':{ai_languageModel:[[{node:'AI Agent',type:'ai_languageModel',index:0}]]},'AI Agent':{main:[[{node:'Send Reply',type:'main',index:0}]]}};
-    }else{
-      const setNode={
-        id:middleNodeId,
-        name:'Set',
-        type:'n8n-nodes-base.set',
-        typeVersion:3.4,
-        position:[625,300],
-        parameters:{
-          assignments:{assignments:[
-            {id:makeUUID(),name:'message_body',type:'string',value:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}"}
-          ]},
-          options:{}
-        }
-      };
-      nodes=[webhookNode,setNode,httpNode];
-      connections={Webhook:{main:[[{node:'Set',type:'main',index:0}]]},Set:{main:[[{node:'Send Reply',type:'main',index:0}]]}};
     }
+    const {nodes,connections}=buildN8nWorkflowGraph({
+      kind,
+      webhookPath,
+      inboundCred,
+      accountLlm,
+      llmCred,
+      systemPrompt:accountLlm?assistantInstructions(accountLlm.systemPrompt):undefined
+    });
 
     const workflowBody={name:workflowName,nodes,connections,settings:{executionOrder:'v1'}};
     workflow=await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(workflowBody)});
@@ -590,14 +716,13 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}
     return {
       workflowId,workflowName,
       webhookUrl:`${n8nBaseUrl}/webhook/${webhookPath}`,
-      inboundSecret,integrationToken,activationWarning,
-      inboundCredentialId:String(inboundCred.id),outboundCredentialId:String(outboundCred.id),llmCredentialId:llmCred?String(llmCred.id):null,
+      inboundSecret,activationWarning,
+      inboundCredentialId:String(inboundCred.id),llmCredentialId:llmCred?String(llmCred.id):null,
       agentic:Boolean(accountLlm)
     };
   }catch(err){
     await deleteN8nWorkflowQuietly(n8nBaseUrl,n8nApiKey,workflow?.id);
     await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,llmCred?.id);
-    await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,outboundCred?.id);
     await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,inboundCred?.id);
     throw err;
   }
@@ -606,7 +731,7 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,publicUrl,kind}
 // Creates the paired AI Agent workflow for an account that already has a
 // standard n8n connection, reusing the same n8n instance/API key on file.
 // Leaves the existing standard workflow untouched. Routes live delivery to
-async function createAgenticN8nWorkflow(accountId,req){
+async function createAgenticN8nWorkflow(accountId){
   const standard=store.n8nConnections.find(c=>c.accountId===accountId&&c.kind==='standard');
   if(!standard)throw Object.assign(new Error('No existing n8n integration is available'),{status:409});
   if(store.n8nConnections.some(c=>c.accountId===accountId&&c.kind==='agentic'))throw Object.assign(new Error('The AI workflow already exists'),{status:409});
@@ -614,22 +739,23 @@ async function createAgenticN8nWorkflow(accountId,req){
   if(!n8nApiKey)throw Object.assign(new Error('Reauthorize the existing n8n integration with its API key before creating an AI workflow'),{status:409});
   // Verify the stored n8n connection before creating anything.
   await n8nRequest(standard.n8nUrl,n8nApiKey,'/workflows?limit=1');
-  const publicUrl=requestPublicUrl(req);
-  const built=await createN8nWorkflow({n8nBaseUrl:standard.n8nUrl,n8nApiKey,accountId,publicUrl,kind:'agentic'});
+  const built=await createN8nWorkflow({n8nBaseUrl:standard.n8nUrl,n8nApiKey,accountId,kind:'agentic'});
   const connectedAt=new Date().toISOString();
-  store.keys=store.keys.filter(k=>!(k.accountId===accountId&&k.name==='n8n auto-connect (AI Agent)'));
-  store.keys.push({id:randomBytes(8).toString('hex'),accountId,name:'n8n auto-connect (AI Agent)',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:built.integrationToken,hash:hash(built.integrationToken)});
   // The generated AI workflow is deliberately isolated: it receives no live
   // events until a later explicit activation step, and never alters the
   // existing n8n workflow or its automation subscription.
   store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.accountId===accountId&&item.name==='n8n auto-connect (AI Agent)'));
   store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId,name:'n8n auto-connect (AI Agent)',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:false,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
-  store.n8nConnections.push({accountId,kind:'agentic',n8nUrl:standard.n8nUrl,n8nApiKeyEncrypted:standard.n8nApiKeyEncrypted,workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
+  store.n8nConnections.push({accountId,kind:'agentic',n8nUrl:standard.n8nUrl,n8nApiKeyEncrypted:standard.n8nApiKeyEncrypted,workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,connectedAt});
   await persist();
   return built;
 }
 async function llmChat(config,messages){
-  const response=await fetch(llmChatCompletionsUrl(config.baseUrl),{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify(llmRequestBody(config,messages)),signal:AbortSignal.timeout(30000)});
+  // allowPrivate: an admin-configured LLM proxy is trusted input, and a
+  // self-hosted proxy on a private/local address is an expected setup here
+  // (unlike Instagram/link-preview URLs) — still resolve-once-and-pin to
+  // close the DNS-rebind gap without rejecting private targets.
+  const response=await fetchPinned(llmChatCompletionsUrl(config.baseUrl),{allowPrivate:true,method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify(llmRequestBody(config,messages)),signal:AbortSignal.timeout(30000)});
   const text=await response.text();let data;try{data=JSON.parse(text)}catch{throw new Error('LLM proxy returned invalid JSON')}
   if(!response.ok)throw new Error(data?.error?.message||data?.message||`LLM proxy error ${response.status}`);
   return data?.choices?.[0]?.message?.content||'';
@@ -675,12 +801,17 @@ async function enrichMessage(session,message){
     view.mentions=(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId));const id=contact.id||String(rawId);const ownNumber=ownId.replace(/@.*$/,''),mentionNumber=id.replace(/@.*$/,'');return {id,name:contact.name||mentionNumber,isMe:Boolean(ownId&&(id===ownId||mentionNumber===ownNumber))}}))).filter(mention=>mention.name);
   }
   const body=String(view.body||view.text||'');
-  const mentionIds=[...new Set([...body.matchAll(/@(\d{5,})/g)].map(match=>match[1]))].slice(0,8);
+  // A mention inside the *quoted* text (replyTo.body) was never resolved —
+  // only the main message body was — so "Replying to" previews kept showing
+  // the raw @123456 id forever. Resolve both from one combined mention set.
+  const replyBody=String(view.replyTo?.body||'');
+  const mentionIds=extractMentionIds(body,replyBody);
   if(mentionIds.length){
     const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContact(session,`${id}@lid`)]));
     const labels=new Map(contacts.map(([id,contact])=>[id,contact.name||String(contact.id||'').replace(/@(c|s|g)\.us$/,'')]).filter(([,label])=>label));
-    view.body=body.replace(/@(\d{5,})/g,(mention,id)=>labels.has(id)?`@${labels.get(id)}`:mention);
+    view.body=resolveMentionLabels(body,labels);
     view.text=view.body;
+    if(view.replyTo)view.replyTo.body=resolveMentionLabels(replyBody,labels);
   }
   return view;
 }
@@ -701,12 +832,26 @@ async function enrichMessage(session,message){
     if(username.length<3||username.length>40)return send(res,400,{message:"Use a username between 3 and 40 characters"});
     if(password.length<10)return send(res,400,{message:"Use a password with at least 10 characters"});
     store.username=username;store.password=passwordHash(password);await persist();
-    const token=randomBytes(32).toString("hex");sessions.set(token,true);res.writeHead(201,{"set-cookie":sessionCookie(token,Boolean(input.remember)),"content-type":"application/json","cache-control":"no-store"});return res.end(JSON.stringify({ok:true,username}));
+    const token=issueSession(input.remember);res.writeHead(201,{"set-cookie":sessionCookie(token,Boolean(input.remember)),"content-type":"application/json","cache-control":"no-store"});return res.end(JSON.stringify({ok:true,username}));
   }
-  if(url.pathname==="/api/app/auth/login"&&req.method==="POST"){const {username,password,remember}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||"").trim()!==expectedUsername)||!passwordMatches(password||""))return send(res,401,{message:"Incorrect username or password"});const token=randomBytes(32).toString("hex");sessions.set(token,true);res.writeHead(200,{"set-cookie":sessionCookie(token,Boolean(remember)),"content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
+  if(url.pathname==="/api/app/auth/login"&&req.method==="POST"){const {username,password,remember}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||"").trim()!==expectedUsername)||!passwordMatches(password||""))return send(res,401,{message:"Incorrect username or password"});const token=issueSession(remember);res.writeHead(200,{"set-cookie":sessionCookie(token,Boolean(remember)),"content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==="/api/app/auth/logout"&&req.method==="POST"){const token=cookie(req).home_session;sessions.delete(token);res.writeHead(200,{"set-cookie":"home_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0","content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==="/api/app/auth/profile"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{username:store.username||null});}
-  if(url.pathname==="/api/app/auth/profile"&&req.method==="PATCH"){if(!admin(req))return send(res,401,{message:"Sign in required"});const input=await readBody(req),username=String(input.username||"").trim(),currentPassword=String(input.currentPassword||"");if(!currentPassword||!passwordMatches(currentPassword))return send(res,401,{message:"Current password is incorrect"});if(username&&(username.length<3||username.length>40))return send(res,400,{message:"Use a username between 3 and 40 characters"});if(input.newPassword&&String(input.newPassword).length<10)return send(res,400,{message:"Use a password with at least 10 characters"});if(username)store.username=username;if(input.newPassword)store.password=passwordHash(String(input.newPassword));await persist();return send(res,200,{ok:true,username:store.username});}
+  if(url.pathname==="/api/app/auth/profile"&&req.method==="PATCH"){if(!admin(req))return send(res,401,{message:"Sign in required"});const input=await readBody(req),username=String(input.username||"").trim(),currentPassword=String(input.currentPassword||"");if(!currentPassword||!passwordMatches(currentPassword))return send(res,401,{message:"Current password is incorrect"});if(username&&(username.length<3||username.length>40))return send(res,400,{message:"Use a username between 3 and 40 characters"});if(input.newPassword&&String(input.newPassword).length<10)return send(res,400,{message:"Use a password with at least 10 characters"});if(username)store.username=username;
+    let freshCookie=null;
+    if(input.newPassword){
+      store.password=passwordHash(String(input.newPassword));
+      // A leaked session token must not survive a password change. Revoke
+      // every session, then re-issue one for the tab that just changed it so
+      // the admin isn't logged out by their own action.
+      const previousToken=cookie(req).home_session,remember=sessions.get(previousToken)?.remember||false;
+      sessions.clear();
+      freshCookie=sessionCookie(issueSession(remember),remember);
+    }
+    await persist();
+    const headers={"content-type":"application/json"};if(freshCookie)headers["set-cookie"]=freshCookie;
+    res.writeHead(200,headers);return res.end(JSON.stringify({ok:true,username:store.username}));
+  }
   if(!admin(req))return send(res,401,{message:'Sign in required'});
   if(req.method==='GET'&&url.pathname==='/api/app/events'){
     const accountId=String(url.searchParams.get('accountId')||'');
@@ -726,10 +871,11 @@ async function enrichMessage(session,message){
   }
   if(req.method==='GET'&&url.pathname==='/api/app/link-preview'){return send(res,200,await openGraphPreview(url.searchParams.get('url')||''));}
   if(req.method==='GET'&&url.pathname==='/api/app/link-image'){
-  const image=await safePublicUrl(url.searchParams.get('url')||'');
-  if(!image)return send(res,400,{message:'Invalid public image URL'});
+  const imageUrl=url.searchParams.get('url')||'';
   const ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  const response=await fetch(image,{headers:{'user-agent':ua,'accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'},signal:AbortSignal.timeout(10000),redirect:'follow'});
+  let response;
+  try{response=await fetchPinned(imageUrl,{headers:{'user-agent':ua,'accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'},signal:AbortSignal.timeout(10000)});}
+  catch{return send(res,400,{message:'Invalid public image URL'});}
   if(!response.ok)return send(res,502,{message:'Preview image unavailable'});
   const type=response.headers.get('content-type')||'image/jpeg';
   if(!type.startsWith('image/'))return send(res,502,{message:'Invalid preview image'});
@@ -761,11 +907,26 @@ async function enrichMessage(session,message){
     return send(res,201,{account:account(created || {name:id,status:'STARTING',config:config(input.label)})});
   }
   const id=decodeURIComponent(parts[3] || '');
-  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);delete store.accountLabels[id];store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.deletedChats=(store.deletedChats||[]).filter(item=>item.accountId!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
+  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);delete store.accountLabels[id];store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.deletedChats=(store.deletedChats||[]).filter(item=>item.accountId!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);store.keys=(store.keys||[]).filter(item=>item.accountId!==id);store.messageReactions=(store.messageReactions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
   if (req.method==='GET' && parts[4]==='qr') return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/auth/qr`));
   if (req.method==='POST' && parts[4]==='start') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
   if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
   if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}/messages/read`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});return send(res,200,{ok:true});}
+  // Must be checked before the whole-chat DELETE below: both match
+  // parts[4]==='chats'&&parts[5], only this one additionally has
+  // parts[6]==='messages'&&parts[7] (a specific message under that chat).
+  if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]&&parts[6]==='messages'&&parts[7]){
+    const chatId=decodeURIComponent(parts[5]),messageId=providerMessageId(decodeURIComponent(parts[7]));
+    if(!messageId)return send(res,400,{message:'Invalid message ID'});
+    // WhatsApp "delete for me": removes the message from this account's own
+    // view (and syncs across its own linked devices, same as any other
+    // provider-driven action) — it does not remove it from another
+    // participant's WhatsApp.
+    await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,{method:'DELETE'});
+    store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));
+    await persist();
+    return send(res,200,{ok:true});
+  }
   if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){const chatId=decodeURIComponent(parts[5]);await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}`,{method:'DELETE'});store.deletedChats=(store.deletedChats||[]).filter(item=>!(item.accountId===id&&item.chatId===chatId));store.deletedChats.push({accountId:id,chatId,deletedAt:new Date().toISOString()});await persist();return send(res,200,{ok:true});}
   // Presence stays behind the dashboard proxy so the browser never receives
   // direct provider access or its API key.
@@ -788,18 +949,25 @@ async function enrichMessage(session,message){
     // unbounded provider overview on every refresh.
     const chats=await allChatOverviews(id);
     const deleted=new Set((store.deletedChats||[]).filter(item=>item.accountId===id).map(item=>item.chatId));
-    const recent=chats.filter(chat=>!deleted.has(chat.id)).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,30);
+    const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
+    const recent=chats.filter(chat=>!deleted.has(chat.id)&&hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
     return send(res,200,(await mapWithConcurrency(recent,2,chat=>enrichChatOverview(id,chat))).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
   if (req.method==='GET' && parts[4]==='messages') {
     const chatId=url.searchParams.get('chatId'); if (!chatId) return send(res,400,{message:'chatId is required'});
     const limit=Math.min(Math.max(Number(url.searchParams.get('limit')) || 15, 1), 60);
-    const offset=Math.max(Number(url.searchParams.get('offset')) || 0, 0);
     // The first screen must be fast. Media download is intentionally opt-in,
     // because the provider may need to retrieve every attachment before replying.
     const downloadMedia=url.searchParams.get('media') === '1';
-    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}&offset=${offset}&sortBy=timestamp&sortOrder=desc&merge=true&downloadMedia=${downloadMedia}`);
+    // `before` (the oldest currently-loaded message's timestamp) pages by a
+    // stable point in time instead of a numeric offset, which drifts and can
+    // skip a message if new ones arrive between page loads while the reader
+    // is paging back through history. WAHA has no id-based cursor, but does
+    // support filter.timestamp.lte, which is enough for a real cursor.
+    const before=Number(url.searchParams.get('before'));
+    const pagingQuery=Number.isFinite(before)&&before>0?`&filter.timestamp.lte=${Math.max(0,before-1)}`:`&offset=${Math.max(Number(url.searchParams.get('offset'))||0,0)}`;
+    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}${pagingQuery}&sortBy=timestamp&sortOrder=desc&merge=true&downloadMedia=${downloadMedia}`);
     return send(res,200,(await Promise.all(messages.map(message=>enrichMessage(id,message)))).sort((a,b) => a.timestamp - b.timestamp));
   }
   if (req.method==='GET' && parts[4]==='message-media') {
@@ -812,7 +980,7 @@ async function enrichMessage(session,message){
     if(!messageId)return send(res,400,{message:'Invalid message ID'});
     const reaction=String(input.reaction||'');if(reaction.length>16)return send(res,400,{message:'Invalid reaction'});
     await providerRequest('/api/reaction',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,messageId,reaction})});
-    store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));if(reaction)store.messageReactions.push({accountId:id,messageId,reaction});await persist();
+    store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));if(reaction)store.messageReactions.push({accountId:id,messageId,reaction,reactedAt:new Date().toISOString()});await persist();
     return send(res,200,{ok:true,reaction});
   }
   if (req.method==='POST' && parts[4]==='messages') {
@@ -826,14 +994,37 @@ async function enrichMessage(session,message){
   if(parts[4]==="integration-keys"&&req.method==="GET")return send(res,200,{keys:store.keys.filter(k=>k.accountId===id).map(({hash,token,...key})=>key)});
   if(parts[4]==="integration-keys"&&req.method==="POST"){const input=await readBody(req);const token=`wh_live_${randomBytes(24).toString("base64url")}`;const key={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"Integration").slice(0,80),scopes:Array.isArray(input.scopes)?input.scopes:["messages:read","messages:send"],createdAt:new Date().toISOString(),lastUsedAt:null,hash:hash(token)};store.keys.push(key);await persist();return send(res,201,{key:{...key,hash:undefined},token});}
   if(parts[4]==="automations"&&req.method==="GET")return send(res,200,{subscriptions:store.automationSubscriptions.filter(subscription=>subscription.accountId===id).map(automationSummary)});
-  if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await safePublicUrl(input.url||""),secret=String(input.secret||"").trim();if(!url||url.protocol!=="https:")return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@c.us",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json","x-gakai-secret":secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
-  if(parts[4]==="automations"&&!parts[5]&&req.method==="POST"){const input=await readBody(req),production=n8nWebhookUrl(input.productionUrl||input.url||""),test=n8nWebhookUrl(input.testUrl||""),requestedSecret=String(input.secret||"").trim();if(!production)return send(res,400,{message:"Use an HTTPS n8n production webhook URL"});if(input.testUrl&&!test)return send(res,400,{message:"Use an HTTPS n8n test webhook URL"});if(requestedSecret.length>256)return send(res,400,{message:"Invalid Header Auth secret"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:production.href,productionUrl:production.href,testUrl:test?.href||null,testPhone:String(input.testPhone||"").replace(/[^0-9]/g,"")||null,enabled:true,events:["message.received"],secret:requestedSecret||ensureN8nKey(id),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}
+  if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await n8nWebhookUrl(input.url||""),secret=String(input.secret||"").trim();if(!url)return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@c.us",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await automationFetch({secret,url:url.href},event);if(!response.ok)return send(res,502,{message:await describeWebhookFailure(response)});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
+  if(parts[4]==="automations"&&!parts[5]&&req.method==="POST"){const input=await readBody(req),production=await n8nWebhookUrl(input.productionUrl||input.url||""),test=await n8nWebhookUrl(input.testUrl||""),requestedSecret=String(input.secret||"").trim();if(!production)return send(res,400,{message:"Use an HTTPS n8n production webhook URL"});if(input.testUrl&&!test)return send(res,400,{message:"Use an HTTPS n8n test webhook URL"});if(requestedSecret.length>256)return send(res,400,{message:"Invalid Header Auth secret"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:production.href,productionUrl:production.href,testUrl:test?.href||null,testPhone:String(input.testPhone||"").replace(/[^0-9]/g,"")||null,enabled:true,events:["message.received"],secret:requestedSecret||ensureN8nKey(id),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}
   if(parts[4]==="automations"&&parts[5]&&req.method==="PATCH"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req);if(typeof input.enabled==="boolean")subscription.enabled=input.enabled;await persist();return send(res,200,{subscription:automationSummary(subscription)});}
-  if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@c.us`:"demo@c.us",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};try{const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});const response=await fetch(destination,{method:"POST",headers:{"content-type":"application/json","x-gakai-secret":subscription.secret,"x-gakai-event-id":event.id,"user-agent":"Gakai/1.0"},body:JSON.stringify(event),signal:AbortSignal.timeout(10000)});if(!response.ok)return send(res,502,{message:`Webhook returned ${response.status}`});return send(res,200,{ok:true,subscription:automationSummary(subscription)})}catch(error){return send(res,502,{message:error.message||"Test delivery failed",subscription:automationSummary(subscription)})}}
+  if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@c.us`:"demo@c.us",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});
+    // Route through the same delivery path production events use so this
+    // test send updates subscription.lastDelivery like a real one does,
+    // instead of the status vanishing after a hand-rolled fetch.
+    try{const reply=await deliverAutomation(subscription,event,{url:destination});return send(res,200,{ok:true,reply,subscription:automationSummary(subscription)})}
+    catch(error){return send(res,502,{message:error.message||"Test delivery failed",subscription:automationSummary(subscription)})}}
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
   // LLM proxy config endpoints
-  if(parts[4]==='llm'&&parts[5]==='test'&&req.method==='POST'){const cfg=llmConfig(id),input=await readBody(req),prompt=String(input.prompt||'').trim();if(!cfg)return send(res,409,{message:'Save an LLM proxy before testing it'});if(!prompt||prompt.length>4000)return send(res,400,{message:'Enter a test prompt up to 4,000 characters'});try{return send(res,200,{reply:await llmChat(cfg,[{role:'system',content:cfg.systemPrompt||'You are a helpful assistant.'},{role:'user',content:prompt}])});}catch(error){return send(res,502,{message:error.message||'LLM test failed'});}}
+  if(parts[4]==='llm'&&parts[5]==='test'&&req.method==='POST'){
+    const cfg=llmConfig(id),input=await readBody(req),prompt=String(input.prompt||'').trim();
+    if(!cfg)return send(res,409,{message:'Save an LLM proxy before testing it'});
+    if(!prompt||prompt.length>4000)return send(res,400,{message:'Enter a test prompt up to 4,000 characters'});
+    const phone=String(input.phone||'').replace(/[^0-9]/g,'');
+    if(phone.length>30)return send(res,400,{message:'Invalid test phone number'});
+    let reply;
+    try{reply=await llmChat(cfg,[{role:'system',content:cfg.systemPrompt||'You are a helpful assistant.'},{role:'user',content:prompt}]);}
+    catch(error){return send(res,502,{message:error.message||'LLM test failed'});}
+    // A phone number is opt-in delivery: same providerRequest('/api/sendText')
+    // call dispatchLLMReply makes for a real inbound message, so this
+    // actually proves the full native-reply path, not just proxy connectivity.
+    if(phone&&reply.trim()){
+      try{await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,chatId:`${phone}@c.us`,text:reply.trim()})});}
+      catch(error){return send(res,502,{message:'The proxy replied, but delivering it to WhatsApp failed: '+(error.message||'Unknown error'),reply});}
+      return send(res,200,{reply,delivered:true});
+    }
+    return send(res,200,{reply,delivered:false});
+  }
   if(parts[4]==='llm'&&req.method==='GET'){const cfg=llmConfig(id);return send(res,200,cfg?{configured:true,provider:cfg.provider||inferLlmProvider(cfg.baseUrl),baseUrl:cfg.baseUrl,model:cfg.model,systemPrompt:cfg.systemPrompt||'',nativeEnabled:cfg.nativeEnabled||false,apiKeyLength:String(cfg.apiKey||'').length,apiKeyLast4:String(cfg.apiKey||'').slice(-4)}:{configured:false});}
   if(parts[4]==='llm'&&req.method==='POST'){
     const input=await readBody(req);
@@ -851,12 +1042,15 @@ async function enrichMessage(session,message){
     const settingsOnly=String(input.apiKey||'')==='__keep__'&&existing&&existing.baseUrl===baseUrl&&existing.model===model;
     if(!settingsOnly){
       try{
-        const test=await fetch(llmChatCompletionsUrl(baseUrl),{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${apiKey}`},body:JSON.stringify(llmRequestBody({model},[{role:'user',content:'hi'}],{max_tokens:1})),signal:AbortSignal.timeout(15000)});
+        const test=await fetchPinned(llmChatCompletionsUrl(baseUrl),{allowPrivate:true,method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${apiKey}`},body:JSON.stringify(llmRequestBody({model},[{role:'user',content:'hi'}],{max_tokens:1})),signal:AbortSignal.timeout(15000)});
         const td=await test.json().catch(()=>({}));
         if(!test.ok&&test.status!==400)throw new Error(td?.error?.message||`Proxy returned ${test.status}`);
       }catch(err){return send(res,400,{message:'Could not connect to LLM proxy: '+err.message});}
     }
-    const nextConfig={accountId:id,provider,baseUrl,apiKey,model,systemPrompt:assistantInstructions(String(input.systemPrompt||'').slice(0,4000)),nativeEnabled:Boolean(input.nativeEnabled),configuredAt:existing?.configuredAt||new Date().toISOString()};
+    // nativeEnabled is managed by its own immediate PATCH /llm toggle below,
+    // not this form — preserve whatever it's currently set to rather than
+    // reading a stale/absent field from this save.
+    const nextConfig={accountId:id,provider,baseUrl,apiKey,model,systemPrompt:assistantInstructions(String(input.systemPrompt||'').slice(0,4000)),nativeEnabled:existing?.nativeEnabled||false,configuredAt:existing?.configuredAt||new Date().toISOString()};
     let n8nInstructionsSynced=false;
     try{n8nInstructionsSynced=await syncAgenticN8nInstructions(id,nextConfig);}catch(error){return send(res,502,{message:'LLM proxy verified, but the n8n AI workflow was not updated: '+(error.message||'Unknown error')});}
     store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);
@@ -864,51 +1058,97 @@ async function enrichMessage(session,message){
     await persist();
     return send(res,200,{ok:true,n8nInstructionsSynced});
   }
+  // Immediate "Enable native AI replies" toggle — mirrors /n8n/connect/ai's
+  // immediacy so both mutually-exclusive reply paths behave the same way
+  // (no need to resubmit the whole proxy form just to flip this).
+  if(parts[4]==='llm'&&parts[5]==='native'&&req.method==='PATCH'){
+    const config=llmConfig(id);
+    if(!config)return send(res,404,{message:'Save an LLM proxy before enabling native replies'});
+    const input=await readBody(req);
+    config.nativeEnabled=Boolean(input.nativeEnabled);
+    // Mutual exclusivity: native and the n8n AI Agent are the same reply, twice.
+    if(config.nativeEnabled)disableTheOtherAiReplyPath(id,'native');
+    await persist();
+    return send(res,200,{ok:true,nativeEnabled:config.nativeEnabled});
+  }
   if(parts[4]==='llm'&&req.method==='DELETE'){store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);await persist();return send(res,200,{ok:true});}
   if(parts[4]==='n8n'&&parts[5]==='connect'&&!parts[6]&&req.method==='POST'){
-    const input=await readBody(req);
-    let n8nBaseUrl=normalizeN8nBaseUrl(input.n8nUrl);
-    const existingStandard=store.n8nConnections.find(connection=>connection.accountId===id&&connection.kind==='standard');
-    const requestedApiKey=String(input.n8nApiKey||'').trim();
-    const n8nApiKey=requestedApiKey==='__keep__'?(decryptSecret(existingStandard?.n8nApiKeyEncrypted)||''):requestedApiKey;
-    try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
-    if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
-    if(!n8nApiKey)return send(res,400,{message:'n8n API key is required'});
-    // Use the URL the user actually used to reach Gakai unless an explicit
-    // GAKAI_PUBLIC_URL override is configured (for example behind a reverse proxy).
-    const publicUrl=requestPublicUrl(req);
-    const publicUrlParsed=new URL(publicUrl);
-    if(publicUrlParsed.hostname==='localhost'||publicUrlParsed.hostname==='127.0.0.1'||publicUrlParsed.hostname==='::1')
-      return send(res,400,{message:`Gakai resolved its callback URL as ${publicUrl}. n8n cannot call another service through its own loopback address. Open Gakai using a LAN IP, local hostname, or domain, or set GAKAI_PUBLIC_URL when using a reverse proxy.`});
-    try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
-    if(existingStandard){existingStandard.n8nUrl=n8nBaseUrl;existingStandard.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);await persist();return send(res,200,{ok:true,reused:true,workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`});}
-    let built;
-    try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,publicUrl,kind:'standard'}); }
-    catch(err){ return send(res,502,{message:'Failed to configure n8n: '+(err.message||'Unknown n8n error')}); }
-    const connectedAt=new Date().toISOString();
-    // Remove old n8n auto-connect key for this account
-    store.keys=store.keys.filter(k=>!(k.accountId===id&&k.name==='n8n auto-connect'));
-    store.keys.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',scopes:['messages:read','messages:send'],createdAt:connectedAt,lastUsedAt:null,token:built.integrationToken,hash:hash(built.integrationToken)});
-    // Create/replace automation subscription (remove all for this account, then re-add the new one)
-    store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);
-    store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:true,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
-    // Remove old connections for this account (both kinds) and start fresh with the standard workflow
-    store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
-    store.n8nConnections.push({accountId:id,kind:'standard',n8nUrl:n8nBaseUrl,n8nApiKeyEncrypted:encryptSecret(n8nApiKey),workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,outboundCredentialId:built.outboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,integrationToken:built.integrationToken,connectedAt});
-    await persist();
-    return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${built.workflowId}`,webhookUrl:built.webhookUrl,connectedAt,activationWarning:built.activationWarning});
+    if(n8nConnectLocks.has(id))return send(res,409,{message:'A connection attempt is already in progress for this account'});
+    const attempt=(async()=>{
+      const input=await readBody(req);
+      let n8nBaseUrl=normalizeN8nBaseUrl(input.n8nUrl);
+      const existingStandard=store.n8nConnections.find(connection=>connection.accountId===id&&connection.kind==='standard');
+      const requestedApiKey=String(input.n8nApiKey||'').trim();
+      const n8nApiKey=requestedApiKey==='__keep__'?(decryptSecret(existingStandard?.n8nApiKeyEncrypted)||''):requestedApiKey;
+      try{new URL(n8nBaseUrl)}catch{return send(res,400,{message:'Enter a valid n8n URL (e.g. https://yourname.app.n8n.cloud)'});}
+      if(!n8nBaseUrl.startsWith('https://'))return send(res,400,{message:'The n8n URL must use HTTPS'});
+      if(!n8nApiKey)return send(res,400,{message:'n8n API key is required'});
+      try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
+      if(existingStandard){
+        existingStandard.n8nUrl=n8nBaseUrl;existingStandard.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);
+        // Reconnecting is also the repair path for a workflow still on the
+        // old outbound-callback shape (see repairN8nWorkflowGraph) — fix it
+        // in place rather than requiring the whole integration to be
+        // deleted and recreated.
+        try{await repairN8nWorkflowGraph(n8nBaseUrl,n8nApiKey,existingStandard,id);}catch(error){console.error('Failed to upgrade n8n workflow shape:',error.message);}
+        await persist();return send(res,200,{ok:true,reused:true,workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`});
+      }
+      let built;
+      try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,kind:'standard'}); }
+      catch(err){ return send(res,502,{message:'Failed to configure n8n: '+(err.message||'Unknown n8n error')}); }
+      const connectedAt=new Date().toISOString();
+      // Create/replace automation subscription (remove all for this account, then re-add the new one)
+      store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);
+      store.automationSubscriptions.push({id:randomBytes(8).toString('hex'),accountId:id,name:'n8n auto-connect',url:built.webhookUrl,productionUrl:built.webhookUrl,testUrl:null,testPhone:null,enabled:true,events:['message.received'],secret:built.inboundSecret,createdAt:connectedAt,lastDelivery:null});
+      // Remove old connections for this account (both kinds) and start fresh with the standard workflow
+      store.n8nConnections=store.n8nConnections.filter(c=>c.accountId!==id);
+      store.n8nConnections.push({accountId:id,kind:'standard',n8nUrl:n8nBaseUrl,n8nApiKeyEncrypted:encryptSecret(n8nApiKey),workflowId:built.workflowId,workflowName:built.workflowName,webhookUrl:built.webhookUrl,inboundCredentialId:built.inboundCredentialId,llmCredentialId:built.llmCredentialId,inboundSecret:built.inboundSecret,connectedAt});
+      await persist();
+      return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${built.workflowId}`,webhookUrl:built.webhookUrl,connectedAt,activationWarning:built.activationWarning});
+    })();
+    n8nConnectLocks.set(id,attempt);
+    try{ return await attempt; } finally{ n8nConnectLocks.delete(id); }
   }
+  // "Enable n8n AI Agent replies": creates the AI Agent workflow the first
+  // time (this is the "later explicit activation step" the workflow was
+  // deliberately left disabled for), or just re-activates and re-syncs an
+  // existing one — idempotent either way, so the client only needs one
+  // action for both "set it up" and "turn it back on".
   if(parts[4]==='n8n'&&parts[5]==='connect'&&parts[6]==='ai'&&req.method==='POST'){
-    if(!llmConfig(id))return send(res,400,{message:'Connect an LLM proxy before creating an AI workflow'});
-    try{const built=await createAgenticN8nWorkflow(id,req);if(!built)return send(res,409,{message:'Connect n8n first, or AI replies are already enabled'});return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic')?.n8nUrl+'/workflow/'+built.workflowId,activationWarning:built.activationWarning});}
-    catch(error){return send(res,error.status||502,{message:'Failed to create n8n AI workflow: '+(error.message||'Unknown error')});}
+    const lockKey=`${id}:agentic`;
+    if(n8nConnectLocks.has(lockKey))return send(res,409,{message:'A connection attempt is already in progress for this account'});
+    const attempt=(async()=>{
+      const config=llmConfig(id);
+      if(!config)return send(res,400,{message:'Connect an LLM proxy before enabling AI Agent replies'});
+      try{
+        let connection=store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic');
+        let activationWarning=null;
+        if(!connection){
+          const built=await createAgenticN8nWorkflow(id);
+          activationWarning=built.activationWarning;
+          connection=store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic');
+        }else{
+          // Bring an already-existing workflow's instructions/model/shape
+          // up to date before going live with it again.
+          await syncAgenticN8nInstructions(id,config).catch(error=>console.error('Failed to sync n8n AI Agent workflow on enable:',error.message));
+        }
+        const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect (AI Agent)');
+        if(subscription)subscription.enabled=true;
+        // Mutual exclusivity: native and the n8n AI Agent are the same reply, twice.
+        disableTheOtherAiReplyPath(id,'agentic');
+        await persist();
+        return send(res,200,{ok:true,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,activationWarning});
+      }catch(error){return send(res,error.status||502,{message:'Failed to enable n8n AI Agent replies: '+(error.message||'Unknown error')});}
+    })();
+    n8nConnectLocks.set(lockKey,attempt);
+    try{ return await attempt; } finally{ n8nConnectLocks.delete(lockKey); }
   }
   if(parts[4]==='n8n'&&parts[5]==='connect'&&req.method==='GET'){
     const connections=store.n8nConnections.filter(c=>c.accountId===id);
     if(!connections.length)return send(res,200,{connected:false});
     const workflows=connections.map(connection=>{
       const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name===(connection.kind==='agentic'?'n8n auto-connect (AI Agent)':'n8n auto-connect'));
-      return {kind:connection.kind,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,webhookUrl:connection.webhookUrl||subscription?.url||null,active:subscription?.enabled!==false,lastDelivery:subscription?.lastDelivery||null,connectedAt:connection.connectedAt};
+      return {kind:connection.kind,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,webhookUrl:connection.webhookUrl||subscription?.url||null,subscriptionId:subscription?.id||null,active:subscription?.enabled!==false,lastDelivery:subscription?.lastDelivery||null,connectedAt:connection.connectedAt};
     });
     const standardConnection=connections.find(connection=>connection.kind==='standard')||connections[0];
     const standard=workflows.find(w=>w.kind==='standard')||workflows[0];
@@ -951,4 +1191,6 @@ wss.on('connection',(socket,req)=>{
   socket.on('close',()=>{typingSockets.delete(socket);maybeStopPresencePoll(`${socket.accountId}:${socket.chatId}`)});
 });
 server.on('upgrade',(req,socket,head)=>{const url=new URL(req.url,`http://${req.headers.host}`);if(url.pathname!=='/api/app/ws'||!admin(req)||!url.searchParams.get('accountId')||!url.searchParams.get('chatId')){socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();return;}wss.handleUpgrade(req,socket,head,client=>wss.emit('connection',client,req));});
-server.listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}${configuredPublicUrl ? ` (public URL: ${configuredPublicUrl})` : ''}`));
+server.listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}`));
+
+export { server, readBody, store, sessions, buildN8nWorkflowGraph, sendAutomationReply, describeWebhookFailure };

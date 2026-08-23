@@ -7,6 +7,15 @@ COPY scripts/build-client.mjs ./scripts/build-client.mjs
 COPY public ./public
 RUN npm run build
 
+# Test-only stage: adds the backend and its tests on top of the already
+# npm-ci'd frontend stage. Never referenced by the final runtime image below,
+# so it has no effect on what gets shipped/pulled.
+FROM frontend AS test
+COPY server.mjs ./server.mjs
+COPY src ./src
+COPY test ./test
+CMD ["npm", "test"]
+
 FROM node:22-alpine
 WORKDIR /app
 COPY --from=frontend /app/node_modules ./node_modules

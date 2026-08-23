@@ -1,4 +1,5 @@
 import React,{useCallback,useEffect,useMemo,useRef,useState}from"react";
+import{runExclusive}from"./app-helpers.mjs";
 import{createRoot}from"react-dom/client";
 import{ChatPanel}from"./chat.jsx";
 
@@ -36,25 +37,78 @@ function Pairing({account,onLinked,onCancel}){
 }
 
 function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
-  const[llm,setLlm]=useState(null),[n8n,setN8n]=useState(null),[profile,setProfile]=useState(null),[service,setService]=useState(null),[busy,setBusy]=useState(false);
+  const[llm,setLlm]=useState(null),[n8n,setN8n]=useState(null),[profile,setProfile]=useState(null),[service,setService]=useState(null),[busy,setBusy]=useState(false),[testModal,setTestModal]=useState(null),[testResult,setTestResult]=useState(null);
   const base="/api/app/accounts/"+encodeURIComponent(account.id);
   const refresh=useCallback(()=>Promise.all([api(base+"/llm"),api(base+"/n8n/connect"),api("/api/app/auth/profile")]).then(x=>{setLlm(x[0]);setN8n(x[1]);setProfile(x[2])}).catch(x=>onNotice(x.message)),[base,onNotice]);
   useEffect(()=>{refresh()},[refresh]);
   
   // Escape key to close
   useEffect(()=>{
-    const onKey=(e)=>{if(e.key==="Escape")onClose()};
+    const onKey=(e)=>{if(e.key!=="Escape")return;if(testModal)setTestModal(null);else onClose()};
     window.addEventListener("keydown",onKey);
     return()=>window.removeEventListener("keydown",onKey);
-  },[onClose]);
+  },[onClose,testModal]);
 
-  const saveLlm=async e=>{e.preventDefault();const f=e.currentTarget;const enteredKey=f.apiKey.value.trim(),next={configured:true,baseUrl:f.baseUrl.value.trim().replace(/\/+$/,"") ,model:f.model.value.trim(),systemPrompt:f.systemPrompt.value,nativeEnabled:f.nativeEnabled.checked,apiKeyLast4:enteredKey?enteredKey.slice(-4):llm?.apiKeyLast4||""};setBusy(true);try{await api(base+"/llm",{method:"POST",body:JSON.stringify({baseUrl:next.baseUrl,apiKey:enteredKey||"__keep__",model:next.model,systemPrompt:next.systemPrompt,nativeEnabled:next.nativeEnabled})});setLlm(next);await refresh();onNotice("LLM Proxy saved and verified.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  const saveLlm=async e=>{e.preventDefault();const f=e.currentTarget;const enteredKey=f.apiKey.value.trim(),next={configured:true,baseUrl:f.baseUrl.value.trim().replace(/\/+$/,"") ,model:f.model.value.trim(),systemPrompt:f.systemPrompt.value,nativeEnabled:llm?.nativeEnabled||false,apiKeyLast4:enteredKey?enteredKey.slice(-4):llm?.apiKeyLast4||""};setBusy(true);try{await api(base+"/llm",{method:"POST",body:JSON.stringify({baseUrl:next.baseUrl,apiKey:enteredKey||"__keep__",model:next.model,systemPrompt:next.systemPrompt})});setLlm(next);await refresh();onNotice("LLM Proxy saved and verified.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  // Immediate "Enable native AI replies" toggle — matches setN8nAgentEnabled's
+  // immediacy so both mutually-exclusive reply paths behave the same way.
+  const setNativeEnabled=async enabled=>{
+    setBusy(true);
+    try{
+      await api(base+"/llm/native",{method:"PATCH",body:JSON.stringify({nativeEnabled:enabled})});
+      await refresh();
+      onNotice(enabled?"Native AI replies enabled.":"Native AI replies disabled.");
+    }catch(x){onNotice(x.message)}finally{setBusy(false)}
+  };
   const connectN8n=async e=>{e.preventDefault();const f=e.currentTarget;const n8nUrl=f.n8nUrl.value.trim().replace(/\/+$/,""),enteredKey=f.n8nApiKey.value.trim();setBusy(true);try{const result=await api(base+"/n8n/connect",{method:"POST",body:JSON.stringify({n8nUrl,n8nApiKey:enteredKey||"__keep__"})});setN8n(current=>({...current,connected:true,n8nUrl,n8nApiKeyLength:enteredKey.length||current?.n8nApiKeyLength||0,n8nApiKeyLast4:enteredKey?enteredKey.slice(-4):current?.n8nApiKeyLast4||"",workflows:result.workflowId?[...(current?.workflows||[]).filter(workflow=>workflow.kind!=="standard"),{kind:"standard",workflowId:result.workflowId,workflowName:result.workflowName,workflowUrl:result.workflowUrl}]:current?.workflows||[]}));await refresh();onNotice(result.reused?"n8n connection verified.":"n8n workflow created and connected.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const saveName=async e=>{e.preventDefault();const label=e.currentTarget.label.value.trim();if(!label)return;setBusy(true);try{await api(base+"/label",{method:"PATCH",body:JSON.stringify({label})});onRenamed?.(account.id,label);onNotice("Account name saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const saveProfile=async e=>{e.preventDefault();const f=e.currentTarget;setBusy(true);try{const result=await api("/api/app/auth/profile",{method:"PATCH",body:JSON.stringify({username:f.username.value,currentPassword:f.currentPassword.value,newPassword:f.newPassword.value})});setProfile(current=>({...current,username:result.username}));f.currentPassword.value="";f.newPassword.value="";onNotice("Sign-in details saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const del=async()=>{if(!confirm(`Delete ${account.label} from Gakai? Its linked WhatsApp session will be removed. You can add and scan it again later.`))return;setBusy(true);try{await api(base,{method:"DELETE"});onDeleted()}catch(x){onNotice(x.message)}finally{setBusy(false)}};
-  const ai=async()=>{setBusy(true);try{await api(base+"/n8n/connect/ai",{method:"POST"});await refresh();onNotice("AI workflow created.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  // "Enable n8n AI Agent replies": one action for both first-time setup
+  // (creates the n8n workflow) and re-enabling an existing one — the server
+  // route is idempotent either way and also turns native replies off,
+  // since only one reply path can be live at a time.
+  const setN8nAgentEnabled=async enabled=>{
+    setBusy(true);
+    try{
+      if(enabled){
+        await api(base+"/n8n/connect/ai",{method:"POST"});
+      }else if(agentWorkflow?.subscriptionId){
+        await api(base+"/automations/"+encodeURIComponent(agentWorkflow.subscriptionId),{method:"PATCH",body:JSON.stringify({enabled:false})});
+      }
+      await refresh();
+      onNotice(enabled?"n8n AI Agent replies enabled.":"n8n AI Agent replies disabled.");
+    }catch(x){onNotice(x.message)}finally{setBusy(false)}
+  };
+  // Shared by both the n8n and LLM Proxy "Send test message" buttons — same
+  // modal (phone number + message), routed to whichever endpoint the open
+  // modal's kind calls for. For n8n, the phone number is both the simulated
+  // sender and where the workflow's reply gets delivered. For the direct LLM
+  // proxy there's no simulated inbound message — the phone number, if given,
+  // is just where the proxy's reply gets delivered; left blank, it's a
+  // connectivity check only (proxy called, reply shown, nothing sent).
+  const sendTestMessage=async e=>{
+    e.preventDefault();
+    const f=e.currentTarget,phone=f.phone.value.trim(),text=f.text.value.trim();
+    if(!text)return;
+    setBusy(true);setTestResult(null);
+    try{
+      if(testModal.kind==="n8n"){
+        const result=await api(base+"/automations/"+encodeURIComponent(testModal.subscriptionId)+"/test",{method:"POST",body:JSON.stringify({phone,text})});
+        setTestResult({ok:true,text:result.reply?`Reply from n8n: "${result.reply}"${phone?" — sent to "+phone:""}`:"Delivered to n8n, but the workflow sent back no reply — check your n8n execution log."});
+        await refresh();
+      }else{
+        const result=await api(base+"/llm/test",{method:"POST",body:JSON.stringify({prompt:text,phone})});
+        setTestResult({ok:true,text:result.delivered?`Reply from LLM Proxy: "${result.reply}" — sent to ${phone}`:`LLM Proxy replied: "${result.reply}" (enter a phone number above to actually deliver it to WhatsApp)`});
+      }
+    }catch(x){
+      setTestResult({ok:false,text:x.message});
+    }finally{
+      setBusy(false);
+    }
+  };
   const deleteIntegration=async kind=>{const label=kind==="n8n"?"n8n automation":"LLM Proxy";if(!confirm(`Delete the ${label} integration for ${account.label}?`))return;setBusy(true);try{await api(base+(kind==="n8n"?"/n8n/connect":"/llm"),{method:"DELETE"});await refresh();onNotice(`${label} integration deleted.`)}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  const toggleAutomation=async(subscriptionId,enabled,label)=>{if(!subscriptionId)return;setBusy(true);try{await api(base+"/automations/"+encodeURIComponent(subscriptionId),{method:"PATCH",body:JSON.stringify({enabled})});await refresh();onNotice(`${label} ${enabled?"enabled":"disabled"}.`)}catch(x){onNotice(x.message)}finally{setBusy(false)}};
 
   const services={
     n8n:{title:"n8n Automation",subtitle:"Automation",ready:!!n8n?.connected},
@@ -63,7 +117,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
   };
   const agentWorkflow=n8n?.workflows?.find(workflow=>workflow.kind==="agentic");
   const standardWorkflow=n8n?.workflows?.find(workflow=>workflow.kind==="standard");
-  const detail=service==="n8n"?<><h3>n8n Automation</h3><p>Create Gakai’s standard automation template in your n8n instance. It contains no AI node.</p>{standardWorkflow?<div className="workflow-links"><a href={standardWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>Gakai automation template</span><b>{standardWorkflow.workflowName||standardWorkflow.workflowId}</b><em>Open in n8n ↗</em></a></div>:null}<form key={`n8n-${n8n?.n8nUrl||"new"}`} className="integration-form integration-form-stacked" onSubmit={connectN8n}><label>n8n URL<input name="n8nUrl" type="url" defaultValue={n8n?.n8nUrl||""} placeholder="https://yourname.app.n8n.cloud" required/></label><label>n8n API key<input name="n8nApiKey" type="password" placeholder="Paste a replacement n8n API key" required={!n8n?.connected}/>{n8n?.connected&&<small className="saved-key-mask">Saved key: ••••…••{n8n.n8nApiKeyLast4}</small>}</label><button className="primary integration-submit" disabled={busy}>{busy?"Verifying authorization…":"Save and verify authorization"}</button></form></>:service==="llm"?<><h3>LLM Proxy</h3><p>Connect LiteLLM or OmniRoute for AI-powered replies.</p>{agentWorkflow?<div className="workflow-links"><a href={agentWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>AI Agent workflow</span><b>{agentWorkflow.workflowName||agentWorkflow.workflowId}</b><em>Open in n8n ↗</em></a></div>:null}{llm?.configured&&n8n?.connected&&!agentWorkflow?<button className="secondary llm-agent-action" disabled={busy} onClick={ai}>{busy?"Creating AI workflow…":"Create n8n AI workflow"}</button>:null}<form key={`llm-${llm?.baseUrl||"new"}-${llm?.model||""}`} className="integration-form integration-form-stacked" onSubmit={saveLlm}><label>Proxy URL<input name="baseUrl" type="url" defaultValue={llm?.baseUrl||""} placeholder="https://proxy.example/v1" required/></label><label>Proxy API key<input name="apiKey" type="password" placeholder="Paste a replacement proxy API key" required={!llm?.configured}/>{llm?.configured&&<small className="saved-key-mask">Saved key: ••••…••{llm.apiKeyLast4}</small>}</label><label>Model<input name="model" defaultValue={llm?.model||""} placeholder="oc/nemotron-3-ultra-free" required/></label><label>Assistant instructions<textarea name="systemPrompt" rows="6" defaultValue={llm?.systemPrompt||""}/></label><label className="native-ai-toggle"><input name="nativeEnabled" type="checkbox" defaultChecked={!!llm?.nativeEnabled}/><span className="native-ai-switch" aria-hidden="true"><span/></span><span className="native-ai-copy"><b>Enable native AI replies</b><small>Gakai replies directly through WhatsApp using this proxy.</small></span></label><button className="primary integration-submit" disabled={busy}>{busy?"Verifying proxy…":"Save and verify proxy"}</button></form></>:service?<><h3>{services[service].title}</h3><p>This account-scoped integration is reserved for a future Gakai connection.</p></>:<><h3>Select services</h3><p>Choose a service to configure it for <b>{account.label}</b>.</p></>;
+  const detail=service==="n8n"?<><h3>n8n Automation</h3><p>Create Gakai’s standard automation template in your n8n instance. It contains no AI node.</p>{standardWorkflow?<div className="workflow-links"><a href={standardWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>Gakai automation template</span><b>{standardWorkflow.workflowName||standardWorkflow.workflowId}</b><em>Open in n8n ↗</em></a></div>:null}{standardWorkflow?.subscriptionId?<label className="checkbox-field"><input type="checkbox" checked={!!standardWorkflow.active} disabled={busy} onChange={e=>toggleAutomation(standardWorkflow.subscriptionId,e.currentTarget.checked,"n8n replies")}/><span><b>Enable n8n replies</b><small>Route direct messages, and group messages where you're tagged, through this n8n automation.</small></span></label>:null}{standardWorkflow?.subscriptionId?<button type="button" className="secondary n8n-test-action" onClick={()=>{setTestModal({kind:"n8n",subscriptionId:standardWorkflow.subscriptionId});setTestResult(null)}}>Send test message</button>:null}<form key={`n8n-${n8n?.n8nUrl||"new"}`} className="integration-form integration-form-stacked" onSubmit={connectN8n}><label>n8n URL<input name="n8nUrl" type="url" defaultValue={n8n?.n8nUrl||""} placeholder="https://yourname.app.n8n.cloud" required/></label><label>n8n API key<input name="n8nApiKey" type="password" placeholder="Paste a replacement n8n API key" required={!n8n?.connected}/>{n8n?.connected&&<small className="saved-key-mask">Saved key: ••••…••{n8n.n8nApiKeyLast4}</small>}</label><button className="primary integration-submit" disabled={busy}>{busy?"Verifying authorization…":"Save and verify authorization"}</button></form></>:service==="llm"?<><h3>LLM Proxy</h3><p>Connect LiteLLM or OmniRoute for AI-powered replies.</p>{agentWorkflow?<div className="workflow-links"><a href={agentWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>AI Agent workflow</span><b>{agentWorkflow.workflowName||agentWorkflow.workflowId}</b><em>Open in n8n ↗</em></a></div>:null}{llm?.configured?<button type="button" className="secondary llm-test-action" onClick={()=>{const useAgent=!!agentWorkflow?.active&&!!agentWorkflow?.subscriptionId;setTestModal(useAgent?{kind:"n8n",subscriptionId:agentWorkflow.subscriptionId}:{kind:"llm"});setTestResult(null)}}>Send test message{agentWorkflow?.active?" (via n8n AI Agent)":""}</button>:null}<form key={`llm-${llm?.baseUrl||"new"}-${llm?.model||""}`} className="integration-form integration-form-stacked" onSubmit={saveLlm}><label>Proxy URL<input name="baseUrl" type="url" defaultValue={llm?.baseUrl||""} placeholder="https://proxy.example/v1" required/></label><label>Proxy API key<input name="apiKey" type="password" placeholder="Paste a replacement proxy API key" required={!llm?.configured}/>{llm?.configured&&<small className="saved-key-mask">Saved key: ••••…••{llm.apiKeyLast4}</small>}</label><label>Model<input name="model" defaultValue={llm?.model||""} placeholder="oc/nemotron-3-ultra-free" required/></label><label>Assistant instructions<textarea name="systemPrompt" rows="6" defaultValue={llm?.systemPrompt||""}/></label>{llm?.configured&&n8n?.connected?<label className="checkbox-field"><input type="checkbox" checked={!!agentWorkflow?.active} disabled={busy} onChange={e=>setN8nAgentEnabled(e.currentTarget.checked)}/><span><b>Enable n8n AI Agent replies</b><small>Creates or updates the n8n AI Agent workflow and replies through it — direct messages, and group messages where you're tagged. Turns off native AI replies.</small></span></label>:llm?.configured?<p className="hint-inline"><small>Connect n8n in the n8n Automation panel to enable AI Agent replies through n8n.</small></p>:null}{llm?.configured?<label className="checkbox-field"><input type="checkbox" checked={!!llm?.nativeEnabled} disabled={busy} onChange={e=>setNativeEnabled(e.currentTarget.checked)}/><span><b>Enable native AI replies (no n8n)</b><small>Gakai replies directly through WhatsApp using this proxy, without n8n. Turns off n8n AI Agent replies.</small></span></label>:null}<button className="primary integration-submit" disabled={busy}>{busy?"Verifying proxy…":"Save and verify proxy"}</button></form></>:service?<><h3>{services[service].title}</h3><p>This account-scoped integration is reserved for a future Gakai connection.</p></>:<><h3>Select services</h3><p>Choose a service to configure it for <b>{account.label}</b>.</p></>;
 
   return <div className="details" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <header className="details-head">
@@ -78,10 +132,22 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
         <section className="details-card"><h3>Account name</h3><p>Name this WhatsApp account for your workspace.</p><form onSubmit={saveName}><input name="label" defaultValue={account.label} maxLength="80" required/><button className="primary" disabled={busy}>Save</button></form></section>
         <section className="details-card"><h3>Integrations</h3><p>Connect automation, AI, or custom services with separate account-scoped settings.</p><small>Keys and configuration stay isolated to this WhatsApp account.</small></section>
       </div>
-      <section className="details-card services"><div className="services-list"><h3>Services</h3>{Object.entries(services).map(([key,item])=><button key={key} data-service={key} type="button" className={(service===key?"on ":"")+(item.ready?"has-integration":"")} onClick={()=>setService(key)}>{item.title}<small>{item.subtitle}</small>{item.ready?<span className="integration-check" aria-label="Connected">✓</span>:null}</button>)}</div><div className="service-detail">{detail}{service==="n8n"&&n8n?.connected?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("n8n")}>Delete integration</button>:null}{service==="llm"&&llm?.configured?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("llm")}>Delete integration</button>:null}</div></section>
+      <section className="details-card services"><div className="services-list"><h3>Services</h3>{Object.entries(services).map(([key,item])=><button key={key} data-service={key} type="button" className={(service===key?"on ":"")+(item.ready?"has-integration":"")} onClick={()=>{setService(key);setTestModal(null);setTestResult(null)}}>{item.title}<small>{item.subtitle}</small>{item.ready?<span className="integration-check" aria-label="Connected">✓</span>:null}</button>)}</div><div className="service-detail">{detail}{service==="n8n"&&n8n?.connected?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("n8n")}>Delete integration</button>:null}{service==="llm"&&llm?.configured?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("llm")}>Delete integration</button>:null}</div></section>
       <section className="details-card security"><h3>Administrator profile</h3><p>Update your workspace username or password.</p><form onSubmit={saveProfile}><input name="username" defaultValue={profile?.username||""} placeholder="Username" minLength="3"/><input name="currentPassword" type="password" placeholder="Current password" required/><input name="newPassword" type="password" placeholder="New password (optional)" minLength="10"/><button className="primary" disabled={busy}>Save sign-in details</button></form></section>
       <div className="details-delete"><div><h3>Delete account</h3><p>Remove this WhatsApp account from Gakai. You can add and scan it again later.</p></div><button type="button" className="danger" disabled={busy} onClick={del}>{busy?"Deleting…":"Delete account"}</button></div>
     </main>
+    {testModal&&<div className="modal-overlay" role="presentation" onClick={()=>setTestModal(null)}>
+      <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="test-message-title" onClick={e=>e.stopPropagation()}>
+        <h3 id="test-message-title">Send test message</h3>
+        <p>{testModal.kind==="n8n"?"Send a simulated WhatsApp message to your n8n automation.":"Send a test prompt to your LLM proxy. Add a phone number to also deliver the reply to WhatsApp."}</p>
+        <form className="integration-form" onSubmit={sendTestMessage}>
+          <label>Phone number<input name="phone" type="tel" placeholder="Optional — e.g. 15551234567"/></label>
+          <label>Message<textarea name="text" rows="3" placeholder="This is a Gakai test event." required/></label>
+          <div className="modal-actions"><button type="button" className="secondary" onClick={()=>setTestModal(null)}>Cancel</button><button className="primary" disabled={busy}>{busy?"Sending…":"Send"}</button></div>
+        </form>
+        {testResult&&<p className={testResult.ok?"llm-test-reply":"modal-error"}>{testResult.text}</p>}
+      </div>
+    </div>}
   </div>
 }
 
@@ -118,16 +184,27 @@ function App(){
 
   // SSE carries normalized Gakai events. Keep a low-frequency fallback for
   // provider changes that do not emit a webhook (for example, a QR lifecycle).
+  // `load` and `chats.length` are read through refs rather than as effect
+  // dependencies: chats.length changes on every load() this same effect
+  // triggers, so depending on it directly tore down and reopened the
+  // EventSource connection (and re-registered the SSE query on the server)
+  // on every chat-count change while the inbox was actively syncing.
+  const loadRef=useRef(load);
+  useEffect(()=>{loadRef.current=load},[load]);
+  const chatsLengthRef=useRef(chats.length);
+  useEffect(()=>{chatsLengthRef.current=chats.length},[chats.length]);
   useEffect(()=>{
     if(!account || account.status!=="WORKING") return;
     const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(account.id));
     const update=event=>{
-      try{const change=JSON.parse(event.data);if(change.account?.id===account.id)load(account.id)}catch{}
+      try{const change=JSON.parse(event.data);if(change.account?.id===account.id)loadRef.current(account.id)}catch{}
     };
     stream.addEventListener("gakai",update);
-    const interval=setInterval(()=>load(account.id), chats.length?60000:10000);
-    return()=>{stream.removeEventListener("gakai",update);stream.close();clearInterval(interval)};
-  },[account?.id, account?.status, chats.length, load]);
+    let timer;
+    const schedule=()=>{timer=window.setTimeout(()=>{loadRef.current(account.id);schedule()},chatsLengthRef.current?60000:10000)};
+    schedule();
+    return()=>{stream.removeEventListener("gakai",update);stream.close();window.clearTimeout(timer)};
+  },[account?.id, account?.status]);
 
   useEffect(()=>{api("/api/app/auth/state").then(setAuth).catch(x=>fail(x.message))},[fail]);
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);
@@ -139,19 +216,29 @@ function App(){
 
   // Keep unread state server-authoritative. The badge clears only after the
   // provider has accepted the read receipt; no arbitrary client timer.
-  const handleChatClick=useCallback(async(chatItem)=>{
+  const markingReadRef=useRef(new Set());
+  const handleChatClick=useCallback((chatItem)=>{
     suppressAutoSelectRef.current=false;
     setChat(chatItem);
     if(chatItem.unreadCount && account){
-      try{
-        await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(chatItem.id)+"/read",{method:"POST"});
-        setChats(current=>current.map(c=>c.id===chatItem.id?{...c,unreadCount:0}:c));
-        load(account.id);
-      }catch(x){fail(x.message||"Could not mark this conversation as read");}
+      // A rapid double-click (or clicking away and back before the first
+      // POST resolves) must not fire two concurrent mark-as-read requests.
+      runExclusive(markingReadRef.current,chatItem.id,async()=>{
+        try{
+          await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(chatItem.id)+"/read",{method:"POST"});
+          setChats(current=>current.map(c=>c.id===chatItem.id?{...c,unreadCount:0}:c));
+          load(account.id);
+        }catch(x){fail(x.message||"Could not mark this conversation as read");}
+      });
     }
   },[account,fail,load]);
 
-  const beginPairing=async()=>{
+  const pairingLockRef=useRef(new Set());
+  const beginPairing=()=>runExclusive(pairingLockRef.current,"pairing",async()=>{
+    // Shared by the auto-pair effect below and the manual "+ Connect
+    // account" button — without this guard, clicking the button while the
+    // auto-pair effect's own call is still in flight could create two
+    // account placeholders before refresh() catches up.
     try{
       // A connection must exist before the provider can generate its QR code.
       // Start that work immediately from the user action—there is no redundant
@@ -159,7 +246,7 @@ function App(){
       const d=await api("/api/app/accounts",{method:"POST",body:JSON.stringify({label:"WhatsApp account"})});
       setAdd(false);setPairCreated(true);setPair(d.account);setAccount(d.account);refresh();
     }catch(x){fail(x.message)}
-  };
+  });
 
   // A new workspace has no reason to stop at a second "Connect WhatsApp"
   // screen. Create the first account as soon as setup is complete and let the

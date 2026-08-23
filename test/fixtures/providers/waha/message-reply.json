@@ -1,0 +1,16 @@
+{
+  "id": {
+    "_serialized": "true_551199999999@c.us_3EB0FIXTURE2"
+  },
+  "timestamp": 1735689660,
+  "fromMe": true,
+  "body": "Sounds good!",
+  "text": "Sounds good!",
+  "quotedMsg": {
+    "id": {
+      "_serialized": "false_551199999999@c.us_3EB0FIXTURE1"
+    },
+    "body": "Hello from fixture",
+    "hasMedia": false
+  }
+}

@@ -92,7 +92,6 @@ if port_in_use "$port"; then
 fi
 
 export GAKAI_PORT="$port"
-export GAKAI_PUBLIC_URL="$public_url"
 
 compose_file="docker-compose.yml"
 if [ "${GAKAI_SINGLE_IMAGE:-0}" = "1" ]; then

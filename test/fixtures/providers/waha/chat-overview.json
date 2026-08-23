@@ -1,0 +1,12 @@
+{
+  "id": "551199999999@c.us",
+  "name": "Fixture Contact",
+  "picture": "/api/files/fixture-avatar.jpg",
+  "unreadCount": 3,
+  "lastMessage": {
+    "body": "See you soon",
+    "text": "See you soon",
+    "timestamp": 1735689600,
+    "hasMedia": false
+  }
+}

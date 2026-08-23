@@ -1,36 +1,11 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-
-// Keep the first request small: WEBJS may need a browser-backed provider call
-// for each history page, so a large eager load makes opening chats sluggish.
-const PAGE_SIZE = 20;
-// WAHA engines may return a message id as either a string or a structured key.
-// String(object) is always "[object Object]", which made every such outgoing
-// message share one React/merge key and caused later sends to replace earlier
-// bubbles. Preserve a provider-supplied serialized value, or serialize the
-// complete key as a stable, unique client identity.
-function serializedId(value) {
-  if (typeof value === "string" || typeof value === "number") return String(value);
-  if (!value || typeof value !== "object") return "";
-  const direct = value._serialized || value.serialized;
-  if (typeof direct === "string" || typeof direct === "number") return String(direct);
-  if (typeof value.id === "string" || typeof value.id === "number") return String(value.id);
-  try { return JSON.stringify(value); } catch { return ""; }
-}
-const idFor = (message, index) => serializedId(message?.id) || `${message?.timestamp || 0}-${message?.fromMe ? "out" : "in"}-${message?.body || message?.text || "message"}-${index}`;
-const stamp = (message) => { const value=Number(message?.timestamp); if(Number.isFinite(value)&&value>0)return value; const parsed=Date.parse(message?.timestamp||""); return Number.isFinite(parsed)?Math.floor(parsed/1000):0; };
-const pageOf = (result) => Array.isArray(result) ? result : (result?.messages || []);
-const endpoint = (accountId, chatId, offset = 0) => `/api/app/accounts/${encodeURIComponent(accountId)}/messages?chatId=${encodeURIComponent(chatId)}&limit=${PAGE_SIZE}&offset=${offset}`;
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage } from "./chat-helpers.mjs";
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { "content-type": "application/json", ...(options.headers || {}) }, ...options });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.message || "Request failed");
   return data;
-}
-function merge(current, extra) {
-  const keyed = new Map();
-  [...current, ...extra].forEach((message, index) => keyed.set(idFor(message, index), message));
-  return [...keyed.values()].sort((a, b) => stamp(a) - stamp(b));
 }
 function mediaSrc(message) {
   const raw = message?.mediaUrl || message?.media?.url;
@@ -93,16 +68,28 @@ function PlayableMedia({ kind, src, filename }) {
 function MediaCard({ message, accountId, chatId, onResolved }) {
   const src = mediaSrc(message);
   const needsMedia = Boolean(message?.hasMedia || message?.media || message?.mediaUrl);
+  // Both the resolve request and, once resolved, the media element itself
+  // used to have no error path at all — either failure left the bubble
+  // stuck on "Loading attachment…" forever with no feedback or way to retry.
+  const [resolveFailed, setResolveFailed] = useState(false);
+  const [displayFailed, setDisplayFailed] = useState(false);
+  const [retryToken, setRetryToken] = useState(0);
   useEffect(() => {
     if (!needsMedia || src || !message?.id || !accountId || !chatId) return undefined;
     let active = true;
-    api(`/api/app/accounts/${encodeURIComponent(accountId)}/message-media?chatId=${encodeURIComponent(chatId)}&messageId=${encodeURIComponent(message.id)}`).then(result => { if (active && result?.message) onResolved?.(result.message); }).catch(() => {});
+    setResolveFailed(false);
+    api(`/api/app/accounts/${encodeURIComponent(accountId)}/message-media?chatId=${encodeURIComponent(chatId)}&messageId=${encodeURIComponent(message.id)}`)
+      .then(result => { if (!active) return; if (result?.message) onResolved?.(result.message); else setResolveFailed(true); })
+      .catch(() => { if (active) setResolveFailed(true); });
     return () => { active = false; };
-  }, [accountId, chatId, message?.id, needsMedia, onResolved, src]);
+  }, [accountId, chatId, message?.id, needsMedia, onResolved, src, retryToken]);
   if (!needsMedia) return null;
   const kind = mediaKind(message), filename = message?.media?.filename || (kind === "document" ? "Attachment" : "");
-  if (!src) return <p className="media-unavailable">Loading attachment…</p>;
-  if (kind === "image") return <img className="message-media media image" src={src} alt={message.body || message.text || "Image attachment"} loading="lazy" />;
+  const retry = () => { setResolveFailed(false); setDisplayFailed(false); setRetryToken(token => token + 1); };
+  const failedNotice = <p className="media-unavailable media-failed">Couldn't load attachment <button type="button" onClick={retry}>Retry</button></p>;
+  if (!src) return resolveFailed ? failedNotice : <p className="media-unavailable">Loading attachment…</p>;
+  if (displayFailed) return failedNotice;
+  if (kind === "image") return <img className="message-media media image" src={src} alt={message.body || message.text || "Image attachment"} loading="lazy" onError={() => setDisplayFailed(true)} />;
   if (kind === "video") return <PlayableMedia kind="video" src={src} filename={filename||"video"}/>;
   if (kind === "audio") return <PlayableMedia kind="audio" src={src} filename={filename||"audio"}/>;
   return <a className="message-document" href={src} target="_blank" rel="noreferrer" download={filename}><span aria-hidden="true">▧</span><span>{filename}</span></a>;
@@ -149,6 +136,10 @@ function LinkPreview({ body, preview }) {
     if (!instagram && !imageNode.dataset.directFallback && imageUrl) { imageNode.dataset.directFallback="true"; imageNode.src=imageUrl; return; }
     imageNode.style.display="none";
   }} />;
+  // Instagram: image on top, post info (label/title/description/open link)
+  // below it, same card — this whole card renders above the message text
+  // (see MessageCard). Keep the full info block even without an image, so
+  // the card doesn't jump between a tiny fallback and a tall image card.
   if (instagram) return <a className="link-preview instagram-native-preview" href={url} target="_blank" rel="noreferrer">{previewImage || <div className="site-preview-mark instagram-mark" aria-hidden="true">◎</div>}<span><em>Instagram</em><b>{readable(data.title || "Instagram post", 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}<small className="instagram-open">Open on Instagram ↗</small></span></a>;
   if (!hasContent) {
     let hostname = "Website", label = "Open website";
@@ -167,21 +158,28 @@ function messageBody(text, mentions) {
   const parts=String(text).split(pattern);
   return parts.map((part,index)=>index%2?<mark key={index} className="own-mention">@{part}</mark>:part);
 }
-function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved, onReply, onReact, reaction }) {
+function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved, onReply, onReact, onDelete, reaction }) {
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
+  const isInstagramLink = (() => { if (!previewUrl) return false; try { return /instagram\.com$/i.test(new URL(previewUrl).hostname); } catch { return false; } })();
   const [showReactions, setShowReactions] = useState(false);
   const label = message?.replyTo?.body || (message?.replyTo?.hasMedia ? "Media attachment" : "Message");
   return <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}${message.mentions?.some(mention=>mention.isMe)?" mentioned-me":""}`}>
     {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} />}
     {message?.replyTo && <div className="reply-context"><b>Replying to</b><span>{String(label).slice(0,140)}</span></div>}
     <MediaCard message={message} accountId={accountId} chatId={chatId} onResolved={onMediaResolved} />
+    {isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
     {visibleBody && <span className="message-body">{messageBody(visibleBody,message.mentions)}</span>}
-    <LinkPreview body={body} preview={message?.linkPreview} />
+    {!isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
     {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
     {reaction && <span className="reaction-pill">{reaction}</span>}
-    {!message.pending && !message.fromMe && <div className="message-actions"><button type="button" onClick={()=>onReply?.(message)}>Reply</button><button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>{showReactions&&<span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}</div>}
+    {!message.pending && <div className="message-actions">
+      {!message.fromMe && <button type="button" onClick={()=>onReply?.(message)}>Reply</button>}
+      {!message.fromMe && <button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>}
+      {!message.fromMe && showReactions && <span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}
+      <button type="button" className="message-delete" onClick={()=>onDelete?.(message)} aria-label="Delete this message for you">Delete</button>
+    </div>}
     <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}</time>
   </article>;
 }
@@ -195,7 +193,6 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   const olderRequestRef = useRef(false);
   const followLatestRef = useRef(false);
   const [messages, setMessages] = useState([]);
-  const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [olderLoading, setOlderLoading] = useState(false);
   const [exhausted, setExhausted] = useState(false);
@@ -204,6 +201,9 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   const [replyingTo, setReplyingTo] = useState(null);
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
+  const [newMessageCount, setNewMessageCount] = useState(0);
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const typingSocketRef = useRef(null);
   const typingTimerRef = useRef(null);
   const chatId = chat?.id;
@@ -211,11 +211,40 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   useEffect(()=>{
     setRemoteTyping(false); if(!accountId||!chatId)return undefined;
     const protocol=window.location.protocol==="https:"?"wss":"ws";
-    const socket=new WebSocket(`${protocol}://${window.location.host}/api/app/ws?accountId=${encodeURIComponent(accountId)}&chatId=${encodeURIComponent(chatId)}`);
-    typingSocketRef.current=socket;
-    socket.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==="presence")setRemoteTyping(value.presence==="typing"||value.presence==="recording")}catch{}};
-    return()=>{if(typingSocketRef.current===socket)typingSocketRef.current=null;socket.close();setRemoteTyping(false)};
+    const url=`${protocol}://${window.location.host}/api/app/ws?accountId=${encodeURIComponent(accountId)}&chatId=${encodeURIComponent(chatId)}`;
+    let stopped=false, reconnectTimer=null, attempt=0;
+    // Typing/presence had no reconnect at all: once the socket dropped
+    // (server restart, network blip, idle timeout), it silently stopped
+    // working for the rest of the chat session. Reconnect with capped
+    // exponential backoff, reset once a connection actually succeeds.
+    const connect=()=>{
+      const socket=new WebSocket(url);
+      typingSocketRef.current=socket;
+      socket.onopen=()=>{attempt=0};
+      socket.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==="presence")setRemoteTyping(value.presence==="typing"||value.presence==="recording")}catch{}};
+      socket.onclose=()=>{
+        if(typingSocketRef.current===socket)typingSocketRef.current=null;
+        setRemoteTyping(false);
+        if(stopped)return;
+        const delay=Math.min(1000*2**attempt,15000);
+        attempt+=1;
+        reconnectTimer=window.setTimeout(connect,delay);
+      };
+    };
+    connect();
+    return()=>{
+      stopped=true;
+      if(reconnectTimer)window.clearTimeout(reconnectTimer);
+      if(typingSocketRef.current){typingSocketRef.current.onclose=null;typingSocketRef.current.close();typingSocketRef.current=null}
+      setRemoteTyping(false);
+    };
   },[accountId,chatId]);
+
+  const isNearBottom = useCallback(() => {
+    const pane = paneRef.current;
+    if (!pane) return true;
+    return pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
+  }, []);
 
   const captureAnchor = useCallback(() => {
     const pane = paneRef.current;
@@ -231,12 +260,12 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     restoreAnchorRef.current = null;
     historyRestoreRef.current = null;
     olderRequestRef.current = false;
-    setMessages([]); setOffset(0); setExhausted(false); setError(""); setReplyingTo(null); setReactionOverrides({}); setLoading(Boolean(chatId));
+    setMessages([]); setExhausted(false); setError(""); setReplyingTo(null); setReactionOverrides({}); setNewMessageCount(0); setLoading(Boolean(chatId));
     if (!accountId || !chatId) return undefined;
     api(endpoint(accountId, chatId)).then(result => {
       if (requestRef.current !== version) return;
       const page = pageOf(result).sort((a, b) => stamp(a) - stamp(b));
-      setMessages(page); setOffset(page.length); setExhausted(page.length < PAGE_SIZE);
+      setMessages(page); setExhausted(page.length < PAGE_SIZE);
     }).catch(cause => {
       if (requestRef.current === version) setError(cause.message || "Could not load messages.");
     }).finally(() => {
@@ -246,8 +275,10 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   }, [accountId, chatId]);
 
   // Keep the active conversation live without fanning requests out across the
-  // inbox. Any new sent or received message is an explicit instruction to show
-  // the latest point in the thread.
+  // inbox. A reader already at the bottom should see new messages appear
+  // there automatically (WhatsApp-style); a reader scrolled up into history
+  // should not be yanked away from it — instead surface a "jump to latest"
+  // affordance and let them decide when to come back down.
   useEffect(() => {
     if (!accountId || !chatId) return undefined;
     let active = true;
@@ -255,12 +286,15 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       try {
         const page = pageOf(await api(endpoint(accountId, chatId)));
         if (!active || !page.length) return;
-        setMessages(current => {
-          const known = new Set(current.map((message, index) => idFor(message, index)));
-          const hasNewMessage = page.some((message, index) => !known.has(idFor(message, index)));
-          if (hasNewMessage) followLatestRef.current = true;
-          return hasNewMessage ? merge(current, page) : current;
-        });
+        // Never let a background poll fight an in-flight older-history fetch
+        // over scroll position; the next tick picks up the same messages.
+        if (olderRequestRef.current) return;
+        const known = new Set(messagesRef.current.map((message, index) => idFor(message, index)));
+        const newCount = page.reduce((count, message, index) => count + (known.has(idFor(message, index)) ? 0 : 1), 0);
+        if (!newCount) return;
+        if (isNearBottom()) followLatestRef.current = true;
+        else setNewMessageCount(count => count + newCount);
+        setMessages(current => merge(current, page));
       } catch {
         // A transient provider failure should not replace the open chat with an
         // error state; the next active-chat refresh can recover naturally.
@@ -321,16 +355,18 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   }, [captureAnchor]);
   const loadOlder = useCallback(async () => {
     if (!chatId || olderLoading || exhausted || olderRequestRef.current) return;
+    const oldest = messagesRef.current[0];
+    const before = oldest ? stamp(oldest) : 0;
+    if (!before) return; // nothing loaded yet to page before
     olderRequestRef.current = true;
     const version = requestRef.current;
     const pane = paneRef.current;
     if (pane) historyRestoreRef.current = { top: pane.scrollTop, height: pane.scrollHeight };
     setOlderLoading(true); setError("");
     try {
-      const page = pageOf(await api(endpoint(accountId, chatId, offset)));
+      const page = pageOf(await api(endpoint(accountId, chatId, before)));
       if (requestRef.current !== version) return;
       setMessages(current => merge(current, page));
-      setOffset(current => current + page.length);
       setExhausted(page.length < PAGE_SIZE);
     } catch (cause) {
       if (requestRef.current === version) { historyRestoreRef.current = null; setError(cause.message || "Could not load earlier messages."); }
@@ -338,11 +374,18 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       olderRequestRef.current = false;
       if (requestRef.current === version) setOlderLoading(false);
     }
-  }, [accountId, chatId, exhausted, offset, olderLoading]);
+  }, [accountId, chatId, exhausted, olderLoading]);
 
   const maybeLoadOlder = useCallback(event => {
     if (event.currentTarget.scrollTop <= 120) loadOlder();
-  }, [loadOlder]);
+    if (isNearBottom()) setNewMessageCount(0);
+  }, [loadOlder, isNearBottom]);
+
+  const jumpToLatest = useCallback(() => {
+    setNewMessageCount(0);
+    const pane = paneRef.current;
+    if (pane) pane.scrollTop = pane.scrollHeight;
+  }, []);
 
   const send = useCallback(async event => {
     event.preventDefault();
@@ -353,15 +396,17 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     field.value = "";
     const pending = { id: `pending-${Date.now()}`, body: text, fromMe: true, timestamp: Math.floor(Date.now() / 1000), pending: true, replyTo:replyingTo };
     followLatestRef.current = true;
+    setNewMessageCount(0);
     setMessages(current => [...current, pending]);
     try {
       const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages`, { method: "POST", body: JSON.stringify({ chatId, text, replyTo:replyingTo?.id }) });
-      const confirmed = result.message ? { ...pending, ...result.message, body: result.message.body || result.message.text || pending.body, text: result.message.text || result.message.body || pending.text || pending.body, pending: false } : null;
+      const confirmed = confirmSentMessage(pending, result.message);
       setMessages(current => merge(current.filter(message => message.id !== pending.id), confirmed ? [confirmed] : []));
       setReplyingTo(null);
       onSent?.(result.message, chat);
     } catch (cause) {
       setMessages(current => current.filter(message => message.id !== pending.id));
+      if (field) field.value = nextComposerValue(field.value, text);
       setError(cause.message || "Could not send message.");
     }
   }, [accountId, chat, chatId, onSent, replyingTo, sendPresence]);
@@ -374,6 +419,21 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     catch(cause){setReactionOverrides(current=>({...current,[messageId]:previous}));setError(cause.message||"Could not update reaction.");}
   },[accountId,reactionOverrides]);
   const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800)},[sendPresence]);
+
+  // "Delete for me": removes the message from this account's own view. Does
+  // not remove it from the other participant's WhatsApp — WhatsApp's real
+  // "delete for everyone" only applies to messages you sent and within a
+  // time window, which this deliberately does not attempt.
+  const deleteMessage = useCallback(async (message) => {
+    const messageId = serializedId(message?.id); if (!messageId || !chatId) return;
+    if (!window.confirm("Delete this message for you? It won't be removed from the other person's WhatsApp.")) return;
+    try {
+      await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
+      setMessages(current => current.filter(item => serializedId(item?.id) !== messageId));
+    } catch (cause) {
+      setError(cause.message || "Could not delete this message.");
+    }
+  }, [accountId, chatId]);
 
   const deleteConversation = useCallback(async () => {
     if (!chatId || deleting || !window.confirm(`Delete the conversation with ${chat?.name || chatId}? This removes it from WhatsApp and cannot be undone.`)) return;
@@ -399,8 +459,9 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
       {loading && !messages.length ? <p className="chat-loading">Loading messages…</p> : <div className="message-list">
-        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
+        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
+      {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
     <form className="composer" onSubmit={send}>

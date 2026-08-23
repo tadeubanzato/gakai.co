@@ -1,0 +1,13 @@
+{
+  "id": {
+    "_serialized": "false_551199999999@c.us_3EB0FIXTURE5"
+  },
+  "timestamp": 1735689840,
+  "fromMe": false,
+  "hasMedia": true,
+  "media": {
+    "url": "/api/files/fixture-image.jpg",
+    "mimetype": "image/jpeg",
+    "filename": "fixture-image.jpg"
+  }
+}
