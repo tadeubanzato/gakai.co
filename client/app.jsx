@@ -82,9 +82,11 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
   };
   // Shared by both the n8n and LLM Proxy "Send test message" buttons — same
   // modal (phone number + message), routed to whichever endpoint the open
-  // modal's kind calls for. The phone number only means something for n8n
-  // (it becomes the simulated sender); /llm/test has no notion of a sender,
-  // so it's simply not sent there.
+  // modal's kind calls for. For n8n, the phone number is both the simulated
+  // sender and where the workflow's reply gets delivered. For the direct LLM
+  // proxy there's no simulated inbound message — the phone number, if given,
+  // is just where the proxy's reply gets delivered; left blank, it's a
+  // connectivity check only (proxy called, reply shown, nothing sent).
   const sendTestMessage=async e=>{
     e.preventDefault();
     const f=e.currentTarget,phone=f.phone.value.trim(),text=f.text.value.trim();
@@ -96,8 +98,8 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
         setTestResult({ok:true,text:result.reply?`Reply from n8n: "${result.reply}"${phone?" — sent to "+phone:""}`:"Delivered to n8n, but the workflow sent back no reply — check your n8n execution log."});
         await refresh();
       }else{
-        await api(base+"/llm/test",{method:"POST",body:JSON.stringify({prompt:text})});
-        setTestResult({ok:true,text:"Message sent using LLM Proxy — the proxy replied successfully."});
+        const result=await api(base+"/llm/test",{method:"POST",body:JSON.stringify({prompt:text,phone})});
+        setTestResult({ok:true,text:result.delivered?`Reply from LLM Proxy: "${result.reply}" — sent to ${phone}`:`LLM Proxy replied: "${result.reply}" (enter a phone number above to actually deliver it to WhatsApp)`});
       }
     }catch(x){
       setTestResult({ok:false,text:x.message});
@@ -137,7 +139,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
     {testModal&&<div className="modal-overlay" role="presentation" onClick={()=>setTestModal(null)}>
       <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="test-message-title" onClick={e=>e.stopPropagation()}>
         <h3 id="test-message-title">Send test message</h3>
-        <p>{testModal.kind==="n8n"?"Send a simulated WhatsApp message to your n8n automation.":"Send a test prompt to your LLM proxy to verify it replies successfully."}</p>
+        <p>{testModal.kind==="n8n"?"Send a simulated WhatsApp message to your n8n automation.":"Send a test prompt to your LLM proxy. Add a phone number to also deliver the reply to WhatsApp."}</p>
         <form className="integration-form" onSubmit={sendTestMessage}>
           <label>Phone number<input name="phone" type="tel" placeholder="Optional — e.g. 15551234567"/></label>
           <label>Message<textarea name="text" rows="3" placeholder="This is a Gakai test event." required/></label>

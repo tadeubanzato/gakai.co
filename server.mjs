@@ -1006,7 +1006,25 @@ async function enrichMessage(session,message){
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
   // LLM proxy config endpoints
-  if(parts[4]==='llm'&&parts[5]==='test'&&req.method==='POST'){const cfg=llmConfig(id),input=await readBody(req),prompt=String(input.prompt||'').trim();if(!cfg)return send(res,409,{message:'Save an LLM proxy before testing it'});if(!prompt||prompt.length>4000)return send(res,400,{message:'Enter a test prompt up to 4,000 characters'});try{return send(res,200,{reply:await llmChat(cfg,[{role:'system',content:cfg.systemPrompt||'You are a helpful assistant.'},{role:'user',content:prompt}])});}catch(error){return send(res,502,{message:error.message||'LLM test failed'});}}
+  if(parts[4]==='llm'&&parts[5]==='test'&&req.method==='POST'){
+    const cfg=llmConfig(id),input=await readBody(req),prompt=String(input.prompt||'').trim();
+    if(!cfg)return send(res,409,{message:'Save an LLM proxy before testing it'});
+    if(!prompt||prompt.length>4000)return send(res,400,{message:'Enter a test prompt up to 4,000 characters'});
+    const phone=String(input.phone||'').replace(/[^0-9]/g,'');
+    if(phone.length>30)return send(res,400,{message:'Invalid test phone number'});
+    let reply;
+    try{reply=await llmChat(cfg,[{role:'system',content:cfg.systemPrompt||'You are a helpful assistant.'},{role:'user',content:prompt}]);}
+    catch(error){return send(res,502,{message:error.message||'LLM test failed'});}
+    // A phone number is opt-in delivery: same providerRequest('/api/sendText')
+    // call dispatchLLMReply makes for a real inbound message, so this
+    // actually proves the full native-reply path, not just proxy connectivity.
+    if(phone&&reply.trim()){
+      try{await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,chatId:`${phone}@c.us`,text:reply.trim()})});}
+      catch(error){return send(res,502,{message:'The proxy replied, but delivering it to WhatsApp failed: '+(error.message||'Unknown error'),reply});}
+      return send(res,200,{reply,delivered:true});
+    }
+    return send(res,200,{reply,delivered:false});
+  }
   if(parts[4]==='llm'&&req.method==='GET'){const cfg=llmConfig(id);return send(res,200,cfg?{configured:true,provider:cfg.provider||inferLlmProvider(cfg.baseUrl),baseUrl:cfg.baseUrl,model:cfg.model,systemPrompt:cfg.systemPrompt||'',nativeEnabled:cfg.nativeEnabled||false,apiKeyLength:String(cfg.apiKey||'').length,apiKeyLast4:String(cfg.apiKey||'').slice(-4)}:{configured:false});}
   if(parts[4]==='llm'&&req.method==='POST'){
     const input=await readBody(req);
