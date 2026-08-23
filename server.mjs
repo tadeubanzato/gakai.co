@@ -1000,13 +1000,32 @@ async function enrichMessage(session,message){
         if(!test.ok&&test.status!==400)throw new Error(td?.error?.message||`Proxy returned ${test.status}`);
       }catch(err){return send(res,400,{message:'Could not connect to LLM proxy: '+err.message});}
     }
-    const nextConfig={accountId:id,provider,baseUrl,apiKey,model,systemPrompt:assistantInstructions(String(input.systemPrompt||'').slice(0,4000)),nativeEnabled:Boolean(input.nativeEnabled),configuredAt:existing?.configuredAt||new Date().toISOString()};
+    // nativeEnabled is managed by its own immediate PATCH /llm toggle below,
+    // not this form — preserve whatever it's currently set to rather than
+    // reading a stale/absent field from this save.
+    const nextConfig={accountId:id,provider,baseUrl,apiKey,model,systemPrompt:assistantInstructions(String(input.systemPrompt||'').slice(0,4000)),nativeEnabled:existing?.nativeEnabled||false,configuredAt:existing?.configuredAt||new Date().toISOString()};
     let n8nInstructionsSynced=false;
     try{n8nInstructionsSynced=await syncAgenticN8nInstructions(id,nextConfig);}catch(error){return send(res,502,{message:'LLM proxy verified, but the n8n AI workflow was not updated: '+(error.message||'Unknown error')});}
     store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);
     store.llmConfigs.push(nextConfig);
     await persist();
     return send(res,200,{ok:true,n8nInstructionsSynced});
+  }
+  // Immediate "Enable native AI replies" toggle — mirrors /n8n/connect/ai's
+  // immediacy so both mutually-exclusive reply paths behave the same way
+  // (no need to resubmit the whole proxy form just to flip this).
+  if(parts[4]==='llm'&&parts[5]==='native'&&req.method==='PATCH'){
+    const config=llmConfig(id);
+    if(!config)return send(res,404,{message:'Save an LLM proxy before enabling native replies'});
+    const input=await readBody(req);
+    config.nativeEnabled=Boolean(input.nativeEnabled);
+    // Mutual exclusivity: only one reply path may be live at a time.
+    if(config.nativeEnabled){
+      const agenticSub=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect (AI Agent)');
+      if(agenticSub)agenticSub.enabled=false;
+    }
+    await persist();
+    return send(res,200,{ok:true,nativeEnabled:config.nativeEnabled});
   }
   if(parts[4]==='llm'&&req.method==='DELETE'){store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);await persist();return send(res,200,{ok:true});}
   if(parts[4]==='n8n'&&parts[5]==='connect'&&!parts[6]&&req.method==='POST'){
@@ -1046,13 +1065,36 @@ async function enrichMessage(session,message){
     n8nConnectLocks.set(id,attempt);
     try{ return await attempt; } finally{ n8nConnectLocks.delete(id); }
   }
+  // "Enable n8n AI Agent replies": creates the AI Agent workflow the first
+  // time (this is the "later explicit activation step" the workflow was
+  // deliberately left disabled for), or just re-activates and re-syncs an
+  // existing one — idempotent either way, so the client only needs one
+  // action for both "set it up" and "turn it back on".
   if(parts[4]==='n8n'&&parts[5]==='connect'&&parts[6]==='ai'&&req.method==='POST'){
     const lockKey=`${id}:agentic`;
     if(n8nConnectLocks.has(lockKey))return send(res,409,{message:'A connection attempt is already in progress for this account'});
     const attempt=(async()=>{
-      if(!llmConfig(id))return send(res,400,{message:'Connect an LLM proxy before creating an AI workflow'});
-      try{const built=await createAgenticN8nWorkflow(id);if(!built)return send(res,409,{message:'Connect n8n first, or AI replies are already enabled'});return send(res,201,{ok:true,workflowId:built.workflowId,workflowName:built.workflowName,workflowUrl:store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic')?.n8nUrl+'/workflow/'+built.workflowId,activationWarning:built.activationWarning});}
-      catch(error){return send(res,error.status||502,{message:'Failed to create n8n AI workflow: '+(error.message||'Unknown error')});}
+      const config=llmConfig(id);
+      if(!config)return send(res,400,{message:'Connect an LLM proxy before enabling AI Agent replies'});
+      try{
+        let connection=store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic');
+        let activationWarning=null;
+        if(!connection){
+          const built=await createAgenticN8nWorkflow(id);
+          activationWarning=built.activationWarning;
+          connection=store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic');
+        }else{
+          // Bring an already-existing workflow's instructions/model/shape
+          // up to date before going live with it again.
+          await syncAgenticN8nInstructions(id,config).catch(error=>console.error('Failed to sync n8n AI Agent workflow on enable:',error.message));
+        }
+        const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect (AI Agent)');
+        if(subscription)subscription.enabled=true;
+        // Mutual exclusivity: only one reply path may be live at a time.
+        if(config.nativeEnabled)config.nativeEnabled=false;
+        await persist();
+        return send(res,200,{ok:true,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,activationWarning});
+      }catch(error){return send(res,error.status||502,{message:'Failed to enable n8n AI Agent replies: '+(error.message||'Unknown error')});}
     })();
     n8nConnectLocks.set(lockKey,attempt);
     try{ return await attempt; } finally{ n8nConnectLocks.delete(lockKey); }
