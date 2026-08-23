@@ -291,7 +291,22 @@ function chatPictureFor(session,chatId){
   chatPictureCache.set(key,task,{ttlMs:5*60*1000});
   return task;
 }
-async function enrichChatOverview(session,chat){const view=chatOverview(chat);if(!view.picture&&view.id)view.picture=await chatPictureFor(session,view.id);return view}
+async function enrichChatOverview(session,chat){
+  const view=chatOverview(chat);
+  if(!view.picture&&view.id)view.picture=await chatPictureFor(session,view.id);
+  // Same bug as enrichMessage's main body, different location: the inbox
+  // list's "last message" preview text never resolved @123456 mentions
+  // either — it went straight from chatOverview() to the client untouched.
+  if(view.lastMessage){
+    const mentionIds=extractMentionIds(view.lastMessage.body,view.lastMessage.text);
+    if(mentionIds.length){
+      const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContact(session,`${id}@lid`)]));
+      const labels=new Map(contacts.map(([id,contact])=>[id,contact.name||String(contact.id||'').replace(/@(c|s|g)\.us$/,'')]).filter(([,label])=>label));
+      view.lastMessage={...view.lastMessage,body:resolveMentionLabels(view.lastMessage.body,labels),text:resolveMentionLabels(view.lastMessage.text,labels)};
+    }
+  }
+  return view;
+}
 async function mapWithConcurrency(values,limit,worker){const result=new Array(values.length);let next=0;await Promise.all(Array.from({length:Math.min(limit,values.length)},async()=>{while(next<values.length){const index=next++;result[index]=await worker(values[index])}}));return result}
 async function allChatOverviews(session){
   const limit=100,all=[];let offset=0;
