@@ -132,6 +132,22 @@ video.media{background:#000}
 .workflow-links span { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
 .workflow-links b { overflow:hidden; color:var(--ink); text-overflow:ellipsis; white-space:nowrap; }
 .workflow-links em { grid-column:2; grid-row:1 / span 2; align-self:center; font-size:12px; font-style:normal; }
+/* A workflow's "open in n8n" link and its enable toggle are one decision —
+   render them as a single card (link row on top, toggle row below a
+   divider) instead of two visually unrelated boxes stacked apart. */
+.workflow-card { margin:12px 0 14px; border:1px solid #31424b; border-radius:9px; background:#0d1f27; overflow:hidden; }
+.workflow-card .workflow-card-link { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:2px 12px; padding:11px; color:#8ce6cf; text-decoration:none; }
+.workflow-card .workflow-card-link:hover { background:#12332f; }
+.workflow-card .workflow-card-link span { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+.workflow-card .workflow-card-link b { overflow:hidden; color:var(--ink); text-overflow:ellipsis; white-space:nowrap; }
+.workflow-card .workflow-card-link em { grid-column:2; grid-row:1 / span 2; align-self:center; font-size:12px; font-style:normal; }
+.workflow-card-toggle { display:flex; flex-direction:row; align-items:flex-start; gap:10px; padding:11px; border-top:1px solid #31424b; color:var(--ink); cursor:pointer; }
+.workflow-card-toggle:first-child { border-top:none; }
+.workflow-card-toggle:hover { background:#102b2d; }
+.workflow-card-toggle input { flex:none; width:16px; height:16px; margin:2px 0 0; accent-color:#25d366; }
+.workflow-card-toggle span { display:grid; gap:3px; min-width:0; }
+.workflow-card-toggle b { font-size:13px; }
+.workflow-card-toggle small { color:var(--muted); font-size:12px; line-height:1.35; }
 
 @media(max-width:720px) {
   .mobile-account-switcher {
