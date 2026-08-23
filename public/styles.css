@@ -104,7 +104,7 @@ video.media{background:#000}
    fixed to the left column and its text fixed to the right column. A CSS
    grid with explicit columns is used instead of flex `order` so the circle
    can never end up on the wrong side regardless of source order. */
-.checkbox-field { display:grid; grid-template-columns:21px minmax(0,1fr); align-items:start; text-align:left; gap:10px; padding:12px; border:1px solid #31424b; border-radius:10px; background:#0d1f27; color:var(--ink); cursor:pointer; margin:0 0 14px; transition:border-color .15s,background .15s,transform .05s; -webkit-tap-highlight-color:transparent; }
+.checkbox-field { display:grid; grid-template-columns:21px minmax(0,1fr); align-items:start; text-align:left; gap:14px; padding:12px; border:1px solid #31424b; border-radius:10px; background:#0d1f27; color:var(--ink); cursor:pointer; margin:0 0 14px; transition:border-color .15s,background .15s,transform .05s; -webkit-tap-highlight-color:transparent; }
 .checkbox-field:hover { border-color:#4c7170; background:#102b2d; }
 .checkbox-field:active { transform:scale(.99); }
 .checkbox-field:has(input:checked) { border-color:#25d366; background:#0f2b23; }
