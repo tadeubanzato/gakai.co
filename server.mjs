@@ -670,7 +670,11 @@ async function createAgenticN8nWorkflow(accountId,req){
   return built;
 }
 async function llmChat(config,messages){
-  const response=await fetch(llmChatCompletionsUrl(config.baseUrl),{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify(llmRequestBody(config,messages)),signal:AbortSignal.timeout(30000)});
+  // allowPrivate: an admin-configured LLM proxy is trusted input, and a
+  // self-hosted proxy on a private/local address is an expected setup here
+  // (unlike Instagram/link-preview URLs) — still resolve-once-and-pin to
+  // close the DNS-rebind gap without rejecting private targets.
+  const response=await fetchPinned(llmChatCompletionsUrl(config.baseUrl),{allowPrivate:true,method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify(llmRequestBody(config,messages)),signal:AbortSignal.timeout(30000)});
   const text=await response.text();let data;try{data=JSON.parse(text)}catch{throw new Error('LLM proxy returned invalid JSON')}
   if(!response.ok)throw new Error(data?.error?.message||data?.message||`LLM proxy error ${response.status}`);
   return data?.choices?.[0]?.message?.content||'';
@@ -939,7 +943,7 @@ async function enrichMessage(session,message){
     const settingsOnly=String(input.apiKey||'')==='__keep__'&&existing&&existing.baseUrl===baseUrl&&existing.model===model;
     if(!settingsOnly){
       try{
-        const test=await fetch(llmChatCompletionsUrl(baseUrl),{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${apiKey}`},body:JSON.stringify(llmRequestBody({model},[{role:'user',content:'hi'}],{max_tokens:1})),signal:AbortSignal.timeout(15000)});
+        const test=await fetchPinned(llmChatCompletionsUrl(baseUrl),{allowPrivate:true,method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${apiKey}`},body:JSON.stringify(llmRequestBody({model},[{role:'user',content:'hi'}],{max_tokens:1})),signal:AbortSignal.timeout(15000)});
         const td=await test.json().catch(()=>({}));
         if(!test.ok&&test.status!==400)throw new Error(td?.error?.message||`Proxy returned ${test.status}`);
       }catch(err){return send(res,400,{message:'Could not connect to LLM proxy: '+err.message});}

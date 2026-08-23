@@ -29,13 +29,18 @@ export async function resolvePublicAddress(hostname, { lookupImpl = dnsLookup, i
   return addresses[0];
 }
 
-export async function validatePublicUrl(value, { requireHttps = false, lookupImpl, isPrivate } = {}) {
+export async function validatePublicUrl(value, { requireHttps = false, lookupImpl, isPrivate, allowPrivate = false } = {}) {
   let url;
   try { url = new URL(value); } catch { return null; }
   const protocolOk = requireHttps ? url.protocol === 'https:' : /^https?:$/.test(url.protocol);
-  if (!protocolOk || url.hostname === 'localhost' || url.hostname.endsWith('.local')) return null;
+  if (!protocolOk) return null;
+  if (!allowPrivate && (url.hostname === 'localhost' || url.hostname.endsWith('.local'))) return null;
   try {
-    const address = await resolvePublicAddress(url.hostname, { lookupImpl, isPrivate });
+    // allowPrivate is for admin-configured, trusted targets (e.g. a self-hosted
+    // LLM proxy) where a private/local address is an expected, legitimate
+    // destination rather than an SSRF risk — we still resolve once and pin
+    // the connection to that address, just without rejecting private ranges.
+    const address = await resolvePublicAddress(url.hostname, { lookupImpl, isPrivate: allowPrivate ? (() => false) : isPrivate });
     return address ? { url, address } : null;
   } catch { return null; }
 }
@@ -76,7 +81,7 @@ export async function fetchPinned(value, options = {}) {
   const maxRedirects = options.maxRedirects ?? 5;
   let target = value;
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    const validated = await validatePublicUrl(target, { requireHttps: options.requireHttps, lookupImpl: options.lookupImpl, isPrivate: options.isPrivate });
+    const validated = await validatePublicUrl(target, { requireHttps: options.requireHttps, lookupImpl: options.lookupImpl, isPrivate: options.isPrivate, allowPrivate: options.allowPrivate });
     if (!validated) throw Object.assign(new Error('Invalid public URL'), { status: 400 });
     const response = await performPinnedRequest(validated, options);
     const isRedirect = [301, 302, 303, 307, 308].includes(response.status);

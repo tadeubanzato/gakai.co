@@ -63,6 +63,44 @@ test('fetchPinned rejects a target that fails validation before ever connecting'
   await assert.rejects(fetchPinned('https://internal.example/', { lookupImpl }), error => error.status === 400);
 });
 
+test('validatePublicUrl with allowPrivate accepts a private-range address (self-hosted LLM proxy case)', async () => {
+  const lookupImpl = async () => [{ address: '192.168.1.50' }];
+  const result = await validatePublicUrl('http://192.168.1.50:11434/v1/chat/completions', { lookupImpl, allowPrivate: true });
+  assert.ok(result, 'a trusted admin-configured proxy on a private address must still validate');
+  assert.equal(result.address, '192.168.1.50');
+});
+
+test('validatePublicUrl with allowPrivate still accepts localhost and .local hostnames', async () => {
+  const lookupImpl = async () => [{ address: '127.0.0.1' }];
+  assert.ok(await validatePublicUrl('http://localhost:11434/', { lookupImpl, allowPrivate: true }));
+  assert.ok(await validatePublicUrl('http://box.local:11434/', { lookupImpl, allowPrivate: true }));
+});
+
+test('validatePublicUrl without allowPrivate still rejects private addresses (no regression for other callers)', async () => {
+  const lookupImpl = async () => [{ address: '192.168.1.50' }];
+  assert.equal(await validatePublicUrl('http://192.168.1.50/', { lookupImpl }), null);
+});
+
+test('fetchPinned with allowPrivate still pins the connection to the single resolved address (DNS-rebind protection preserved for private targets)', async () => {
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('proxy-response'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+
+  let lookupCalls = 0;
+  const lookupImpl = async () => { lookupCalls += 1; return [{ address: '127.0.0.1' }]; };
+
+  try {
+    const response = await fetchPinned(`http://llm-proxy.invalid:${port}/`, { lookupImpl, allowPrivate: true });
+    const body = await response.text();
+
+    assert.equal(response.ok, true);
+    assert.equal(body, 'proxy-response');
+    assert.equal(lookupCalls, 1, 'must still resolve once and pin, not re-resolve at connect time');
+  } finally {
+    server.close();
+  }
+});
+
 test('fetchPinned re-validates and re-pins each redirect hop independently', async () => {
   let hits = 0;
   const server = http.createServer((req, res) => {
