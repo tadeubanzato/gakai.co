@@ -34,16 +34,15 @@
 
 ## How it works
 
-Gakai runs as **two Docker containers** managed by a single `docker compose up` command:
+Gakai runs as **one Docker container**, started with a single `docker compose up`:
 
 | Container | What it does | Exposed? |
 |---|---|---|
-| `gakai` | Dashboard, authentication, API, automation gateway | Yes — port 3000 |
-| `gakai-provider` | WhatsApp protocol engine, sessions, QR lifecycle | No — private network only |
+| `gakai` | Dashboard, authentication, API, WhatsApp connectivity, automation gateway | Yes — port 3000 |
 
-The provider container is an internal implementation detail. It sits on a private Docker network with no host port — it is never reachable from a browser or the internet. Gakai is the only thing users interact with.
+There is no separate WhatsApp provider process to run, configure, or pull. Gakai connects to WhatsApp directly, in-process, using [Baileys](https://github.com/WhiskeySockets/Baileys) — an open-source WhatsApp Web client library. Nothing outside Gakai's own image is pulled or contacted to send or receive a message.
 
-> **Dependency note:** Gakai's WhatsApp connectivity is a direct, self-maintained integration — there is no third-party WhatsApp service in the message path. The roadmap goal is to bundle the whole thing into a single Gakai image so no external pull is required.
+> **Dependency note:** Gakai's WhatsApp connectivity is a direct, self-maintained integration (`@whiskeysockets/baileys`) baked into the Gakai image — there is no third-party WhatsApp service, no second container, and no external pull in the message path. Remaining roadmap work is publishing a signed `docker pull gakai` registry image, not another architecture change.
 
 ---
 
@@ -61,12 +60,13 @@ The provider container is an internal implementation detail. It sits on a privat
 | n8n one-click automation connect | ✅ Live |
 | Webhook automation subscriptions | ✅ Live |
 | scrypt password hashing (salted) | ✅ Live |
-| HMAC-SHA512 provider webhook verification | ✅ Live |
+| Direct, in-process Baileys WhatsApp integration — no provider process | ✅ Live |
+| Authenticated automation webhook delivery (per-subscription secret) | ✅ Live |
 | SQLite state in WAL mode | ✅ Live |
 | `/healthz` and `/readyz` endpoints | ✅ Live |
-| Provider-neutral architecture | 🔄 In progress — provider transport is now behind an internal adapter; message and event normalization migration continues |
+| Provider-adapter architecture — WhatsApp connectivity isolated behind `src/providers/` | ✅ Live |
 | SSE / WebSocket real-time push | ✅ Live — authenticated SSE plus WebSocket typing/presence |
-| Single-image distribution (no external pull) | 🔄 In progress — a combined-image runtime is available for validation; registry publishing remains to be added |
+| Single-container distribution (no external pull) | ✅ Live — remaining work is publishing a signed `docker pull gakai` registry image, not another architecture change |
 
 ---
 
@@ -79,20 +79,7 @@ The provider container is an internal implementation detail. It sits on a privat
 | `openssl` | any | generates secrets on first run |
 | Port 3000 | free | configurable via `GAKAI_PORT` |
 
-No Node.js required on the host. Everything runs inside the containers.
-
-### Combined-image preview
-
-The default installation uses the proven two-container setup. To validate the
-combined Gakai image, set `GAKAI_SINGLE_IMAGE=1` when starting. It runs the
-provider privately inside the Gakai container and exposes only Gakai's port:
-
-```sh
-GAKAI_SINGLE_IMAGE=1 ./scripts/gakai-up.sh
-```
-
-This is the runtime foundation for a future published `docker pull` image. The
-repository does not yet publish or sign a registry image.
+No Node.js required on the host. Everything runs inside the one container.
 
 ---
 
@@ -127,7 +114,7 @@ The launcher:
 1. Checks Docker and Docker Compose are available
 2. Verifies the target port is free
 3. Generates a private `.env` with random internal secrets (first run only)
-4. Builds the Gakai image and starts both containers
+4. Builds the Gakai image and starts the container
 5. Prints the URL to open
 
 Output when ready:
@@ -280,12 +267,16 @@ All variables are optional. The launcher sets safe defaults automatically.
 
 | Variable | Default | Description |
 |---|---|---|
+| `GAKAI_STATE_SECRET` | _(auto-generated)_ | Encrypts sensitive values Gakai stores locally (e.g. a connected n8n instance's API key) |
 | `GAKAI_PORT` | `3000` | Host port Gakai listens on |
 | `GAKAI_BIND_ADDRESS` | `0.0.0.0` | Network interface (`127.0.0.1` for local-only) |
-| `GAKAI_PROVIDER_API_KEY` | _(auto-generated)_ | Internal credential between Gakai and its provider |
-| `GAKAI_PROVIDER_WEBHOOK_SECRET` | _(auto-generated)_ | HMAC key for verifying provider webhook payloads |
+| `GAKAI_PUBLIC_URL` | _(auto-detected)_ | Overrides the URL the launcher prints, for a reverse proxy or domain name |
+| `GAKAI_SESSION_TTL_MS` | `86400000` (24h) | How long an admin login session stays valid |
+| `GAKAI_INBOX_RECENCY_DAYS` | `60` | How many days back a chat with no recent activity still counts as active inbox |
+| `GAKAI_INBOX_CHAT_LIMIT` | `40` | How many chats the inbox shows at once |
+| `GAKAI_INSTAGRAM_PREVIEW_RETRY_MS` | `300000` (5m) | Retry delay for a failed Instagram link-preview fetch |
 
-> Do not edit `.env` manually. The launcher manages it. Secrets are auto-generated with `openssl rand -hex 32` on first run and are never exposed to the browser or logs.
+> Do not edit `.env` manually. The launcher manages it — `GAKAI_STATE_SECRET` is auto-generated with `openssl rand -hex 32` on first run and is never exposed to the browser or logs. See `.env.example` for the authoritative, commented list.
 
 ---
 
@@ -300,8 +291,7 @@ docker compose ps
 ### View logs
 
 ```sh
-docker compose logs -f home      # Gakai application
-docker compose logs -f provider  # WhatsApp engine
+docker compose logs -f gakai
 ```
 
 ### Health checks
@@ -311,8 +301,10 @@ curl http://localhost:3000/healthz
 # → {"ok":true,"service":"gakai"}
 
 curl http://localhost:3000/readyz
-# → {"ok":true} or error details if the provider is unreachable
+# → {"ok":true,"service":"gakai","provider":true}
 ```
+
+`readyz` reports the WhatsApp connectivity layer as always ready — there's no separate provider process whose reachability it needs to check anymore; it's in-process.
 
 ### Stop
 
@@ -327,7 +319,7 @@ git pull --ff-only origin main
 ./scripts/gakai-up.sh
 ```
 
-The launcher rebuilds the Gakai image and restarts both containers. Data in `home-data/` and `sessions/` is preserved.
+The launcher rebuilds the Gakai image and restarts the container. Data in `home-data/` and `sessions/` is preserved.
 
 ---
 
@@ -344,29 +336,26 @@ The launcher rebuilds the Gakai image and restarts both containers. Data in `hom
 │                    gakai  :3000                         │
 │  ┌──────────────────────────────────────────────────┐   │
 │  │  Authentication    scrypt · session tokens        │   │
-│  │  Account manager   WhatsApp session lifecycle     │   │
+│  │  Account manager   Baileys socket per account     │   │
+│  │  WhatsApp adapter  src/providers/baileys — in-     │   │
+│  │                    process, direct, no HTTP hop    │   │
 │  │  Message shaping   normalize provider payloads    │   │
 │  │  Media relay       cached · ranged responses      │   │
-│  │  Automation        HMAC-verified webhook gateway  │   │
+│  │  Automation        authenticated webhook gateway  │   │
 │  │  SQLite state      WAL mode · durable             │   │
 │  └──────────────────────────────────────────────────┘   │
-└───────────────────────┬─────────────────────────────────┘
-                        │  Docker private network
-                        │  (no host port — never browser-accessible)
-                        ▼
-┌─────────────────────────────────────────────────────────┐
-│               gakai-provider  (internal only)           │
-│     WhatsApp protocol · Sessions · QR lifecycle         │
-│     Pulled automatically by Docker Compose              │
 └─────────────────────────────────────────────────────────┘
+                        │
+                        ▼  (outbound only — Baileys' own
+                            WebSocket connection to WhatsApp)
 ```
 
 **Design rules:**
 
-- The browser talks only to Gakai — never to the provider directly
-- Provider payloads are normalized at the server boundary before reaching the UI
-- The provider sits on a private Docker network with no host port
-- The provider adapter is designed to be swapped without changing the Gakai API or UI
+- The browser talks only to Gakai — never receives WhatsApp credentials or direct provider access
+- Provider payloads are normalized at the server boundary (`src/domain/message.mjs`) before reaching the UI
+- WhatsApp connectivity is isolated behind `src/providers/` so the adapter (currently Baileys) could be swapped without changing the Gakai API or UI
+- No separate provider process, no internal Docker network, no second image to pull — one container, one outbound connection (to WhatsApp itself)
 
 ---
 
@@ -377,10 +366,10 @@ The launcher rebuilds the Gakai image and restarts both containers. Data in `hom
 | Password storage | scrypt + random salt, stored as hex hash — never plaintext |
 | Session tokens | 32-byte cryptographically random, `HttpOnly; SameSite=Strict` cookie |
 | Timing attacks | `timingSafeEqual` for all credential comparisons |
-| Internal credential | Auto-generated 256-bit hex key, never sent to browser or logs |
-| Provider webhook | HMAC-SHA512 signature verified on every inbound event |
-| Media relay | Only `/api/files/` paths relayed; SSRF guard on external fetches |
-| Provider isolation | Private Docker network, no host port on the provider container |
+| Stored secrets (e.g. a connected n8n API key) | Encrypted at rest with AES-256-GCM, keyed by `GAKAI_STATE_SECRET` |
+| Automation webhook delivery | Authenticated with a per-subscription secret header (`x-gakai-secret`), HTTPS-only |
+| Media relay | Served only through Gakai's own on-demand endpoint (`/api/app/media`), never a raw provider URL; SSRF guard on external fetches |
+| Browser isolation | The browser never receives WhatsApp session credentials or talks to Baileys directly — only Gakai's own `/api/app/*` endpoints |
 
 ---
 
@@ -389,9 +378,9 @@ The launcher rebuilds the Gakai image and restarts both containers. Data in `hom
 ### Validate JavaScript (no local Node needed)
 
 ```sh
-docker compose build home
-docker compose run --rm --no-deps home node --check /app/public/assets/app.js
-docker compose run --rm --no-deps home node --check /app/server.mjs
+docker compose build gakai
+docker compose run --rm --no-deps gakai node --check /gakai/public/assets/app.js
+docker compose run --rm --no-deps gakai node --check /gakai/server.mjs
 ```
 
 `docker compose build` runs esbuild on `client/*.jsx` as part of the image build, so it catches JSX/bundling errors; `node --check` then validates the compiled, JSX-free output.
@@ -419,27 +408,31 @@ Sanitized provider payload fixtures live in `test/fixtures/providers/baileys/`. 
 
 ```
 gakai.co/
-├── server.mjs              # Node HTTP server — auth, API, provider proxy, automation
+├── server.mjs              # Node HTTP server — auth, API, in-process WhatsApp integration, automation
 ├── client/
-│   ├── app.jsx             # React browser application
-│   └── chat.jsx            # Conversation view
+│   ├── app.jsx             # React browser application — accounts, pairing/QR
+│   ├── chat.jsx            # Conversation view — composer, message list, presence
+│   ├── chat-helpers.mjs    # Pure helpers: pagination, optimistic send, message merge
+│   ├── app-helpers.mjs     # Shared fetch wrapper and async-mutex helper
+│   └── ui-helpers.jsx      # Shared UI bits (avatar, etc.)
 ├── public/
 │   ├── assets/app.js       # esbuild output of client/ (generated, gitignored)
 │   ├── styles.css          # Dashboard styles
 │   └── index.html          # Entry document
 ├── src/
+│   ├── domain/             # Message/chat normalization — provider payload in, Gakai view model out (fixture-tested)
+│   ├── providers/
+│   │   ├── baileys/        # The WhatsApp adapter: socket lifecycle, local SQLite store, media cache
+│   │   ├── mock/            # In-memory test double with the same method surface, used by the test suite
+│   │   └── index.mjs        # Single provider-selection point
 │   ├── api/                # Planned provider-neutral API layer
-│   ├── domain/             # Message/chat normalization (fixture-tested)
-│   ├── providers/baileys/  # WhatsApp provider adapter (session manager, local store, media)
 │   ├── storage/            # Planned storage abstraction
 │   ├── realtime/           # Realtime extraction target; current endpoints live in server.mjs
 │   └── worker/             # Planned background worker
 ├── scripts/
 │   └── gakai-up.sh         # One-command launcher
-├── docker-compose.yml      # Default two-container stack
-├── docker-compose.single.yml # Combined-image preview stack
-├── Dockerfile              # Default Gakai image (Node 22 Alpine)
-├── Dockerfile.single       # Combined Gakai + internal runtime image
+├── docker-compose.yml      # The one-container stack
+├── Dockerfile              # The Gakai image (Node 22 Alpine, Baileys in-process)
 └── test/fixtures/          # Sanitized provider payload fixtures
 ```
 
@@ -451,20 +444,21 @@ gakai.co/
 |---|---|
 | Runtime | Node.js 22 on Alpine Linux |
 | Server | Native `node:http` — no framework |
+| WhatsApp connectivity | [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys) — direct, in-process, no provider service |
 | Storage | `node:sqlite` in WAL mode — zero external dependency |
-| Auth | `node:crypto` — scrypt, HMAC, timing-safe comparison |
-| Frontend | React, bundled with esbuild |
-| Deployment | Docker Compose — default private-provider stack; combined-image preview available |
+| Auth & secrets | `node:crypto` — scrypt password hashing, AES-256-GCM for stored secrets, timing-safe comparison |
+| Frontend | React 19, bundled with esbuild |
+| Deployment | Docker Compose — one container |
 
 ---
 
 ## Roadmap
 
-1. **Provider-neutral message model** — stable domain types, fixture-based rendering tests, clean adapter interface
-2. **Durable event storage** — idempotent webhook ingestion, ordering guarantees
+1. **Provider-neutral message model** — ✅ stable domain types (`src/domain/message.mjs`), fixture-based rendering tests, and a clean adapter boundary (`src/providers/`) are live; hardening continues (see the open PRs on identity handling, group metadata, and message receipts)
+2. **Durable event storage** — ✅ idempotent event persistence and SSE replay are live (`app_events`, `/api/app/events`)
 3. **Real-time browser push** — ✅ authenticated SSE and WebSocket typing/presence are live
 4. **Production topology** — Postgres, object storage, multi-instance health monitoring
-5. **Single-image distribution** — publish and sign the combined Gakai image; one `docker pull`, no external runtime dependency
+5. **Signed registry image** — publish `docker pull gakai`; the single-container image itself is already the shipped runtime, this is packaging/distribution only
 6. **CI and signed releases** — automated builds, versioned images, changelog generation
 
 ---
@@ -479,8 +473,9 @@ gakai.co/
 3. Add sanitized fixtures for any change that touches provider payload shapes
 4. Validate your JavaScript inside the container before opening a PR:
    ```sh
-   docker compose build home
-   docker compose run --rm --no-deps home node --check /app/public/assets/app.js
+   docker compose build gakai
+   docker compose run --rm --no-deps gakai node --check /gakai/public/assets/app.js
+   docker compose run --rm --no-deps gakai node --check /gakai/server.mjs
    ```
 5. Run the test suite:
    ```sh
