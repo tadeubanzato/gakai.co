@@ -3,14 +3,13 @@ import test, { after } from 'node:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHmac } from 'node:crypto';
 
 const scratch = await mkdtemp(join(tmpdir(), 'gakai-sse-history-'));
 process.env.HOME_DATA_DIR = scratch;
 process.env.PORT = '0';
-process.env.GAKAI_PROVIDER_WEBHOOK_SECRET = 'test-webhook-secret';
+process.env.GAKAI_PROVIDER_KIND = 'mock';
 
-const { server } = await import('../../server.mjs');
+const { server, dispatchAutomationEvent } = await import('../../server.mjs');
 after(() => { server.close(); });
 
 if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
@@ -23,20 +22,14 @@ const setup = await fetch(`${base}/api/app/auth/setup`, {
 });
 const cookie = setup.headers.get('set-cookie').split(';')[0];
 
-async function postWebhookEvent(accountId, messageId) {
-  const body = JSON.stringify({
-    event: 'message', session: accountId,
-    payload: { id: { _serialized: messageId }, from: '5511999999999@c.us', fromMe: false, body: 'hello', text: 'hello', timestamp: Math.floor(Date.now() / 1000), hasMedia: false },
+async function simulateMessage(accountId, messageId) {
+  // dispatchAutomationEvent records the event (and drives automations)
+  // in-process now — unlike the old webhook receiver, it's fully done by
+  // the time this resolves, no fire-and-forget wait needed.
+  await dispatchAutomationEvent({
+    accountId, chatId: '5511999999999@s.whatsapp.net',
+    message: { id: messageId, body: 'hello', text: 'hello', hasMedia: false, sender: null, mentionedJids: [] },
   });
-  const signature = createHmac('sha512', 'test-webhook-secret').update(body).digest('hex');
-  const response = await fetch(`${base}/api/app/provider-events`, {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-webhook-hmac': signature }, body,
-  });
-  assert.equal(response.status, 202);
-  // Recording happens synchronously in the request handler before the 202,
-  // but dispatch (automations/AI replies) runs fire-and-forget after — give
-  // it a moment so it can't leak into a later test's provider calls.
-  await new Promise(resolve => setTimeout(resolve, 150));
 }
 
 // Connects, collects any "gakai" SSE events received within a short window,
@@ -75,7 +68,7 @@ async function collectSseEvents(url, waitMs = 400) {
 
 test('without after=now, a fresh SSE connection replays recent history for that account', async () => {
   const accountId = 'replay-account';
-  await postWebhookEvent(accountId, 'history-msg-1');
+  await simulateMessage(accountId, 'history-msg-1');
 
   const events = await collectSseEvents(`${base}/api/app/events?accountId=${accountId}`);
   assert.ok(events.some(event => event.message?.id === 'history-msg-1'), 'the already-recorded event must be replayed on connect');
@@ -83,7 +76,7 @@ test('without after=now, a fresh SSE connection replays recent history for that 
 
 test('after=now opts a fresh SSE connection out of the history replay entirely', async () => {
   const accountId = 'no-replay-account';
-  await postWebhookEvent(accountId, 'history-msg-2');
+  await simulateMessage(accountId, 'history-msg-2');
 
   const events = await collectSseEvents(`${base}/api/app/events?accountId=${accountId}&after=now`);
   assert.equal(events.length, 0, 'a subscriber that opted out of replay must not receive history it never asked for');
@@ -119,7 +112,7 @@ test('after=now still delivers a genuinely new event live, once connected', asyn
   });
 
   await new Promise(resolve => setTimeout(resolve, 50)); // let the connection register before firing the event
-  await postWebhookEvent(accountId, 'live-msg-1');
+  await simulateMessage(accountId, 'live-msg-1');
 
   const timeout = new Promise(resolve => setTimeout(() => resolve('timeout'), 800));
   const result = await Promise.race([found, timeout]);

@@ -1,11 +1,11 @@
 // Pure message-list helpers, kept in a plain .mjs file (no JSX) so they can
 // be unit-tested with Node's built-in test runner without a JSX transform.
 
-// Keep the first request small: WEBJS may need a browser-backed provider call
-// for each history page, so a large eager load makes opening chats sluggish.
+// Keep the first request small: fetching a history page can be a relatively
+// expensive provider call, so a large eager load makes opening chats sluggish.
 export const PAGE_SIZE = 20;
 
-// WAHA engines may return a message id as either a string or a structured key.
+// The provider may return a message id as either a string or a structured key.
 // String(object) is always "[object Object]", which made every such outgoing
 // message share one React/merge key and caused later sends to replace earlier
 // bubbles. Preserve a provider-supplied serialized value, or serialize the
@@ -33,11 +33,11 @@ export function nextComposerValue(currentValue, failedText) {
   return currentValue ? currentValue : failedText;
 }
 
-// Merge a provider send-ack onto the optimistic pending message. WAHA's
-// sendText ack doesn't echo back the quoted message being replied to, so
-// resultMessage.replyTo comes back null/absent — preserve the client's own
-// pending.replyTo (already known from the reader's Reply click) instead of
-// losing the reply context the moment the ack arrives.
+// Merge a provider send-ack onto the optimistic pending message. The
+// provider's send acknowledgement doesn't echo back the quoted message being
+// replied to, so resultMessage.replyTo comes back null/absent — preserve the
+// client's own pending.replyTo (already known from the reader's Reply click)
+// instead of losing the reply context the moment the ack arrives.
 export function confirmSentMessage(pending, resultMessage) {
   if (!resultMessage) return null;
   return {

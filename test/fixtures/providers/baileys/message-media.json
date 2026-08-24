@@ -1,0 +1,7 @@
+{
+  "key": { "remoteJid": "551199999999@s.whatsapp.net", "fromMe": false, "id": "3EB0FIXTURE4" },
+  "messageTimestamp": 1735689800,
+  "message": {
+    "imageMessage": { "mimetype": "image/jpeg", "caption": "A fixture photo" }
+  }
+}

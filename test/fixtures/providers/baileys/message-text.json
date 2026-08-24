@@ -1,0 +1,6 @@
+{
+  "key": { "remoteJid": "551199999999@s.whatsapp.net", "fromMe": false, "id": "3EB0FIXTURE1" },
+  "messageTimestamp": 1735689600,
+  "pushName": "Fixture Contact",
+  "message": { "conversation": "Hello from fixture" }
+}

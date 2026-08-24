@@ -1,0 +1,14 @@
+{
+  "key": { "remoteJid": "551199999999@s.whatsapp.net", "fromMe": true, "id": "3EB0FIXTURE2" },
+  "messageTimestamp": 1735689660,
+  "message": {
+    "extendedTextMessage": {
+      "text": "Reply text",
+      "contextInfo": {
+        "stanzaId": "3EB0FIXTURE1",
+        "participant": null,
+        "quotedMessage": { "conversation": "Hello from fixture" }
+      }
+    }
+  }
+}

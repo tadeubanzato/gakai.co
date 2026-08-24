@@ -3,49 +3,33 @@ import test, { after } from 'node:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import http from 'node:http';
-import { URL as NodeURL } from 'node:url';
 
 const now = Math.floor(Date.now() / 1000);
 const mentionedId = '89249571455071';
 const chatId = 'group-chat@g.us';
-
-const chatOverviews = [
-  {
-    id: chatId, name: 'Family Group', picture: '/api/files/fixture.jpg',
-    lastMessage: { body: `Valeu @${mentionedId} !`, text: `Valeu @${mentionedId} !`, timestamp: now, hasMedia: false },
-  },
-];
-
-const mockProvider = http.createServer((req, res) => {
-  const requestUrl = new NodeURL(req.url, 'http://mock-provider');
-  res.writeHead(200, { 'content-type': 'application/json' });
-  if (requestUrl.pathname.endsWith('/chats/overview')) {
-    const offset = Number(requestUrl.searchParams.get('offset')) || 0;
-    res.end(JSON.stringify(offset === 0 ? chatOverviews : []));
-  } else if (requestUrl.pathname.endsWith('/contacts/all')) {
-    res.end(JSON.stringify([{ id: `${mentionedId}@lid`, lid: `${mentionedId}@lid`, name: 'Erica Tanaka' }]));
-  } else {
-    // /lids/{id}, /contacts/profile-picture, etc. — a generic 200 is enough
-    // for resolveContact to proceed without throwing.
-    res.end('{}');
-  }
-});
-await new Promise(resolve => mockProvider.listen(0, '127.0.0.1', resolve));
-const mockProviderPort = mockProvider.address().port;
+const accountId = 'mentions-account';
 
 const scratch = await mkdtemp(join(tmpdir(), 'gakai-chat-overview-mentions-'));
 process.env.HOME_DATA_DIR = scratch;
 process.env.PORT = '0';
-process.env.GAKAI_PROVIDER_URL = `http://127.0.0.1:${mockProviderPort}`;
+process.env.GAKAI_PROVIDER_KIND = 'mock';
 
-const { server } = await import('../../server.mjs');
-after(() => { server.close(); mockProvider.close(); });
+const { server, provider } = await import('../../server.mjs');
+after(() => server.close());
+
+provider.__test.seedAccount(accountId);
+provider.__test.seedChat(accountId, {
+  id: chatId, name: 'Family Group', picture: null,
+  lastMessage: { body: `Valeu @${mentionedId} !`, text: `Valeu @${mentionedId} !`, timestamp: now, hasMedia: false, system: null },
+});
+// The inbox preview's mention resolver has no per-message mentionedJid list
+// to work from (only the lightweight chat-overview summary), so it resolves
+// a bare @<number> against a guessed @s.whatsapp.net jid.
+provider.__test.seedContact(accountId, { id: `${mentionedId}@s.whatsapp.net`, name: 'Erica Tanaka' });
 
 if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
 const { port } = server.address();
 const base = `http://127.0.0.1:${port}`;
-const accountId = 'mentions-account';
 
 const setup = await fetch(`${base}/api/app/auth/setup`, {
   method: 'POST', headers: { 'content-type': 'application/json' },

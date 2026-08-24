@@ -3,55 +3,32 @@ import test, { after } from 'node:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import http from 'node:http';
-import { URL as NodeURL } from 'node:url';
 
 const now = Math.floor(Date.now() / 1000);
+
+const scratch = await mkdtemp(join(tmpdir(), 'gakai-account-unread-dot-'));
+process.env.HOME_DATA_DIR = scratch;
+process.env.PORT = '0';
+process.env.GAKAI_PROVIDER_KIND = 'mock';
+
+const { server, provider } = await import('../../server.mjs');
+after(() => server.close());
 
 // Three accounts, each with a different chat-overview shape, to exercise the
 // sidebar unread dot's three real cases: a genuine unread text message, a
 // chat marked unread but whose only content is a fabricated system-event
 // touch (must not count), and a fully-read account (must not count either).
-const accountsFixture = {
-  'has-real-unread': [
-    { id: 'a@c.us', name: 'Real Unread', unreadCount: 2, lastMessage: { timestamp: now, body: 'hey are you there', hasMedia: false } },
-  ],
-  'has-fabricated-unread-only': [
-    // Mirrors what was observed live: a resync-touched encryption notice can
-    // carry a nonzero unreadCount even though no real message exists — the
-    // dot must not light up for this.
-    { id: 'b@lid', name: 'Unknown user', unreadCount: 1, lastMessage: { timestamp: now, body: '', text: '', hasMedia: false, _data: { type: 'e2e_notification', subtype: 'encrypt' } } },
-  ],
-  'has-no-unread': [
-    { id: 'c@c.us', name: 'All Read', unreadCount: 0, lastMessage: { timestamp: now, body: 'already seen', hasMedia: false } },
-  ],
-};
+provider.__test.seedAccount('has-real-unread');
+provider.__test.seedChat('has-real-unread', { id: 'a@s.whatsapp.net', name: 'Real Unread', unreadCount: 2, lastMessage: { timestamp: now, body: 'hey are you there', text: 'hey are you there', hasMedia: false, system: null } });
 
-const mockProvider = http.createServer((req, res) => {
-  const requestUrl = new NodeURL(req.url, 'http://mock-provider');
-  res.writeHead(200, { 'content-type': 'application/json' });
-  if (requestUrl.pathname === '/api/sessions') {
-    res.end(JSON.stringify(Object.keys(accountsFixture).map(name => ({ name, status: 'WORKING', me: { id: `${name}@c.us` }, config: {} }))));
-    return;
-  }
-  const overviewMatch = requestUrl.pathname.match(/^\/api\/([^/]+)\/chats\/overview$/);
-  if (overviewMatch) {
-    const offset = Number(requestUrl.searchParams.get('offset')) || 0;
-    res.end(JSON.stringify(offset === 0 ? (accountsFixture[overviewMatch[1]] || []) : []));
-    return;
-  }
-  res.end('{}');
-});
-await new Promise(resolve => mockProvider.listen(0, '127.0.0.1', resolve));
-const mockProviderPort = mockProvider.address().port;
+provider.__test.seedAccount('has-fabricated-unread-only');
+// Mirrors what was observed live: a resync-touched encryption notice can
+// carry a nonzero unreadCount even though no real message exists — the dot
+// must not light up for this.
+provider.__test.seedChat('has-fabricated-unread-only', { id: 'b@lid', name: 'Unknown user', unreadCount: 1, lastMessage: { timestamp: now, body: '', text: '', hasMedia: false, system: { kind: 'security', label: 'Messages are end-to-end encrypted' } } });
 
-const scratch = await mkdtemp(join(tmpdir(), 'gakai-account-unread-dot-'));
-process.env.HOME_DATA_DIR = scratch;
-process.env.PORT = '0';
-process.env.GAKAI_PROVIDER_URL = `http://127.0.0.1:${mockProviderPort}`;
-
-const { server } = await import('../../server.mjs');
-after(() => { server.close(); mockProvider.close(); });
+provider.__test.seedAccount('has-no-unread');
+provider.__test.seedChat('has-no-unread', { id: 'c@s.whatsapp.net', name: 'All Read', unreadCount: 0, lastMessage: { timestamp: now, body: 'already seen', text: 'already seen', hasMedia: false, system: null } });
 
 if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
 const { port } = server.address();

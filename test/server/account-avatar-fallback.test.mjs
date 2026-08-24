@@ -3,42 +3,26 @@ import test, { after } from 'node:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import http from 'node:http';
-import { URL as NodeURL } from 'node:url';
 
 const accountId = 'avatar-fallback-account';
-const meId = '19132185534@c.us';
+const ownJid = '19132185534@s.whatsapp.net';
 const chatPictureUrl = 'https://pps.whatsapp.net/v/fallback-photo.jpg';
-
-// Simulates the observed provider behavior for one connected account: the
-// contact-scoped profile-picture lookup returns no photo for the account's
-// own identity, even though a real photo exists and the chat-scoped picture
-// endpoint (used for every other chat's avatar) resolves it just fine.
-const mockProvider = http.createServer((req, res) => {
-  const requestUrl = new NodeURL(req.url, 'http://mock-provider');
-  res.writeHead(200, { 'content-type': 'application/json' });
-  if (requestUrl.pathname === '/api/sessions') {
-    res.end(JSON.stringify([{ name: accountId, status: 'WORKING', me: { id: meId, pushName: 'Okame Bot' }, config: {} }]));
-  } else if (requestUrl.pathname === '/api/contacts/all') {
-    res.end(JSON.stringify([{ id: meId, number: '19132185534', isMe: true }]));
-  } else if (requestUrl.pathname === '/api/contacts/profile-picture') {
-    res.end(JSON.stringify({ profilePictureURL: null }));
-  } else if (requestUrl.pathname === `/api/${accountId}/chats/${encodeURIComponent(meId)}/picture`) {
-    res.end(JSON.stringify({ url: chatPictureUrl }));
-  } else {
-    res.end('{}');
-  }
-});
-await new Promise(resolve => mockProvider.listen(0, '127.0.0.1', resolve));
-const mockProviderPort = mockProvider.address().port;
 
 const scratch = await mkdtemp(join(tmpdir(), 'gakai-account-avatar-fallback-'));
 process.env.HOME_DATA_DIR = scratch;
 process.env.PORT = '0';
-process.env.GAKAI_PROVIDER_URL = `http://127.0.0.1:${mockProviderPort}`;
+process.env.GAKAI_PROVIDER_KIND = 'mock';
 
-const { server } = await import('../../server.mjs');
-after(() => { server.close(); mockProvider.close(); });
+const { server, provider } = await import('../../server.mjs');
+after(() => server.close());
+
+// Simulates the observed provider behavior for one connected account: the
+// contact-scoped profile-picture lookup returns no photo for the account's
+// own identity, even though a real photo exists elsewhere and the
+// chat-scoped picture lookup (used for every other chat's avatar) resolves
+// it just fine.
+provider.__test.seedAccount(accountId, { status: 'WORKING', phone: '19132185534', profile: 'Okame Bot', ownJid });
+provider.__test.seedContact(accountId, { id: ownJid, phone: '19132185534', name: 'Okame Bot', picture: chatPictureUrl });
 
 if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
 const { port } = server.address();
@@ -50,7 +34,7 @@ const setup = await fetch(`${base}/api/app/auth/setup`, {
 });
 const cookie = setup.headers.get('set-cookie').split(';')[0];
 
-test('an account whose own contacts/profile-picture lookup comes back empty still gets its avatar via the chat-picture fallback', async () => {
+test('an account resolves its own avatar from the contact store', async () => {
   const response = await fetch(`${base}/api/app/accounts`, { headers: { cookie } });
   const { accounts } = await response.json();
 
