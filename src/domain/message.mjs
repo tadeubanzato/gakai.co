@@ -5,7 +5,29 @@
  * — only the provider-specific shapes feeding it changed.
  */
 import { createHash } from 'node:crypto';
-import { getContentType, normalizeMessageContent, WAMessageStubType } from '@whiskeysockets/baileys';
+import { getContentType, normalizeMessageContent, WAMessageStubType, jidDecode, areJidsSameUser, isJidGroup, isLidUser } from '@whiskeysockets/baileys';
+
+// Baileys' own guidance: never split a JID with a suffix regex or compare
+// JIDs with `===` — device suffixes (":2") and the phone-number/LID duality
+// make both unreliable. These wrap the library's real decoder/classifiers so
+// every call site (here and in server.mjs, which stays provider-neutral and
+// never imports Baileys directly) goes through one correct implementation.
+export function bareJidUser(jid) {
+  return jidDecode(String(jid || ''))?.user || String(jid || '');
+}
+
+export function isGroupChatId(chatId) {
+  return isJidGroup(String(chatId || ''));
+}
+
+export function isLidJid(jid) {
+  return isLidUser(String(jid || ''));
+}
+
+export function isSameIdentity(a, b) {
+  if (!a || !b) return false;
+  try { return areJidsSameUser(a, b); } catch { return false; }
+}
 
 // WhatsApp timestamps are Unix seconds, but protobuf's Long type (used for
 // 64-bit fields) doesn't stringify or coerce to Number cleanly — it needs an

@@ -6,7 +6,7 @@
  * everything server.mjs used to reach over HTTP now happens here, in-process.
  */
 import {
-  makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason,
+  makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, jidDecode,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
-import { messageView, chatOverview as domainChatOverview, reactionView, revokeView } from '../../domain/message.mjs';
+import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, bareJidUser } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
 
@@ -176,7 +176,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return {
       id,
       status: entry.status,
-      phone: entry.me?.id ? entry.me.id.replace(/@.*$/, '') : null,
+      phone: entry.me?.id && jidDecode(entry.me.id)?.server === 's.whatsapp.net' ? bareJidUser(entry.me.id) : null,
       profile: entry.me?.name || null,
       ownJid: entry.me?.id || null,
     };
@@ -272,7 +272,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     }
     return {
       id: contactId,
-      phone: cached?.phone || (contactId.endsWith('@s.whatsapp.net') ? contactId.replace(/@.*$/, '') : null),
+      phone: cached?.phone || (jidDecode(contactId)?.server === 's.whatsapp.net' ? bareJidUser(contactId) : null),
       name: cached?.name || null,
       picture,
     };
