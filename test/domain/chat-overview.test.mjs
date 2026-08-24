@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { chatOverview, chatTimestamp, hasMessageContent } from '../../src/domain/message.mjs';
+import { avatarUrl, chatOverview, chatTimestamp, hasMessageContent } from '../../src/domain/message.mjs';
 
 const fixturePath = fileURLToPath(new URL('../fixtures/providers/waha/chat-overview.json', import.meta.url));
 const providerUrl = 'http://provider:3000';
@@ -15,7 +15,7 @@ test('chatOverview normalizes a WAHA chat overview item into the Gakai view mode
   assert.equal(view.name, 'Fixture Contact');
   assert.equal(view.unreadCount, 3);
   assert.equal(view.timestamp, 1735689600);
-  assert.deepEqual(view.lastMessage, { body: 'See you soon', text: 'See you soon', timestamp: 1735689600, hasMedia: false });
+  assert.deepEqual(view.lastMessage, { body: 'See you soon', text: 'See you soon', timestamp: 1735689600, hasMedia: false, system: null });
 });
 
 test('chatOverview routes a provider-relative picture through the Gakai media proxy', async () => {
@@ -41,6 +41,23 @@ test('chatOverview defaults unreadCount to 0 when the provider omits it', () => 
   assert.equal(view.lastMessage, null);
 });
 
+test('avatarUrl returns null for an empty/missing picture instead of resolving to providerUrl itself', () => {
+  // `new URL('', providerUrl)` resolves to providerUrl, not an error — without
+  // an explicit empty check that internal Docker-only address leaked out as a
+  // "picture", which both looked like a real (broken) image to the browser
+  // and, worse, suppressed the real per-chat picture lookup that only runs
+  // when the chatOverview picture comes back falsy.
+  assert.equal(avatarUrl(null, providerUrl), null);
+  assert.equal(avatarUrl(undefined, providerUrl), null);
+  assert.equal(avatarUrl('', providerUrl), null);
+  assert.equal(avatarUrl('   ', providerUrl), null);
+});
+
+test('chatOverview leaves picture null (not providerUrl) when the provider gives no picture, so the caller\'s fallback lookup still runs', () => {
+  const view = chatOverview({ id: 'jose@lid', name: 'Jose Oliveira', picture: null }, providerUrl);
+  assert.equal(view.picture, null);
+});
+
 test('hasMessageContent rejects a fresh timestamp with no real message behind it', () => {
   // Observed live: WAHA/WEBJS can bump lastMessage.timestamp to "now" during a
   // background resync with body, text, and hasMedia all empty/false — no real
@@ -58,4 +75,29 @@ test('hasMessageContent accepts a media-only message with no caption', () => {
 
 test('hasMessageContent is false when there is no lastMessage at all', () => {
   assert.equal(hasMessageContent({}), false);
+});
+
+test('hasMessageContent accepts a chat whose latest activity is a real WhatsApp call', () => {
+  // A voice/video call has no body/text/media but is a genuine, distinguishing
+  // event (real _data.type) — unlike the untyped resync touch above, this must
+  // keep the conversation in the inbox instead of silently dropping it.
+  assert.equal(hasMessageContent({ lastMessage: { body: '', text: '', hasMedia: false, _data: { type: 'call_log', isVideoCall: false } } }), true);
+});
+
+test('hasMessageContent rejects non-call system events, even though they carry a real type', () => {
+  // Observed live: WAHA can bulk-touch several unrelated chats' timestamps
+  // during a background resync, including ones with zero actual message
+  // history — an encryption-handshake notice (e2e_notification), a group
+  // notification, or the generic system fallback is administrative noise
+  // WAHA can generate on its own with no real communication behind it at
+  // all. Only an actual call (systemMessageView().kind === 'call') is
+  // trustworthy enough to count as real activity.
+  assert.equal(hasMessageContent({ lastMessage: { body: '', text: '', hasMedia: false, _data: { type: 'e2e_notification', subtype: 'encrypt' } } }), false);
+  assert.equal(hasMessageContent({ lastMessage: { body: '', text: '', hasMedia: false, _data: { type: 'gp2' } } }), false);
+  assert.equal(hasMessageContent({ lastMessage: { body: '', text: '', hasMedia: false, _data: { type: 'notification_template', subtype: 'change_username' } } }), false);
+});
+
+test('chatOverview surfaces a system label for a call-only conversation so the inbox preview is not blank', () => {
+  const view = chatOverview({ id: 'x@c.us', name: 'Call Only', lastMessage: { body: '', text: '', timestamp: 1735689600, hasMedia: false, _data: { type: 'call_log', isVideoCall: false } } }, providerUrl);
+  assert.equal(view.lastMessage.system.kind, 'call');
 });
