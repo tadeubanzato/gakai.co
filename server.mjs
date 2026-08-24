@@ -874,10 +874,19 @@ async function enrichMessage(session,message){
     const accountId=String(url.searchParams.get('accountId')||'');
     if(!accountId)return send(res,400,{message:'accountId is required'});
     const afterId=String(req.headers['last-event-id']||url.searchParams.get('after')||'');
-    const after=afterId?db.prepare('SELECT created_at FROM app_events WHERE id=?').get(afterId)?.created_at:null;
-    const rows=after
+    // A subscriber that already knows the true current state from a regular
+    // REST fetch (the sidebar's per-account unread indicator) and only wants
+    // to hear about things from this point forward opts out of the catch-up
+    // replay below with after=now — otherwise every fresh connection replays
+    // recent history, which that subscriber has no way to tell apart from a
+    // genuinely new event, and would treat as one. A real reconnect (the
+    // browser resending Last-Event-ID after a drop) still catches up
+    // normally: that header takes priority over this literal sentinel.
+    const skipHistory=afterId==='now';
+    const after=(!skipHistory&&afterId)?db.prepare('SELECT created_at FROM app_events WHERE id=?').get(afterId)?.created_at:null;
+    const rows=skipHistory?[]:(after
       ?db.prepare('SELECT id,payload FROM app_events WHERE account_id=? AND created_at>? ORDER BY created_at ASC LIMIT 250').all(accountId,after)
-      :db.prepare('SELECT id,payload FROM app_events WHERE account_id=? ORDER BY created_at DESC LIMIT 50').all(accountId).reverse();
+      :db.prepare('SELECT id,payload FROM app_events WHERE account_id=? ORDER BY created_at DESC LIMIT 50').all(accountId).reverse());
     res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
     res.write(': connected\n\n');
     for(const row of rows){try{writeSseEvent(res,JSON.parse(row.payload),row.id)}catch{}}
