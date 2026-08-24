@@ -158,15 +158,16 @@ function messageBody(text, mentions) {
   const parts=String(text).split(pattern);
   return parts.map((part,index)=>index%2?<mark key={index} className="own-mention">@{part}</mark>:part);
 }
-function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved, onReply, onReact, onDelete, reaction }) {
+function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, accountPicture, onMediaResolved, onReply, onReact, onDelete, reaction }) {
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
   const isInstagramLink = (() => { if (!previewUrl) return false; try { return /instagram\.com$/i.test(new URL(previewUrl).hostname); } catch { return false; } })();
   const [showReactions, setShowReactions] = useState(false);
   const label = message?.replyTo?.body || (message?.replyTo?.hasMedia ? "Media attachment" : "Message");
-  return <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}${message.mentions?.some(mention=>mention.isMe)?" mentioned-me":""}`}>
+  const bubble = <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}${message.mentions?.some(mention=>mention.isMe)?" mentioned-me":""}`}>
     {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} />}
+    {message.fromMe && <Sender sender={{id:accountId,name:accountLabel||"You",picture:accountPicture}} />}
     {message?.replyTo && <div className="reply-context"><b>Replying to</b><span>{String(label).slice(0,140)}</span></div>}
     <MediaCard message={message} accountId={accountId} chatId={chatId} onResolved={onMediaResolved} />
     {isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
@@ -174,17 +175,24 @@ function MessageCard({ message, accountId, chatId, chatPicture, onMediaResolved,
     {!isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
     {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
     {reaction && <span className="reaction-pill">{reaction}</span>}
-    {!message.pending && <div className="message-actions">
-      {!message.fromMe && <button type="button" onClick={()=>onReply?.(message)}>Reply</button>}
-      {!message.fromMe && <button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>}
-      {!message.fromMe && showReactions && <span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}
-      <button type="button" className="message-delete" onClick={()=>onDelete?.(message)} aria-label="Delete this message for you">Delete</button>
-    </div>}
     <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}</time>
   </article>;
+  // Buttons live outside the bubble now (a hover toolbar, not part of the
+  // message content) — on the inner side of the bubble (left for "mine",
+  // right for everyone else's), so they never sit past the bubble's own
+  // edge into open space.
+  const actions = !message.pending && <div className="message-actions">
+    {!message.fromMe && <button type="button" onClick={()=>onReply?.(message)}>Reply</button>}
+    {!message.fromMe && <button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>}
+    {!message.fromMe && showReactions && <span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}
+    <button type="button" className="message-delete" onClick={()=>onDelete?.(message)} aria-label={message.fromMe ? "Delete this message for everyone" : "Delete this message for you"}>Delete</button>
+  </div>;
+  return <div className={`message-group ${message.fromMe ? "mine" : ""}`}>
+    {message.fromMe ? <>{actions}{bubble}</> : <>{bubble}{actions}</>}
+  </div>;
 }
 
-export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
+export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBack, onSent, onDeleted }) {
   const paneRef = useRef(null);
   const requestRef = useRef(0);
   const initialChatRef = useRef(null);
@@ -426,7 +434,16 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
   // time window, which this deliberately does not attempt.
   const deleteMessage = useCallback(async (message) => {
     const messageId = serializedId(message?.id); if (!messageId || !chatId) return;
-    if (!window.confirm("Delete this message for you? It won't be removed from the other person's WhatsApp.")) return;
+    // WAHA's WEBJS engine always requests a real WhatsApp "delete for
+    // everyone" (message.delete(true)) — it only silently falls back to a
+    // local-only removal when WhatsApp's own server rejects revoking someone
+    // else's message, which Gakai has no control over either way. So for a
+    // message the account itself sent, this confirmation must say what will
+    // actually happen: it disappears from the whole chat, not just this view.
+    const prompt = message?.fromMe
+      ? "Delete this message for everyone in the chat? This can't be undone."
+      : "Delete this message for you? It won't be removed from the other person's WhatsApp.";
+    if (!window.confirm(prompt)) return;
     try {
       await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
       setMessages(current => current.filter(item => serializedId(item?.id) !== messageId));
@@ -458,8 +475,8 @@ export function ChatPanel({ accountId, chat, onBack, onSent, onDeleted }) {
     <div className="messages" ref={paneRef} onScroll={maybeLoadOlder}>
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
-      {loading && !messages.length ? <p className="chat-loading">Loading messages…</p> : <div className="message-list">
-        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
+      {loading && !messages.length ? <p className="chat-loading loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading messages…</p> : <div className="message-list">
+        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
       {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>

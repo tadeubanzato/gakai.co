@@ -7,6 +7,13 @@ import { createHash } from 'node:crypto';
 
 export function avatarUrl(value, providerUrl) {
   const raw = String(value || '').trim();
+  // `new URL('', providerUrl)` doesn't throw — it resolves to providerUrl
+  // itself (an internal-only Docker address the browser can't reach). Without
+  // this guard, a chat/message with no picture yielded that bogus internal
+  // URL instead of null, which then blocked the real per-chat picture lookup
+  // (callers only fall back to it when the picture is falsy) and shipped a
+  // broken image URL to the browser instead.
+  if (!raw) return null;
   if (/^data:image\//i.test(raw)) return raw;
   try {
     const url = new URL(raw, providerUrl);
@@ -27,16 +34,27 @@ export function chatTimestamp(chat) {
 }
 
 // WAHA/WEBJS can touch a chat's timestamp during a background resync with no
-// real new message behind it (observed: several unrelated chats sharing the
-// exact same lastMessage.timestamp, all with empty body/text and
-// hasMedia:false). chatTimestamp() trusts that value at face value, which
-// makes an old, irrelevant chat look freshly active. Use this alongside
+// real new message behind it (observed: several unrelated chats — including
+// ones with zero actual message history — sharing near-identical touched
+// timestamps, all with empty body/text and hasMedia:false). chatTimestamp()
+// trusts that value at face value, which makes a dormant or even entirely
+// nonexistent conversation look freshly active. Use this alongside
 // chatTimestamp() wherever "recently active" needs to mean a real message,
 // not just a touched timestamp.
+//
+// A real WhatsApp call also has empty body/text/hasMedia, but it only exists
+// because an actual call happened — so it's the one system event trustworthy
+// enough to count as real activity here. Every *other* system event
+// (encryption-handshake notices, group/username-change notifications, the
+// generic system fallback) is administrative noise WAHA can generate on its
+// own without any real communication ever taking place — observed live: a
+// contact with no real message history ever, resurfaced at the top of the
+// inbox purely because of one of these. Only systemMessageView()'s 'call'
+// kind counts; every other kind is excluded the same as an empty touch.
 export function hasMessageContent(chat) {
   const lastMessage = chat.lastMessage || chat._chat?.lastMessage;
   if (!lastMessage) return false;
-  return Boolean(lastMessage.body || lastMessage.text || lastMessage.hasMedia);
+  return Boolean(lastMessage.body || lastMessage.text || lastMessage.hasMedia || systemMessageView(lastMessage)?.kind === 'call');
 }
 
 export function chatOverview(chat, providerUrl) {
@@ -44,7 +62,7 @@ export function chatOverview(chat, providerUrl) {
     id: chat.id, name: chat.name, picture: avatarUrl(chat.picture, providerUrl),
     unreadCount: Number(chat.unreadCount ?? chat.unreadMessagesCount ?? chat._chat?.unreadCount ?? 0) || 0,
     timestamp: chatTimestamp(chat),
-    lastMessage: chat.lastMessage ? { body: chat.lastMessage.body || '', text: chat.lastMessage.text || '', timestamp: normalizedTimestamp(chat.lastMessage.timestamp || chat.lastMessage._data?.timestamp || 0), hasMedia: Boolean(chat.lastMessage.hasMedia) } : null,
+    lastMessage: chat.lastMessage ? { body: chat.lastMessage.body || '', text: chat.lastMessage.text || '', timestamp: normalizedTimestamp(chat.lastMessage.timestamp || chat.lastMessage._data?.timestamp || 0), hasMedia: Boolean(chat.lastMessage.hasMedia), system: systemMessageView(chat.lastMessage) } : null,
   };
 }
 

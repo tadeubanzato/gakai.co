@@ -21,6 +21,16 @@ const chatOverviews = [
   // observed doing this — several chats sharing one identical touched
   // timestamp with empty body/text and hasMedia:false).
   { id: 'ghost@lid', name: 'Ghost Contact', lastMessage: { timestamp: now, body: '', text: '', hasMedia: false } },
+  // A real recent conversation whose latest activity was a voice call, not a
+  // text/media message — unlike the ghost above, this has a genuine, typed
+  // event behind it and must still show up in the inbox.
+  { id: 'call-only@c.us', name: 'Call Only', lastMessage: { timestamp: now - 3 * day, body: '', text: '', hasMedia: false, _data: { type: 'call_log', isVideoCall: false } } },
+  // Observed live: a contact with zero real message history, surfaced purely
+  // by a fresh-looking encryption-handshake notice (the same resync-touch
+  // behavior as the plain ghost above, just with a real _data.type on it).
+  // This must be excluded exactly like the untyped ghost — a real type alone
+  // isn't enough; only an actual call counts.
+  { id: 'e2e-only@lid', name: 'Unknown user', lastMessage: { timestamp: now, body: '', text: '', hasMedia: false, _data: { type: 'e2e_notification', subtype: 'encrypt' } } },
 ];
 
 const mockProvider = http.createServer((req, res) => {
@@ -63,7 +73,7 @@ test('the inbox excludes chats with no activity in the recency window, even when
 
   assert.equal(response.status, 200);
   const ids = chats.map(c => c.id).sort();
-  assert.deepEqual(ids, ['recent-1@c.us', 'recent-2@c.us'], 'stale chats, the Gakai-deleted chat, and the fresh-timestamp-no-content ghost must not pad out the list');
+  assert.deepEqual(ids, ['call-only@c.us', 'recent-1@c.us', 'recent-2@c.us'], 'stale chats, the Gakai-deleted chat, the fresh-timestamp-no-content ghost, and a fabricated encryption-notice-only contact must not pad out the list, but a real recent call must still show');
 });
 
 test('the most recently active chat sorts first', async () => {

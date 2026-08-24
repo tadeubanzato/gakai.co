@@ -248,7 +248,24 @@ function account(s) { const rawStatus=s.status; return { id:s.name, label:store.
 async function accountView(session){
   const view=account(session);if(!session.me?.id)return view;
 
-  try{const contacts=await providerRequest(`/api/contacts/all?session=${encodeURIComponent(session.name)}`);const self=(Array.isArray(contacts)?contacts:[]).find(contact=>contact.id===session.me.id||contact.number===session.me.id.split("@")[0])||{};const photo=await providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(session.me.id)}&session=${encodeURIComponent(session.name)}`);view.picture=avatarUrl(photo?.profilePictureURL||photo?.url);view.mentionNames=[view.label,view.profile,self.name,self.pushName,self.shortName,view.phone].filter(Boolean)}catch{view.picture=null;view.mentionNames=[view.label,view.profile,view.phone].filter(Boolean)}
+  try{const contacts=await providerRequest(`/api/contacts/all?session=${encodeURIComponent(session.name)}`);const self=(Array.isArray(contacts)?contacts:[]).find(contact=>contact.id===session.me.id||contact.number===session.me.id.split("@")[0])||{};const photo=await providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(session.me.id)}&session=${encodeURIComponent(session.name)}`);view.picture=avatarUrl(photo?.profilePictureURL||photo?.url);
+    // contacts/profile-picture is unreliable for the account's own identity —
+    // observed returning profilePictureURL:null for a number that does have a
+    // photo set. The chat-scoped picture lookup (used for every other chat's
+    // avatar) succeeds where this one doesn't, so fall back to it before
+    // giving up, same asymmetry already handled for individual chats.
+    if(!view.picture)view.picture=await chatPictureFor(session.name,session.me.id);
+    view.mentionNames=[view.label,view.profile,self.name,self.pushName,self.shortName,view.phone].filter(Boolean)}catch{view.picture=null;view.mentionNames=[view.label,view.profile,view.phone].filter(Boolean)}
+  // Drives the sidebar's per-account unread dot — every account needs this,
+  // not just whichever one is open, so it's computed here rather than only
+  // in the /chats route. Reuses hasMessageContent() so a fabricated
+  // system-event touch (see inbox recency filtering above) can never light
+  // up the dot for a chat with no real message behind it.
+  try{
+    const chats=await allChatOverviews(session.name);
+    const deleted=new Set((store.deletedChats||[]).filter(item=>item.accountId===session.name).map(item=>item.chatId));
+    view.hasUnread=chats.some(chat=>!deleted.has(chat.id)&&hasMessageContent(chat)&&(Number(chat.unreadCount??chat.unreadMessagesCount??chat._chat?.unreadCount??0)||0)>0);
+  }catch{view.hasUnread=false}
   return view;
 }
 const config = label => label ? ({metadata:{'gakai.label':label}}) : {};
@@ -918,10 +935,13 @@ async function enrichMessage(session,message){
   if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]&&parts[6]==='messages'&&parts[7]){
     const chatId=decodeURIComponent(parts[5]),messageId=providerMessageId(decodeURIComponent(parts[7]));
     if(!messageId)return send(res,400,{message:'Invalid message ID'});
-    // WhatsApp "delete for me": removes the message from this account's own
-    // view (and syncs across its own linked devices, same as any other
-    // provider-driven action) — it does not remove it from another
-    // participant's WhatsApp.
+    // The provider's WEBJS engine always requests a real "delete for
+    // everyone" here (message.delete(true) under the hood) — WhatsApp's own
+    // server is what silently downgrades that to a local-only removal, and
+    // only when the message isn't this account's own (you can never revoke
+    // someone else's message). So for the account's own messages, this call
+    // removes it from every participant's WhatsApp, not just this account's
+    // view — the client's confirmation prompt reflects that distinction.
     await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,{method:'DELETE'});
     store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));
     await persist();
