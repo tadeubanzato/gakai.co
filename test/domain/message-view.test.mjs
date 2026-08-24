@@ -2,52 +2,46 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, providerMessageId, resolveMentionLabels } from '../../src/domain/message.mjs';
+import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, resolveMentionLabels } from '../../src/domain/message.mjs';
 
-const providerUrl = 'http://provider:3000';
-const fixture = name => readFile(fileURLToPath(new URL(`../fixtures/providers/waha/${name}`, import.meta.url)), 'utf8').then(JSON.parse);
+const ctx = { accountId: 'account-fixture', chatId: '551199999999@s.whatsapp.net' };
+const fixture = name => readFile(fileURLToPath(new URL(`../fixtures/providers/baileys/${name}`, import.meta.url)), 'utf8').then(JSON.parse);
 
-test('messageView extracts the serialized id from a structured WAHA id object', async () => {
+test('messageView reads the id straight off key.id — no structured-object collision to guard against', async () => {
   const message = await fixture('message-text.json');
-  const view = messageView(message, providerUrl);
+  const view = messageView(message, ctx);
 
-  assert.equal(view.id, 'false_551199999999@c.us_3EB0FIXTURE1');
-  assert.notEqual(view.id, '[object Object]');
+  assert.equal(view.id, '3EB0FIXTURE1');
   assert.equal(view.body, 'Hello from fixture');
   assert.equal(view.fromMe, false);
   assert.equal(view.timestamp, 1735689600);
+  assert.equal(view.sender.name, 'Fixture Contact');
 });
 
 test('messageView normalizes a quoted/reply message into replyTo', async () => {
   const message = await fixture('message-reply.json');
-  const view = messageView(message, providerUrl);
+  const view = messageView(message, ctx);
 
   assert.equal(view.fromMe, true);
   assert.deepEqual(view.replyTo, {
-    id: 'false_551199999999@c.us_3EB0FIXTURE1',
+    id: '3EB0FIXTURE1',
     body: 'Hello from fixture',
     hasMedia: false,
     participant: null,
   });
 });
 
-test('messageView shapes a link-preview message from provider _data.links', async () => {
+test('messageView shapes a link-preview message from Baileys\' own extendedTextMessage fields', async () => {
   const message = await fixture('message-linkpreview.json');
-  const view = messageView(message, providerUrl);
+  const view = messageView(message, ctx);
 
   assert.ok(view.linkPreview);
   assert.equal(view.linkPreview.url, 'https://example.com/article');
   assert.equal(view.linkPreview.title, 'Example Article');
   assert.equal(view.linkPreview.description, 'A sanitized example description.');
-  assert.equal(view.linkPreview.image, 'https://example.com/thumb.jpg');
-});
-
-test('providerMessageId never returns the "[object Object]" collision string', () => {
-  assert.equal(providerMessageId({ _serialized: 'abc' }), 'abc');
-  assert.equal(providerMessageId({ id: 'plain-id' }), 'plain-id');
-  assert.equal(providerMessageId('already-a-string'), 'already-a-string');
-  assert.equal(providerMessageId({}), null);
-  assert.equal(providerMessageId(null), null);
+  // No jpegThumbnail in the fixture — image legitimately stays null even
+  // though title/description are present.
+  assert.equal(view.linkPreview.image, null);
 });
 
 test('normalizedTimestamp treats large numbers as milliseconds and small numbers as seconds', () => {
@@ -57,42 +51,49 @@ test('normalizedTimestamp treats large numbers as milliseconds and small numbers
   assert.equal(normalizedTimestamp('not a date'), 0);
 });
 
-test('messageView routes a provider-relative media URL through the Gakai media proxy', async () => {
-  const message = await fixture('message-media.json');
-  const view = messageView(message, providerUrl);
-
-  assert.equal(view.media.url, '/api/app/media?path=%2Fapi%2Ffiles%2Ffixture-image.jpg');
-  assert.equal(view.media.mimetype, 'image/jpeg');
+test('normalizedTimestamp unwraps a protobuf Long-like value via toNumber()', () => {
+  assert.equal(normalizedTimestamp({ toNumber: () => 1735689600 }), 1735689600);
 });
 
-test('messageView leaves media.url null when the provider sends no media URL', async () => {
+test('messageView routes message media through Gakai\'s own on-demand media endpoint, never a raw provider URL', async () => {
+  const message = await fixture('message-media.json');
+  const view = messageView(message, ctx);
+
+  assert.equal(view.media.url, `/api/app/media?accountId=account-fixture&chatId=${encodeURIComponent(ctx.chatId)}&messageId=3EB0FIXTURE4`);
+  assert.equal(view.media.mimetype, 'image/jpeg');
+  assert.equal(view.body, 'A fixture photo');
+  assert.equal(view.hasMedia, true);
+});
+
+test('messageView leaves media null for a plain text message', async () => {
   const message = await fixture('message-text.json');
-  const view = messageView(message, providerUrl);
+  const view = messageView(message, ctx);
   assert.equal(view.media, null);
   assert.equal(view.mediaUrl, null);
+  assert.equal(view.hasMedia, false);
 });
 
-test('messageView derives a stable, deterministic id when the provider gives none', async () => {
+test('messageView derives a stable, deterministic id when the message has no key.id', async () => {
   const message = await fixture('message-no-id.json');
-  const first = messageView(message, providerUrl);
-  const second = messageView(message, providerUrl);
+  const first = messageView(message, ctx);
+  const second = messageView(message, ctx);
 
   assert.ok(first.id.startsWith('derived_'));
   assert.equal(first.id, second.id, 'the same input must always produce the same id, unlike a per-render array-index fallback');
 });
 
-test('messageView derives different ids for messages that differ in timestamp, sender, or body', async () => {
+test('messageView derives different ids for messages that differ in timestamp or body', async () => {
   const base = await fixture('message-no-id.json');
-  const differentTimestamp = messageView({ ...base, timestamp: base.timestamp + 1 }, providerUrl);
-  const differentBody = messageView({ ...base, body: 'a different body', text: 'a different body' }, providerUrl);
-  const original = messageView(base, providerUrl);
+  const differentTimestamp = messageView({ ...base, messageTimestamp: base.messageTimestamp + 1 }, ctx);
+  const differentBody = messageView({ ...base, message: { conversation: 'a different body' } }, ctx);
+  const original = messageView(base, ctx);
 
   assert.notEqual(differentTimestamp.id, original.id);
   assert.notEqual(differentBody.id, original.id);
 });
 
 test('extractMentionIds finds mentions in both the main body and a quoted reply body', () => {
-  const ids = extractMentionIds('Valeu @89249571455071 !', 'Pensei que vc ia curtir, Zé.');
+  const ids = extractMentionIds('Valeu @89249571455071 !', 'Pensei que vc ia curtir, Ze.');
   assert.deepEqual(ids, ['89249571455071']);
 });
 
@@ -107,33 +108,41 @@ test('resolveMentionLabels replaces a resolved mention and leaves an unresolved 
   assert.equal(resolveMentionLabels('Valeu @00000000000000 !', labels), 'Valeu @00000000000000 !');
 });
 
-test('messageView resolves a mention inside replyTo.body, not just the main body — the actual reported bug', async () => {
+test('messageView surfaces the raw mentioned-JID list for the caller to resolve, rather than resolving it itself', async () => {
   const message = {
-    id: { _serialized: 'reply-mention-fixture' },
-    timestamp: 1735689960,
-    fromMe: false,
-    body: 'Não quer ir com a gente e explicar o que tá acontecendo?',
-    text: 'Não quer ir com a gente e explicar o que tá acontecendo?',
-    quotedMsg: { id: { _serialized: 'quoted-fixture' }, body: 'Valeu @89249571455071 !' },
+    key: { remoteJid: ctx.chatId, fromMe: false, id: 'mention-fixture' },
+    messageTimestamp: 1735689960,
+    message: {
+      extendedTextMessage: {
+        text: 'Valeu @89249571455071 !',
+        contextInfo: { mentionedJid: ['89249571455071@s.whatsapp.net'] },
+      },
+    },
   };
-  const view = messageView(message, providerUrl);
+  const view = messageView(message, ctx);
+  assert.deepEqual(view.mentionedJids, ['89249571455071@s.whatsapp.net']);
   // messageView itself doesn't resolve mentions (that needs a contact
-  // lookup only enrichMessage in server.mjs can do) — this just proves the
-  // raw quoted mention id survives unresolved through to this point, which
-  // is the precondition enrichMessage's resolveMentionLabels(replyTo.body)
-  // then acts on.
-  assert.equal(view.replyTo.body, 'Valeu @89249571455071 !');
+  // lookup only server.mjs's enrichMessage can do) — the raw @<id> survives
+  // unresolved through to this point.
+  assert.equal(view.body, 'Valeu @89249571455071 !');
 });
 
-test('mentionsIdentity matches an exact jid and a same-number jid on a different domain (@lid vs @c.us)', () => {
-  assert.equal(mentionsIdentity(['5511999999999@c.us'], '5511999999999@c.us'), true);
-  assert.equal(mentionsIdentity(['5511999999999@lid'], '5511999999999@c.us'), true, 'the same engine can report the own identity as either @c.us or @lid');
-  assert.equal(mentionsIdentity(['5511999999999@c.us'], '5511999999999@lid'), true);
+test('mentionsIdentity matches an exact jid and a same-number jid on a different domain', () => {
+  assert.equal(mentionsIdentity(['5511999999999@s.whatsapp.net'], '5511999999999@s.whatsapp.net'), true);
+  assert.equal(mentionsIdentity(['5511999999999@lid'], '5511999999999@s.whatsapp.net'), true, 'the account\'s own identity can be reported as either @s.whatsapp.net or @lid');
+  assert.equal(mentionsIdentity(['5511999999999@s.whatsapp.net'], '5511999999999@lid'), true);
 });
 
-test('mentionsIdentity is false when the mention list is empty, missing the account, or ownId is unknown', () => {
-  assert.equal(mentionsIdentity([], '5511999999999@c.us'), false);
-  assert.equal(mentionsIdentity(['5511000000000@c.us'], '5511999999999@c.us'), false);
-  assert.equal(mentionsIdentity(['5511999999999@c.us'], ''), false, 'an unresolved own identity must never be treated as a match');
-  assert.equal(mentionsIdentity(undefined, '5511999999999@c.us'), false);
+test('mentionsIdentity is false when the mention list is empty, missing the account, or ownJid is unknown', () => {
+  assert.equal(mentionsIdentity([], '5511999999999@s.whatsapp.net'), false);
+  assert.equal(mentionsIdentity(['5511000000000@s.whatsapp.net'], '5511999999999@s.whatsapp.net'), false);
+  assert.equal(mentionsIdentity(['5511999999999@s.whatsapp.net'], ''), false, 'an unresolved own identity must never be treated as a match');
+  assert.equal(mentionsIdentity(undefined, '5511999999999@s.whatsapp.net'), false);
+});
+
+test('messageView maps a missed-call stub message to a system "call" view', () => {
+  const message = { key: { remoteJid: ctx.chatId, fromMe: false, id: 'call-fixture' }, messageTimestamp: 1735690000, messageStubType: 41 /* CALL_MISSED_VIDEO */ };
+  const view = messageView(message, ctx);
+  assert.equal(view.system.kind, 'call');
+  assert.match(view.system.label, /video/i);
 });

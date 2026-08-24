@@ -13,3 +13,15 @@ export async function runExclusive(inFlight, key, fn) {
     inFlight.delete(key);
   }
 }
+
+// Shared fetch wrapper for both client entrypoints. `credentials:
+// "same-origin"` ensures the session cookie is always sent — without it,
+// a request issued from a context where the browser wouldn't otherwise
+// attach cookies by default silently runs unauthenticated instead of
+// failing loudly.
+export async function api(path, options = {}) {
+  const response = await fetch(path, { credentials: "same-origin", headers: { "content-type": "application/json", ...(options.headers || {}) }, ...options });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || "Request failed");
+  return data;
+}

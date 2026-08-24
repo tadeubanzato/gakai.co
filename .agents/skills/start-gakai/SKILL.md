@@ -7,9 +7,9 @@ description: Load the complete Gakai project context and engineering workflow. U
 
 ## Product mission
 
-Build Gakai as a professional WhatsApp workspace that users install as one Gakai product. Gakai owns the dashboard, API, authentication, event handling, data model, and future release process. The upstream WhatsApp provider is an internal implementation detail, never a separate customer-facing install.
+Build Gakai as a professional WhatsApp workspace that users install as one Gakai product. Gakai owns the dashboard, API, authentication, event handling, data model, and future release process. The WhatsApp connection itself is an internal implementation detail, never a separate customer-facing install.
 
-Do not describe Gakai as WAHA Home. Use Gakai in visible copy, images, container names, documentation, and product decisions. Keep the provider adapter isolated so it can be replaced later.
+Do not describe Gakai's WhatsApp connectivity as built on, or a wrapper around, any third-party WhatsApp service. Use Gakai in visible copy, images, container names, documentation, and product decisions. Keep the provider integration isolated behind its adapter boundary so its implementation can evolve without changing the Gakai API or UI.
 
 ## Read this first
 
@@ -21,23 +21,22 @@ Do not describe Gakai as WAHA Home. Use Gakai in visible copy, images, container
 
 ## Current verified runtime
 
-- Dashboard URL: `http://localhost:3000` by default; the actual host and port depend on where Docker Compose is running and which `GAKAI_PORT` is set. Do not hardcode a specific hostname.
+- Dashboard URL: `http://localhost:3000` by default; the actual host and port depend on where Docker is running and which `GAKAI_PORT` is set. Do not hardcode a specific hostname.
 - Start Gakai from the repository root with `./scripts/gakai-up.sh`. Set `GAKAI_PORT` or `GAKAI_BIND_ADDRESS` as needed.
-- Public application container: `gakai`.
-- Private provider container: `gakai-provider`; it has no host port. The current provider image is upstream WAHA and remains internal during the transition.
+- Gakai runs as a single Node process, container: `gakai`. There is no separate provider container, no browser/Chromium session, and nothing else to supervise — the WhatsApp connection runs in-process alongside the rest of the application.
 - Persisted local runtime state: automatically generated `.env`, `sessions/`, and `home-data/`. These are intentionally ignored by Git and must never be committed, copied to fixtures, logged, or exposed in browser code.
 
 ## Current codebase
 
-- `server.mjs`: Node HTTP application, authentication, provider REST proxy, media relay, message shaping, account/chat/message endpoints.
+- `server.mjs`: Node HTTP application, authentication, in-process WhatsApp connection/event handling, media relay, message shaping, account/chat/message endpoints.
 - `client/app.jsx` / `client/chat.jsx`: React browser application, bundled with esbuild (`scripts/build-client.mjs`) into the gitignored `public/assets/app.js`, which `public/index.html` loads.
 - `public/styles.css`: dashboard styles.
 - `public/index.html`: entry document.
-- `docker-compose.yml`: local Gakai runtime with a private provider and a public Home API/UI service.
-- `src/api`, `src/domain`, `src/providers/waha`, `src/storage`, `src/realtime`, `src/worker`: planned provider-neutral architecture boundaries.
+- `docker-compose.yml`: local Gakai runtime — a single application service; no separate provider container.
+- `src/api`, `src/domain`, `src/providers/baileys`, `src/storage`, `src/realtime`, `src/worker`: planned provider-neutral architecture boundaries.
 - `packages/provider-runtime`: future bundled provider runtime boundary.
 - `deploy/standalone` and `deploy/compose`: future one-product deployment artifacts.
-- `test/fixtures/providers/waha`: sanitized payload fixtures only. Never store real chat content, phone numbers, credentials, session files, or media.
+- `test/fixtures/providers/baileys`: sanitized payload fixtures only. Never store real chat content, phone numbers, credentials, session files, or media.
 
 ## Product and architecture rules
 
@@ -45,7 +44,7 @@ Do not describe Gakai as WAHA Home. Use Gakai in visible copy, images, container
 2. Normalize provider payloads at the backend boundary. The UI consumes a stable Gakai message/event model, not raw provider-specific objects.
 3. Render every supported message type deliberately. For unknown structured payloads, show a safe useful fallback rather than an empty bubble or raw object/source text.
 4. Preserve captions, sender identity, timestamps, media semantics, and accessible labels when adding UI cards.
-5. Design every new backend feature so `src/providers/waha` can eventually be swapped for another provider adapter.
+5. Design every new backend feature so `src/providers/baileys` can eventually be swapped for another provider adapter.
 6. Do not introduce a second customer-managed provider installation. Gakai owns configuration, health checks, storage, and upgrades.
 7. Do not destructively stop containers, remove volumes, delete sessions, reset Git, or overwrite user data without explicit user authorization and a verified target.
 
@@ -57,7 +56,7 @@ The inbox is the active product focus. Maintain fast and clear conversation scan
 - Make names/group names, previews, sender context, media, message status, and time easy to distinguish.
 - Preserve scroll position when paging older messages or media changes layout.
 - Keep mobile behavior usable.
-- Avoid automatic request fan-out; provider calls can cause browser-backed engines to become slow.
+- Avoid automatic request fan-out; unnecessary provider calls add load and latency.
 - Support text, media, documents, link previews, contact cards, group senders, mentions, and safe fallbacks. Add fixtures before extending structured rendering.
 
 ## Provider API references
@@ -66,31 +65,20 @@ The inbox is the active product focus. Maintain fast and clear conversation scan
 - Treat those links and payload notes as internal adapter material only. Keep Gakai browser endpoints, UI copy, customer documentation, and configuration provider-neutral.
 - Re-check the official documentation at implementation time: provider capabilities vary by engine and may change between releases.
 
-## Deployment model — current and future
+## Deployment model — target architecture
 
-### Current (two-container, approved for now)
+Gakai targets a single-container deployment: `gakai` — built from this repo's Dockerfile — is the only service, and the only thing exposed to the browser or the host network.
 
-`docker compose up` starts two containers:
+There is no separate provider container, no browser-automation engine, and no external WhatsApp service pulled at startup. WhatsApp connectivity is a direct `@whiskeysockets/baileys` integration running in-process, in the same Node process as the rest of the application, kept behind the `src/providers/baileys` adapter boundary as an internal implementation detail — never a second service that users install, configure, or expose separately.
 
-- `gakai` — built from this repo's Dockerfile; the only browser-facing service
-- `gakai-provider` — pulls `devlikeapro/waha` from Docker Hub; handles the WhatsApp protocol, sessions, and QR lifecycle; has no host port and is never exposed to the browser
-
-This is the approved distribution model for the current phase. Users clone the repo and run `./scripts/gakai-up.sh`. Docker Compose pulls the WAHA provider image automatically alongside the Gakai build. This is intentional and correct right now.
-
-Do not treat the WAHA provider image as something to hide or remove. It is a declared, versioned dependency, the same way a Node app declares npm packages.
-
-### Future (single-image target)
-
-The end state is one public image: `docker pull gakai`. Customers configure only Gakai; the WhatsApp engine is bundled inside. This requires either embedding the provider runtime into the Gakai image or replacing it with a fully open WhatsApp library (e.g. `@whiskeysockets/baileys`). The `src/providers/waha` adapter boundary exists specifically to make this swap possible without changing the Gakai API or UI.
-
-Do not attempt the single-image migration unless the user explicitly requests it.
+Users clone the repo and run `./scripts/gakai-up.sh`, which builds and starts this single image. Do not reintroduce a second customer-managed provider container or process.
 
 ## Planned foundations
 
 Implement in this order unless the user explicitly reprioritizes:
 
 1. Complete the provider-neutral message/event model and fixture-based rendering tests.
-2. Add signed provider webhook ingestion, idempotency, durable event/message storage, and normalized update handling.
+2. Add durable event/message storage, idempotent in-process event handling, and normalized update handling.
 3. Deliver live browser updates from the stored event stream through Gakai-controlled SSE or WebSocket endpoints.
 4. Later: production Postgres/object storage/queue topology, single-image Gakai distribution (provider bundled in), CI, signed releases, and an agentic compatibility-review workflow that proposes reviewed changes rather than silently publishing them.
 

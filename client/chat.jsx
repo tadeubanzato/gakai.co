@@ -1,12 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage } from "./chat-helpers.mjs";
+import { api } from "./app-helpers.mjs";
+import { Avatar } from "./ui-helpers.jsx";
 
-async function api(path, options = {}) {
-  const response = await fetch(path, { headers: { "content-type": "application/json", ...(options.headers || {}) }, ...options });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.message || "Request failed");
-  return data;
-}
 function mediaSrc(message) {
   const raw = message?.mediaUrl || message?.media?.url;
   if (!raw) return null;
@@ -24,17 +20,6 @@ function mediaKind(message) {
   if (type.startsWith("video/")) return "video";
   if (type.startsWith("audio/") ) return "audio";
   return "document";
-}
-function avatarSrc(value) {
-  const picture = String(value || "").trim();
-  if (/^data:image\//i.test(picture)) return picture;
-  if (picture.startsWith("/api/app/media?")) return picture;
-  return /^https?:\/\//i.test(picture) ? `/api/app/link-image?url=${encodeURIComponent(picture)}` : null;
-}
-function Avatar({ picture, label, className = "avatar" }) {
-  const [failed, setFailed] = useState(false);
-  const src = avatarSrc(picture), letter = String(label || "?")[0]?.toUpperCase() || "?";
-  return src && !failed ? <img className={className} src={src} alt="" onError={() => setFailed(true)} /> : <span className={`${className} ${className.includes("sender-avatar") ? "sender-letter" : "avatar-letter"}`} aria-hidden="true">{letter}</span>;
 }
 function Sender({ sender }) {
   const label = sender?.name || sender?.id || "Unknown sender";
@@ -116,7 +101,7 @@ function LinkPreview({ body, preview }) {
   if (!url) return null;
   let instagram = false; try { instagram = /instagram\.com$/i.test(new URL(url).hostname); } catch {}
   
-  // Merge: use WAHA preview as base, enhance with fetched OG data
+  // Merge: use the provider-supplied preview as base, enhance with fetched OG data
   // This mirrors the old vanilla JS: render immediately, then enhance when fetch completes
   const data = {
     url: preview?.url || url,
@@ -434,12 +419,12 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
   // time window, which this deliberately does not attempt.
   const deleteMessage = useCallback(async (message) => {
     const messageId = serializedId(message?.id); if (!messageId || !chatId) return;
-    // WAHA's WEBJS engine always requests a real WhatsApp "delete for
-    // everyone" (message.delete(true)) — it only silently falls back to a
-    // local-only removal when WhatsApp's own server rejects revoking someone
-    // else's message, which Gakai has no control over either way. So for a
-    // message the account itself sent, this confirmation must say what will
-    // actually happen: it disappears from the whole chat, not just this view.
+    // The delete request always asks for a real WhatsApp "delete for
+    // everyone" — it only silently falls back to a local-only removal when
+    // WhatsApp's own server rejects revoking someone else's message, which
+    // Gakai has no control over either way. So for a message the account
+    // itself sent, this confirmation must say what will actually happen: it
+    // disappears from the whole chat, not just this view.
     const prompt = message?.fromMe
       ? "Delete this message for everyone in the chat? This can't be undone."
       : "Delete this message for you? It won't be removed from the other person's WhatsApp.";

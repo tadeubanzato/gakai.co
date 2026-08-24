@@ -43,7 +43,7 @@ Gakai runs as **two Docker containers** managed by a single `docker compose up` 
 
 The provider container is an internal implementation detail. It sits on a private Docker network with no host port — it is never reachable from a browser or the internet. Gakai is the only thing users interact with.
 
-> **Dependency note:** The current provider runtime is [WAHA](https://waha.devlike.pro) (WhatsApp HTTP API), which Docker Compose pulls automatically when you start Gakai. You do not need to install or configure WAHA separately — it starts as a private background service. The roadmap goal is to bundle the WhatsApp engine directly into a single Gakai image so no external pull is required.
+> **Dependency note:** Gakai's WhatsApp connectivity is a direct, self-maintained integration — there is no third-party WhatsApp service in the message path. The roadmap goal is to bundle the whole thing into a single Gakai image so no external pull is required.
 
 ---
 
@@ -404,7 +404,7 @@ docker compose up -d --build
 
 ### Fixtures
 
-Sanitized provider payload fixtures live in `test/fixtures/providers/waha/`. Use them to develop message rendering without a live WhatsApp session. Never add real phone numbers, names, message content, or credentials.
+Sanitized provider payload fixtures live in `test/fixtures/providers/baileys/`. Use them to develop message rendering without a live WhatsApp session. Never add real phone numbers, names, message content, or credentials.
 
 ### Project structure
 
@@ -421,7 +421,7 @@ gakai.co/
 ├── src/
 │   ├── api/                # Planned provider-neutral API layer
 │   ├── domain/             # Message/chat normalization (fixture-tested)
-│   ├── providers/waha/     # Provider adapter (designed to be swapped)
+│   ├── providers/baileys/  # WhatsApp provider adapter (session manager, local store, media)
 │   ├── storage/            # Planned storage abstraction
 │   ├── realtime/           # Realtime extraction target; current endpoints live in server.mjs
 │   └── worker/             # Planned background worker

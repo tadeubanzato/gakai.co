@@ -1,0 +1,14 @@
+{
+  "id": "551199999999@s.whatsapp.net",
+  "name": "Fixture Contact",
+  "picture": "https://pps.whatsapp.net/fixture-avatar.jpg",
+  "unreadCount": 3,
+  "lastMessageTimestamp": 1735689600,
+  "lastMessage": {
+    "body": "See you soon",
+    "text": "See you soon",
+    "timestamp": 1735689600,
+    "hasMedia": false,
+    "system": null
+  }
+}

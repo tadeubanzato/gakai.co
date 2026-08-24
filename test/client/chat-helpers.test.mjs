@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { serializedId, idFor, stamp, pageOf, endpoint, merge, confirmSentMessage, PAGE_SIZE } from '../../client/chat-helpers.mjs';
 
-test('serializedId resolves a structured WAHA id to a stable string, never "[object Object]"', () => {
+test('serializedId resolves a structured provider id to a stable string, never "[object Object]"', () => {
   assert.equal(serializedId({ _serialized: 'abc' }), 'abc');
   assert.equal(serializedId({ serialized: 'def' }), 'def');
   assert.equal(serializedId({ id: 'ghi' }), 'ghi');
@@ -39,8 +39,8 @@ test('merge dedups by message id and sorts ascending (oldest first, newest last)
 });
 
 test('confirmSentMessage keeps the reply context when the provider send-ack omits it (the actual reported bug)', () => {
-  // WAHA's /api/sendText ack for a reply doesn't echo back the quoted
-  // message — messageView() normalizes that absence to replyTo: null.
+  // A send-ack for a reply doesn't echo back the quoted message — messageView()
+  // normalizes that absence to replyTo: null.
   // Losing pending.replyTo here made a real reply render as a bare message,
   // giving the reader the impression their reply didn't register.
   const pending = { id: 'pending-1', body: 'sounds good', fromMe: true, timestamp: 100, pending: true, replyTo: { id: 'quoted-1', body: 'are we still on for lunch?', hasMedia: false } };

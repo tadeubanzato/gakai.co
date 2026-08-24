@@ -1,29 +1,20 @@
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { mkdir } from 'node:fs/promises';
-import { randomBytes, scryptSync, timingSafeEqual, createHash, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual, createHash, createCipheriv, createDecipheriv } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createProviderClient } from './src/providers/index.mjs';
 import { WebSocketServer } from 'ws';
-import { avatarUrl as domainAvatarUrl, chatOverview as domainChatOverview, chatTimestamp, extractMentionIds, hasMessageContent, mentionsIdentity, messageView as domainMessageView, providerMessageId, resolveMentionLabels } from './src/domain/message.mjs';
+import { chatTimestamp, extractMentionIds, hasMessageContent, mentionsIdentity, resolveMentionLabels } from './src/domain/message.mjs';
 import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
 import { createBoundedCache } from './src/lib/lru-cache.mjs';
 import { decodeHtmlEntities } from './src/lib/html.mjs';
 
 const port = Number(process.env.PORT || 3000);
-const providerUrl = (process.env.GAKAI_PROVIDER_URL || process.env.WAHA_INTERNAL_URL || 'http://provider:3000').replace(/\/$/, '');
-const providerApiKey=process.env.GAKAI_PROVIDER_API_KEY || "";
-const providerWebhookSecret=process.env.GAKAI_PROVIDER_WEBHOOK_SECRET || "";
-const provider = createProviderClient({
-  kind: process.env.GAKAI_PROVIDER_KIND || 'waha',
-  baseUrl: providerUrl,
-  apiKey: providerApiKey,
-});
 // Encrypts secrets we must read back later (e.g. the n8n API key, to call n8n's
-// API again on the user's behalf). Falls back to the provider webhook secret so
-// existing deployments keep working without a new required env var.
-const stateSecretKey=createHash('sha256').update(process.env.GAKAI_STATE_SECRET || providerWebhookSecret || 'gakai-dev-secret').digest();
+// API again on the user's behalf).
+const stateSecretKey=createHash('sha256').update(process.env.GAKAI_STATE_SECRET || 'gakai-dev-secret').digest();
 function encryptSecret(value){
   const iv=randomBytes(12);
   const cipher=createCipheriv('aes-256-gcm',stateSecretKey,iv);
@@ -43,26 +34,26 @@ const publicDir = join(process.cwd(), "public");
 const dataDir=process.env.HOME_DATA_DIR || join(process.cwd(),"data");
 const dataFile=join(dataDir,"home.json");
 const dbFile=join(dataDir,"gakai.db");
+const sessionsDir=process.env.GAKAI_SESSIONS_DIR || join(process.cwd(),"sessions");
+const mediaCacheDir=join(dataDir,"media-cache");
 await mkdir(dataDir,{recursive:true});
+await mkdir(sessionsDir,{recursive:true});
 const db=new DatabaseSync(dbFile);
 db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK (id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS app_events (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, type TEXT NOT NULL, occurred_at TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS app_events_account_created ON app_events(account_id, created_at);");
+// handleProviderEvent is defined further down (it needs dispatchAutomationEvent
+// and broadcastTyping, declared later) but referenced here — safe, since
+// `function` declarations are hoisted and this callback only ever runs later,
+// asynchronously, off a live WhatsApp event.
+const provider = createProviderClient({
+  kind: process.env.GAKAI_PROVIDER_KIND || 'baileys',
+  db, sessionsDir, mediaCacheDir,
+  logLevel: process.env.GAKAI_LOG_LEVEL,
+  onEvent: (kind, payload) => handleProviderEvent(kind, payload),
+});
 let legacy={username:null,password:null,keys:[]};try{legacy=JSON.parse(await readFile(dataFile,"utf8"))}catch{}
 const savedState=db.prepare("SELECT data FROM app_state WHERE id=1").get();
 let store=savedState?JSON.parse(savedState.data):legacy;
-// Reactions/deleted-chat records otherwise only ever grow (including for
-// accounts that no longer exist, before the account-delete cleanup below
-// existed) and are never useful past a retention window.
-const retentionMs=365*24*60*60*1000;
-function pruneStore(){
-  const now=Date.now();
-  const keep=(items,dateField)=>items.filter(item=>{const at=Date.parse(item[dateField]);return !Number.isFinite(at)||now-at<retentionMs});
-  if(Array.isArray(store.messageReactions))store.messageReactions=keep(store.messageReactions,'reactedAt');
-  if(Array.isArray(store.deletedChats))store.deletedChats=keep(store.deletedChats,'deletedAt');
-}
-const persist=()=>{pruneStore();db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
-if(!Array.isArray(store.deletingAccounts))store.deletingAccounts=[];
-if(!Array.isArray(store.deletedChats))store.deletedChats=[];
-if(!Array.isArray(store.messageReactions))store.messageReactions=[];
+const persist=()=>{db.prepare("INSERT INTO app_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(JSON.stringify(store));};
 if(!store.accountLabels||typeof store.accountLabels!=='object'||Array.isArray(store.accountLabels))store.accountLabels={};
 if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[];
 if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
@@ -106,8 +97,6 @@ const admin=req=>{
 const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8' };
 const send = (res, status, data) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'}); res.end(JSON.stringify(data)); };
 async function readBody(req) { const chunks=[]; let size=0; for await (const chunk of req){size+=chunk.length;if(size>1024*1024)throw Object.assign(new Error('Request body too large'),{status:413});chunks.push(chunk);} req.rawBody=Buffer.concat(chunks).toString('utf8'); return req.rawBody ? JSON.parse(req.rawBody) : {}; }
-const providerRequest = provider.request;
-const providerFile = provider.file;
 const liveEventStreams = new Set();
 const writeSseEvent = (res, event, id) => {
   res.write(`id: ${id || event.id}\nevent: gakai\ndata: ${JSON.stringify(event)}\n\n`);
@@ -123,24 +112,29 @@ function recordAppEvent(event) {
   return true;
 }
 const typingSockets=new Set();
-const presencePolls=new Map();
 const socketOpen=socket=>socket.readyState===1;
-const presenceValue=value=>String(value?.presence||value?.status||value?.state||value?.data?.presence||'').toLowerCase();
 function broadcastTyping(accountId,chatId,payload,except){for(const socket of typingSockets)if(socket!==except&&socket.accountId===accountId&&socket.chatId===chatId&&socketOpen(socket))socket.send(JSON.stringify(payload));}
-function stopPresencePoll(key){const poll=presencePolls.get(key);if(!poll)return;clearInterval(poll.timer);presencePolls.delete(key)}
-function maybeStopPresencePoll(key){if(![...typingSockets].some(socket=>`${socket.accountId}:${socket.chatId}`===key))stopPresencePoll(key)}
-function startPresencePoll(accountId,chatId){
-  const key=`${accountId}:${chatId}`;if(presencePolls.has(key))return;
-  const poll={last:'',timer:null};
-  const read=async()=>{try{await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}/subscribe`,{method:'POST'});const value=presenceValue(await providerRequest(`/api/${encodeURIComponent(accountId)}/presence/${encodeURIComponent(chatId)}`));if(value!==poll.last){poll.last=value;broadcastTyping(accountId,chatId,{type:'presence',accountId,chatId,presence:value||'paused'})}}catch{}};
-  poll.timer=setInterval(read,2000);presencePolls.set(key,poll);read();
+// Baileys' own presence.update events (see handleProviderEvent below) fully
+// replace the old 2-second REST poll here — a real reliability and
+// efficiency win, not just parity: presence now reaches the browser the
+// moment WhatsApp reports it, with zero standing per-chat poll loop.
+const WA_PRESENCE_TO_GAKAI={composing:'typing',recording:'recording'};
+function gakaiPresenceFrom(presences){
+  const first=Object.values(presences||{})[0];
+  return WA_PRESENCE_TO_GAKAI[first?.lastKnownPresence]||'paused';
 }
-const mediaCache=createBoundedCache({limit:24});
-async function cachedMedia(path){
-  const cached=mediaCache.get(path);if(cached)return cached;
-  const response=await providerFile(path);const value={buffer:Buffer.from(await response.arrayBuffer()),type:response.headers.get('content-type')||'application/octet-stream'};
-  if(value.buffer.length<=3*1024*1024)mediaCache.set(path,value);
-  return value;
+// dispatchAutomationEvent and provider.setReaction/... below already keep
+// local state authoritative; this just fans a live provider event out to any
+// open browser WebSocket for that chat, and (for messages) into the same
+// automation pipeline a webhook used to feed.
+function handleProviderEvent(kind,payload){
+  if(kind==='message'){
+    dispatchAutomationEvent(payload).catch(error=>console.error('Automation dispatch failed',error));
+    return;
+  }
+  if(kind==='presence'){
+    broadcastTyping(payload.accountId,payload.chatId,{type:'presence',accountId:payload.accountId,chatId:payload.chatId,presence:gakaiPresenceFrom(payload.presences)});
+  }
 }
 const instagramPreviewCache=createBoundedCache({limit:40});
 const safeInstagramPage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/instagram\.com$/i.test(url.hostname)?url:null}catch{return null}};
@@ -243,103 +237,53 @@ async function openGraphPreview(value){
   externalPreviewCache.set(url.href,result);
   return result;
 }
-const avatarUrl = value => domainAvatarUrl(value, providerUrl);
-function account(s) { const rawStatus=s.status; return { id:s.name, label:store.accountLabels[s.name] || s.config?.metadata?.['gakai.label'] || s.config?.metadata?.['waha-home.label'] || s.me?.pushName || s.name, status:['WORKING','CONNECTED','READY'].includes(rawStatus)?'WORKING':rawStatus, phone:s.me?.id?.split('@')[0] || null, profile:s.me?.pushName || null }; }
-async function accountView(session){
-  const view=account(session);if(!session.me?.id)return view;
-
-  try{const contacts=await providerRequest(`/api/contacts/all?session=${encodeURIComponent(session.name)}`);const self=(Array.isArray(contacts)?contacts:[]).find(contact=>contact.id===session.me.id||contact.number===session.me.id.split("@")[0])||{};const photo=await providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(session.me.id)}&session=${encodeURIComponent(session.name)}`);view.picture=avatarUrl(photo?.profilePictureURL||photo?.url);
-    // contacts/profile-picture is unreliable for the account's own identity —
-    // observed returning profilePictureURL:null for a number that does have a
-    // photo set. The chat-scoped picture lookup (used for every other chat's
-    // avatar) succeeds where this one doesn't, so fall back to it before
-    // giving up, same asymmetry already handled for individual chats.
-    if(!view.picture)view.picture=await chatPictureFor(session.name,session.me.id);
-    view.mentionNames=[view.label,view.profile,self.name,self.pushName,self.shortName,view.phone].filter(Boolean)}catch{view.picture=null;view.mentionNames=[view.label,view.profile,view.phone].filter(Boolean)}
+// s: the provider's own account snapshot ({id,status,phone,profile,ownJid}) —
+// already in Gakai's status vocabulary (WORKING/SCAN_QR_CODE/STARTING/
+// FAILED), with no provider-specific session/config object to unwrap.
+function account(s) { return { id:s.id, label:store.accountLabels[s.id] || s.profile || s.id, status:s.status, phone:s.phone, profile:s.profile }; }
+async function accountView(s){
+  const view=account(s);
+  if(!s.ownJid)return view;
+  try{
+    const self=await provider.getContact(s.id,s.ownJid);
+    view.picture=self.picture||null;
+    view.mentionNames=[view.label,view.profile,self.name,view.phone].filter(Boolean);
+  }catch{view.picture=null;view.mentionNames=[view.label,view.profile,view.phone].filter(Boolean)}
   // Drives the sidebar's per-account unread dot — every account needs this,
   // not just whichever one is open, so it's computed here rather than only
-  // in the /chats route. Reuses hasMessageContent() so a fabricated
-  // system-event touch (see inbox recency filtering above) can never light
-  // up the dot for a chat with no real message behind it.
+  // in the /chats route. hasMessageContent() guards against a metadata-only
+  // chat touch lighting up the dot for a chat with no real message behind it.
   try{
-    const chats=await allChatOverviews(session.name);
-    const deleted=new Set((store.deletedChats||[]).filter(item=>item.accountId===session.name).map(item=>item.chatId));
-    view.hasUnread=chats.some(chat=>!deleted.has(chat.id)&&hasMessageContent(chat)&&(Number(chat.unreadCount??chat.unreadMessagesCount??chat._chat?.unreadCount??0)||0)>0);
+    const chats=await provider.getChatsOverview(s.id);
+    view.hasUnread=chats.some(chat=>hasMessageContent(chat)&&(Number(chat.unreadCount)||0)>0);
   }catch{view.hasUnread=false}
   return view;
 }
-const config = label => label ? ({metadata:{'gakai.label':label}}) : {};
-const chatOverview = chat => domainChatOverview(chat, providerUrl);
-const chatPictureCache=createBoundedCache({limit:500});
-const chatPictureCacheTtl=24*60*60*1000;
-function chatPictureFor(session,chatId){
-  const key=`${session}:${chatId}`,cached=chatPictureCache.get(key);
-  if(cached)return cached;
-  const task=providerRequest(`/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/picture?refresh=true`).then(picture=>{
-    // Extend a resolved lookup's lifetime well past the short in-flight TTL
-    // below, so a successful picture stays cached long-term instead of being
-    // re-fetched every few minutes.
-    chatPictureCache.set(key,task,{ttlMs:chatPictureCacheTtl});
-    return avatarUrl(picture?.profilePictureURL||picture?.url||picture?.profilePicture||picture);
-  }).catch(()=>null);
-  chatPictureCache.set(key,task,{ttlMs:5*60*1000});
-  return task;
-}
-async function enrichChatOverview(session,chat){
-  const view=chatOverview(chat);
-  if(!view.picture&&view.id)view.picture=await chatPictureFor(session,view.id);
-  // Same bug as enrichMessage's main body, different location: the inbox
-  // list's "last message" preview text never resolved @123456 mentions
-  // either — it went straight from chatOverview() to the client untouched.
+// The inbox list's "last message" preview can contain an unresolved
+// @<number> mention — resolve it the same way a full message body does.
+async function enrichChatOverview(session,view){
   if(view.lastMessage){
     const mentionIds=extractMentionIds(view.lastMessage.body,view.lastMessage.text);
     if(mentionIds.length){
-      const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContact(session,`${id}@lid`)]));
-      const labels=new Map(contacts.map(([id,contact])=>[id,contact.name||String(contact.id||'').replace(/@(c|s|g)\.us$/,'')]).filter(([,label])=>label));
-      view.lastMessage={...view.lastMessage,body:resolveMentionLabels(view.lastMessage.body,labels),text:resolveMentionLabels(view.lastMessage.text,labels)};
+      const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id)]));
+      const labels=new Map(contacts.map(([id,contact])=>[id,contact?.name]).filter(([,label])=>label));
+      view={...view,lastMessage:{...view.lastMessage,body:resolveMentionLabels(view.lastMessage.body,labels),text:resolveMentionLabels(view.lastMessage.text,labels)}};
     }
   }
   return view;
 }
-async function mapWithConcurrency(values,limit,worker){const result=new Array(values.length);let next=0;await Promise.all(Array.from({length:Math.min(limit,values.length)},async()=>{while(next<values.length){const index=next++;result[index]=await worker(values[index])}}));return result}
-async function allChatOverviews(session){
-  const limit=100,all=[];let offset=0;
-  for(;;){
-    const page=await providerRequest(`/api/${encodeURIComponent(session)}/chats/overview?limit=${limit}&offset=${offset}`);
-    if(!Array.isArray(page))return all;
-    all.push(...page);
-    if(page.length<limit)return all;
-    offset+=page.length;
-  }
+// Mentions are extracted from message text as bare digit runs (@<number>),
+// but Baileys keys contacts/pictures by full JID — resolve by matching the
+// digits against the message's own contextInfo.mentionedJid list where
+// possible; falling back to a bare-number WhatsApp jid otherwise.
+async function resolveContactByNumber(session,number,mentionedJids=[]){
+  const jid=mentionedJids.find(candidate=>String(candidate||'').replace(/@.*$/,'').replace(/^0+/,'')===number.replace(/^0+/,''))||`${number}@s.whatsapp.net`;
+  return resolveContact(session,jid);
 }
-const messageView = message => domainMessageView(message, providerUrl);
-const profileCacheTtl=5*60*1000;
-// Previously never expired, unlike every sibling cache here — a contact's
-// display name could go stale for the life of the process.
-const contactsListCache=createBoundedCache({limit:50,ttlMs:profileCacheTtl});
-async function contactsFor(session){
-  const cached=contactsListCache.get(session);if(cached)return await cached;
-  const task=providerRequest(`/api/contacts/all?session=${encodeURIComponent(session)}`).catch(error=>{contactsListCache.delete(session);throw error});contactsListCache.set(session,task);return await task;
-}
-const contactCache=createBoundedCache({limit:500,ttlMs:profileCacheTtl});
-const profilePictureCache=createBoundedCache({limit:500,ttlMs:profileCacheTtl});
-const accountIdentityCache=createBoundedCache({limit:50,ttlMs:profileCacheTtl});
-async function accountIdentityFor(session){const cached=accountIdentityCache.get(session);if(cached)return cached;try{const value=await providerRequest(`/api/sessions/${encodeURIComponent(session)}`),id=String(value?.me?.id||'');accountIdentityCache.set(session,id);return id}catch{return ''}}
-function profilePictureFor(session,contactId){const key=`${session}:${contactId}`,cached=profilePictureCache.get(key);if(cached)return cached;const task=providerRequest(`/api/contacts/profile-picture?contactId=${encodeURIComponent(contactId)}&session=${encodeURIComponent(session)}`);profilePictureCache.set(key,task);task.catch(()=>{if(profilePictureCache.get(key)===task)profilePictureCache.delete(key)});return task;}
 async function resolveContact(session,rawId){
-  const key=`${session}:${rawId}`,cached=contactCache.get(key);if(cached)return cached;
   let contactId=String(rawId||'');
-  try{
-    if(contactId.endsWith('@lid')){
-      const lid=await providerRequest(`/api/${encodeURIComponent(session)}/lids/${encodeURIComponent(contactId)}`);
-      const mapped=typeof lid==='string'?lid:(lid.phoneNumber||lid.phone||lid.pn||lid.id||lid.chatId||lid.data?.phoneNumber||lid.data?.id||null);
-      if(mapped){contactId=String(mapped);if(!contactId.includes('@'))contactId+='@c.us'}
-    }
-    const contacts=await contactsFor(session);
-    const contact=(Array.isArray(contacts)?contacts:[]).find(item=>item.id===contactId||item.number===contactId.replace(/@.*$/,'')||item.lid===rawId)||{};
-    const picture=await profilePictureFor(session,contactId);
-    const phone=contact.number||contact.phoneNumber||contact.phone||(contactId.endsWith("@c.us")?contactId.slice(0,-5):null); const value={id:contactId,phone:phone?String(phone).replace(/[^0-9]/g,""):null,name:contact.name||contact.pushName||contact.shortName||contact.verifiedName||null,status:contact.status||contact.about||contact.description||null,picture:avatarUrl(picture?.profilePictureURL||picture?.url)}; contactCache.set(key,value); return value;
-  }catch{const value={id:contactId,phone:contactId.endsWith("@c.us")?contactId.slice(0,-5):null,name:null,picture:null};return value}
+  if(contactId.endsWith('@lid'))contactId=provider.resolveLid(session,contactId);
+  return provider.getContact(session,contactId);
 }
 const automationSummary=subscription=>({id:subscription.id,accountId:subscription.accountId,name:subscription.name,url:subscription.url,productionUrl:subscription.productionUrl||subscription.url,testUrl:subscription.testUrl||null,testPhone:subscription.testPhone||null,enabled:subscription.enabled,events:subscription.events,secret:subscription.secret,createdAt:subscription.createdAt,lastDelivery:subscription.lastDelivery||null});
 async function automationFetch(subscription,event,{url:overrideUrl}={}){
@@ -368,7 +312,7 @@ async function sendAutomationReply(response,accountId,chatId){
   try{const data=await response.json();reply=String(data?.reply||data?.text||data?.output||'').trim();}catch{return null;}
   if(!reply)return null;
   if(!chatId)return reply;
-  try{await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:accountId,chatId,text:reply})});}
+  try{await provider.sendText(accountId,chatId,reply);}
   catch(error){console.error('Failed to send automation reply:',error.message);}
   return reply;
 }
@@ -402,28 +346,28 @@ async function deliverAutomation(subscription,event,options={}){subscription.sec
 // built for their own purpose, which may well want every message.
 const N8N_REPLY_SUBSCRIPTION_NAMES=new Set(['n8n auto-connect','n8n auto-connect (AI Agent)']);
 
+// payload: {accountId, chatId, message /* already-normalized messageView() */, raw}
+// as delivered by the provider's live 'message' event (see
+// handleProviderEvent above) — the in-process replacement for what used to
+// arrive as a signed webhook POST.
 async function dispatchAutomationEvent(payload){
-  if(payload?.event!=="message"||payload?.payload?.fromMe)return;const accountId=String(payload.session||"");if(!accountId)return;
-  const message=messageView(payload.payload||{}),chatId=payload.payload?.from||payload.payload?.chatId||null,kind=String(chatId||"").endsWith("@g.us")?"group":"direct";
-  // Defends against the same WAHA/WEBJS resync-touch phenomenon found in the
-  // inbox filter (a chat's timestamp bumped with no real message behind it):
-  // a "message" event with no body, text, or media isn't a real message —
-  // don't fire an AI reply or automation for it either way.
+  const {accountId,chatId,message}=payload;
+  if(!accountId||!chatId)return;
+  const kind=chatId.endsWith("@g.us")?"group":"direct";
+  // A message with no body, text, or media isn't real content (a metadata
+  // touch, a call/group system event) — don't fire an AI reply or automation
+  // for it either way.
   if(!message.body&&!message.text&&!message.hasMedia)return;
-  const chat={id:chatId,kind,name:payload.payload?.chatName||payload.payload?._data?.chatName||payload.payload?._data?.notifyName||null};
+  const chat={id:chatId,kind,name:null};
   if(message.sender?.id){const contact=await resolveContact(accountId,message.sender.id);message.sender={...message.sender,phone:contact.phone||null,name:message.sender.name||contact.name||null};if(kind==="direct")chat.phone=contact.phone||null;}
-  // payload.payload.id is frequently a structured WAHA id object, not a
-  // string — `${object}` stringifies to "[object Object]" for every message,
-  // which collided every inbound event onto the same app_events primary key
-  // after the first one. Resolve it the same way the rest of the codebase does.
-  const event={id:`evt_${providerMessageId(payload.payload?.id)||randomBytes(12).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
+  const event={id:`evt_${message.id}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
   // Persist before notifying the browser or downstream automation. This gives
   // reconnecting clients a small durable replay window and avoids exposing raw
   // provider payloads outside the adapter boundary.
   if (!recordAppEvent(event)) return;
   let ownMentioned=kind==="direct";
-  if(!ownMentioned&&Array.isArray(payload.payload?._data?.mentionedJidList)&&payload.payload._data.mentionedJidList.length){
-    ownMentioned=mentionsIdentity(payload.payload._data.mentionedJidList,await accountIdentityFor(accountId));
+  if(!ownMentioned&&Array.isArray(message.mentionedJids)&&message.mentionedJids.length){
+    ownMentioned=mentionsIdentity(message.mentionedJids,provider.getAccount(accountId)?.ownJid);
   }
   const subscriptions=store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)&&(!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)||ownMentioned));
   await Promise.allSettled([
@@ -704,8 +648,7 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,kind}){
     inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Inbound Secret – ${accountId}${kind==='agentic'?' (AI Agent)':''}`,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});
 
     const webhookPath='gakai-'+accountId.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24)+(kind==='agentic'?'-ai':'');
-    let accountLabel=accountId;
-    try{const sessions=await providerRequest('/api/sessions');const session=(Array.isArray(sessions)?sessions:[]).find(s=>s.name===accountId);if(session)accountLabel=store.accountLabels[accountId]||session.config?.metadata?.['gakai.label']||session.config?.metadata?.['waha-home.label']||session.me?.pushName||accountId;}catch{}
+    const accountLabel=store.accountLabels[accountId]||provider.getAccount(accountId)?.profile||accountId;
     const workflowName=`Gakai – ${accountLabel}${kind==='agentic'?' (AI Agent)':''}`;
     const accountLlm=kind==='agentic'?llmConfig(accountId):null;
     if(accountLlm){
@@ -784,7 +727,7 @@ async function dispatchLLMReply(accountId,event){
   try{
     const reply=await llmChat(config,[{role:'system',content:systemPrompt},{role:'user',content:userText}]);
     if(!reply.trim())return;
-    await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:accountId,chatId,text:reply.trim()})});
+    await provider.sendText(accountId,chatId,reply.trim());
   }catch(err){console.error('Native LLM reply failed:',err.message);}
 }
 async function api(req, res, url) {
@@ -797,25 +740,20 @@ function normalizedPreviewImage(value){
 }
 
   const parts = url.pathname.split('/').filter(Boolean);
-  if(req.method==="POST"&&url.pathname==="/api/app/provider-events"){const payload=await readBody(req);const signature=req.headers["x-webhook-hmac"];const expected=providerWebhookSecret?createHmac("sha512",providerWebhookSecret).update(req.rawBody||"").digest("hex"):"";if(!providerWebhookSecret||!signature||!equalHex(signature,expected))return send(res,401,{message:"Invalid provider webhook"});dispatchAutomationEvent(payload).catch(error=>console.error("Automation dispatch failed",error));return send(res,202,{ok:true});}
   if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, {ok:true, service:'gakai'});
-  if (req.method === 'GET' && url.pathname === '/readyz') {
-    try { await providerRequest('/api/sessions'); return send(res, 200, {ok:true, service:'gakai', provider:true}); }
-    catch { return send(res, 503, {ok:false, service:'gakai', provider:false}); }
-  }
-async function enrichMessage(session,message){
-  const view=messageView(message);
-  const reaction=store.messageReactions.find(item=>item.accountId===session&&item.messageId===String(view.id));
-  if(reaction)view.reaction=reaction.reaction;
+  // The WhatsApp connection is in-process now — there is no separate
+  // provider process whose reachability readiness needs to confirm.
+  if (req.method === 'GET' && url.pathname === '/readyz') return send(res, 200, {ok:true, service:'gakai', provider:true});
+async function enrichMessage(session,view){
   if(view.sender?.id){
     const resolved=await resolveContact(session,view.sender.id);
-    view.sender={...view.sender,id:resolved.id||view.sender.id,name:resolved.name||view.sender.name||String(resolved.id||view.sender.id).replace(/@(c|s|g)\.us$/,''),picture:resolved.picture||view.sender.picture||null};
+    view={...view,sender:{...view.sender,id:resolved.id||view.sender.id,name:resolved.name||view.sender.name||String(resolved.id||view.sender.id).replace(/@(c|s|g)\.us$/,''),picture:resolved.picture||view.sender.picture||null}};
   }
-  if(view.linkPreview)view.linkPreview.image=normalizedPreviewImage(view.linkPreview.image);
-  const rawMentionIds=Array.isArray(message._data?.mentionedJidList)?message._data.mentionedJidList:[];
+  if(view.linkPreview)view={...view,linkPreview:{...view.linkPreview,image:normalizedPreviewImage(view.linkPreview.image)}};
+  const rawMentionIds=Array.isArray(view.mentionedJids)?view.mentionedJids:[];
   if(rawMentionIds.length){
-    const ownId=await accountIdentityFor(session);
-    view.mentions=(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId));const id=contact.id||String(rawId);const ownNumber=ownId.replace(/@.*$/,''),mentionNumber=id.replace(/@.*$/,'');return {id,name:contact.name||mentionNumber,isMe:Boolean(ownId&&(id===ownId||mentionNumber===ownNumber))}}))).filter(mention=>mention.name);
+    const ownJid=provider.getAccount(session)?.ownJid||'';
+    view={...view,mentions:(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId));const id=contact.id||String(rawId);const ownNumber=ownJid.replace(/@.*$/,''),mentionNumber=id.replace(/@.*$/,'');return {id,name:contact.name||mentionNumber,isMe:Boolean(ownJid&&(id===ownJid||mentionNumber===ownNumber))}}))).filter(mention=>mention.name)};
   }
   const body=String(view.body||view.text||'');
   // A mention inside the *quoted* text (replyTo.body) was never resolved —
@@ -824,11 +762,9 @@ async function enrichMessage(session,message){
   const replyBody=String(view.replyTo?.body||'');
   const mentionIds=extractMentionIds(body,replyBody);
   if(mentionIds.length){
-    const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContact(session,`${id}@lid`)]));
-    const labels=new Map(contacts.map(([id,contact])=>[id,contact.name||String(contact.id||'').replace(/@(c|s|g)\.us$/,'')]).filter(([,label])=>label));
-    view.body=resolveMentionLabels(body,labels);
-    view.text=view.body;
-    if(view.replyTo)view.replyTo.body=resolveMentionLabels(replyBody,labels);
+    const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id,rawMentionIds)]));
+    const labels=new Map(contacts.map(([id,contact])=>[id,contact?.name||String(contact?.id||'').replace(/@(c|s|g)\.us$/,'')]).filter(([,label])=>label));
+    view={...view,body:resolveMentionLabels(body,labels),text:resolveMentionLabels(body,labels),replyTo:view.replyTo?{...view.replyTo,body:resolveMentionLabels(replyBody,labels)}:view.replyTo};
   }
   return view;
 }
@@ -836,9 +772,9 @@ async function enrichMessage(session,message){
     const token=(req.headers.authorization||'').replace(/^Bearer\s+/i,'');const key=store.keys.find(k=>equalHex(k.hash,hash(token)));
     if(!key)return send(res,401,{message:'Invalid integration key'});key.lastUsedAt=new Date().toISOString();persist();
     const endpoint=url.pathname.slice('/api/integrations/v1/'.length);
-    if(req.method==='GET'&&endpoint==='chats'&&key.scopes.includes('messages:read')){const chats=await providerRequest(`/api/${encodeURIComponent(key.accountId)}/chats/overview?limit=35`);return send(res,200,{accountId:key.accountId,chats:chats.map(chatOverview).sort((a,b)=>b.timestamp-a.timestamp)});}
-    if(req.method==='GET'&&endpoint==='messages'&&key.scopes.includes('messages:read')){const chatId=url.searchParams.get('chatId');if(!chatId)return send(res,400,{message:'chatId is required'});const messages=await providerRequest(`/api/${encodeURIComponent(key.accountId)}/chats/${encodeURIComponent(chatId)}/messages?limit=30&downloadMedia=false`);return send(res,200,{messages:messages.map(messageView).sort((a,b)=>a.timestamp-b.timestamp)});}
-    if(req.method==='POST'&&endpoint==='messages'&&key.scopes.includes('messages:send')){const input=await readBody(req);if(!input.chatId||!input.text)return send(res,400,{message:'chatId and text are required'});const sent=await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:key.accountId,chatId:input.chatId,text:input.text})});return send(res,200,{message:messageView(sent||{})});}
+    if(req.method==='GET'&&endpoint==='chats'&&key.scopes.includes('messages:read')){const chats=await provider.getChatsOverview(key.accountId);return send(res,200,{accountId:key.accountId,chats:chats.slice(0,35).sort((a,b)=>b.timestamp-a.timestamp)});}
+    if(req.method==='GET'&&endpoint==='messages'&&key.scopes.includes('messages:read')){const chatId=url.searchParams.get('chatId');if(!chatId)return send(res,400,{message:'chatId is required'});const messages=await provider.getMessages(key.accountId,chatId,{limit:30});return send(res,200,{messages:messages.sort((a,b)=>a.timestamp-b.timestamp)});}
+    if(req.method==='POST'&&endpoint==='messages'&&key.scopes.includes('messages:send')){const input=await readBody(req);if(!input.chatId||!input.text)return send(res,400,{message:'chatId and text are required'});const sent=await provider.sendText(key.accountId,input.chatId,input.text);return send(res,200,{message:sent});}
     return send(res,403,{message:'This integration key does not have permission for that action'});
 
   }
@@ -910,8 +846,23 @@ async function enrichMessage(session,message){
   res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});
   return res.end(body);
 }
-  if(req.method==='GET'&&url.pathname==='/api/app/media'){const path=url.searchParams.get('path')||'';const range=req.headers.range;if(range){const file=await providerFile(path,{range});const body=Buffer.from(await file.arrayBuffer());const headers={'content-type':file.headers.get('content-type')||'application/octet-stream','cache-control':'private, max-age=86400','accept-ranges':file.headers.get('accept-ranges')||'bytes','content-length':String(body.length)};const contentRange=file.headers.get('content-range');if(contentRange)headers['content-range']=contentRange;res.writeHead(file.status,headers);return res.end(body)}const file=await cachedMedia(path);res.writeHead(200,{'content-type':file.type,'cache-control':'private, max-age=86400','accept-ranges':'bytes','content-length':String(file.buffer.length)});return res.end(file.buffer);}
-  if (req.method==='GET' && url.pathname==='/api/app/accounts') {const sessions=await providerRequest('/api/sessions');const deleting=new Set(store.deletingAccounts||[]);const visible=sessions.filter(session=>!deleting.has(session.name));const live=new Set(sessions.map(session=>session.name));const next=(store.deletingAccounts||[]).filter(id=>live.has(id));if(next.length!==store.deletingAccounts.length){store.deletingAccounts=next;await persist()}return send(res,200,{accounts:await Promise.all(visible.map(accountView))});}
+  if(req.method==='GET'&&url.pathname==='/api/app/media'){
+    const accountId=url.searchParams.get('accountId')||'',chatId=url.searchParams.get('chatId')||'',messageId=url.searchParams.get('messageId')||'';
+    if(!accountId||!chatId||!messageId)return send(res,400,{message:'accountId, chatId, and messageId are required'});
+    const file=await provider.downloadMedia(accountId,chatId,messageId);
+    if(!file)return send(res,404,{message:'Media not found'});
+    const range=req.headers.range,total=file.buffer.length;
+    if(range){
+      const match=/^bytes=(\d*)-(\d*)$/.exec(range);
+      const start=match&&match[1]?Number(match[1]):0,end=match&&match[2]?Math.min(Number(match[2]),total-1):total-1;
+      const body=file.buffer.subarray(start,end+1);
+      res.writeHead(206,{'content-type':file.type,'cache-control':'private, max-age=86400','accept-ranges':'bytes','content-range':`bytes ${start}-${end}/${total}`,'content-length':String(body.length)});
+      return res.end(body);
+    }
+    res.writeHead(200,{'content-type':file.type,'cache-control':'private, max-age=86400','accept-ranges':'bytes','content-length':String(total)});
+    return res.end(file.buffer);
+  }
+  if (req.method==='GET' && url.pathname==='/api/app/accounts') {return send(res,200,{accounts:await Promise.all(provider.listAccounts().map(accountView))});}
   if(req.method==='GET'&&url.pathname==='/api/app/instagram-preview'){return send(res,200,await instagramPreview(url.searchParams.get('url')||''));}
   if(req.method==='GET'&&url.pathname==='/api/app/instagram-image'){
   const image=safeInstagramImage(url.searchParams.get('url')||'');
@@ -928,105 +879,96 @@ async function enrichMessage(session,message){
 }
   if (req.method==='POST' && url.pathname==='/api/app/accounts') {
     const input=await readBody(req), id=`account-${Date.now().toString(36)}`;
-    const created=await providerRequest('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:id,config:config(input.label)})});
     const label=String(input.label||'WhatsApp account').trim().slice(0,80);if(label){store.accountLabels[id]=label;await persist();}
-    return send(res,201,{account:account(created || {name:id,status:'STARTING',config:config(input.label)})});
+    await provider.startAccount(id,{label});
+    return send(res,201,{account:account(provider.getAccount(id)||{id,status:'STARTING'})});
   }
   const id=decodeURIComponent(parts[3] || '');
-  if (req.method==="DELETE" && parts.length===4) {await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:"DELETE"}).catch(()=>null);delete store.accountLabels[id];store.deletingAccounts=(store.deletingAccounts||[]).filter(item=>item!==id);store.deletedChats=(store.deletedChats||[]).filter(item=>item.accountId!==id);store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);store.keys=(store.keys||[]).filter(item=>item.accountId!==id);store.messageReactions=(store.messageReactions||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
-  if (req.method==='GET' && parts[4]==='qr') return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/auth/qr`));
-  if (req.method==='POST' && parts[4]==='start') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/start`,{method:'POST'})) || {ok:true});
-  if (req.method==='POST' && parts[4]==='restart') return send(res,200,(await providerRequest(`/api/sessions/${encodeURIComponent(id)}/restart`,{method:'POST'})) || {ok:true});
-  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(decodeURIComponent(parts[5]))}/messages/read`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});return send(res,200,{ok:true});}
+  if (req.method==="DELETE" && parts.length===4) {await provider.deleteAccount(id).catch(()=>null);delete store.accountLabels[id];store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);store.keys=(store.keys||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
+  if (req.method==='GET' && parts[4]==='qr') return send(res,200,(await provider.getQr(id))||{});
+  if (req.method==='POST' && parts[4]==='start') {await provider.startAccount(id,{label:store.accountLabels[id]}); return send(res,200,{ok:true});}
+  if (req.method==='POST' && parts[4]==='restart') {await provider.restartAccount(id); return send(res,200,{ok:true});}
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await provider.markChatRead(id,decodeURIComponent(parts[5]));return send(res,200,{ok:true});}
   // Must be checked before the whole-chat DELETE below: both match
   // parts[4]==='chats'&&parts[5], only this one additionally has
   // parts[6]==='messages'&&parts[7] (a specific message under that chat).
   if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]&&parts[6]==='messages'&&parts[7]){
-    const chatId=decodeURIComponent(parts[5]),messageId=providerMessageId(decodeURIComponent(parts[7]));
+    const chatId=decodeURIComponent(parts[5]),messageId=decodeURIComponent(parts[7]);
     if(!messageId)return send(res,400,{message:'Invalid message ID'});
-    // The provider's WEBJS engine always requests a real "delete for
-    // everyone" here (message.delete(true) under the hood) — WhatsApp's own
-    // server is what silently downgrades that to a local-only removal, and
-    // only when the message isn't this account's own (you can never revoke
-    // someone else's message). So for the account's own messages, this call
-    // removes it from every participant's WhatsApp, not just this account's
-    // view — the client's confirmation prompt reflects that distinction.
-    await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,{method:'DELETE'});
-    store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));
-    await persist();
+    // WhatsApp's own server only honors a true "delete for everyone" for the
+    // account's own messages — revoking someone else's message is never
+    // possible, regardless of what Gakai requests here. The client's
+    // confirmation prompt reflects that distinction.
+    await provider.deleteMessage(id,chatId,messageId);
     return send(res,200,{ok:true});
   }
-  if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){const chatId=decodeURIComponent(parts[5]);await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}`,{method:'DELETE'});store.deletedChats=(store.deletedChats||[]).filter(item=>!(item.accountId===id&&item.chatId===chatId));store.deletedChats.push({accountId:id,chatId,deletedAt:new Date().toISOString()});await persist();return send(res,200,{ok:true});}
+  if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){const chatId=decodeURIComponent(parts[5]);await provider.deleteChat(id,chatId);return send(res,200,{ok:true});}
   // Presence stays behind the dashboard proxy so the browser never receives
-  // direct provider access or its API key.
+  // direct provider access.
   if (parts[4]==='presence') {
     const chatId=url.searchParams.get('chatId');
     if (!chatId) return send(res,400,{message:'chatId is required'});
     if (req.method==='GET') {
-      await providerRequest(`/api/${encodeURIComponent(id)}/presence/${encodeURIComponent(chatId)}/subscribe`,{method:'POST'});
-      return send(res,200,await providerRequest(`/api/${encodeURIComponent(id)}/presence/${encodeURIComponent(chatId)}`));
+      await provider.subscribePresence(id,chatId);
+      return send(res,200,{presence:null});
     }
     if (req.method==='POST') {
       const {presence}=await readBody(req);
       if (!['typing','recording','paused'].includes(presence)) return send(res,400,{message:'Invalid presence state'});
-      await providerRequest(`/api/${encodeURIComponent(id)}/presence`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chatId,presence})});
+      await provider.publishPresence(id,chatId,presence);
       return send(res,200,{ok:true});
     }
   }
   if (req.method==='GET' && parts[4]==='chats') {
-    // Keep the inbox useful for multi-account workspaces without requesting an
-    // unbounded provider overview on every refresh.
-    const chats=await allChatOverviews(id);
-    const deleted=new Set((store.deletedChats||[]).filter(item=>item.accountId===id).map(item=>item.chatId));
+    const chats=await provider.getChatsOverview(id);
     const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
-    const recent=chats.filter(chat=>!deleted.has(chat.id)&&hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
-    return send(res,200,(await mapWithConcurrency(recent,2,chat=>enrichChatOverview(id,chat))).sort((a,b) => b.timestamp - a.timestamp));
+    const recent=chats.filter(chat=>hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
+    return send(res,200,(await Promise.all(recent.map(chat=>enrichChatOverview(id,chat)))).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
   if (req.method==='GET' && parts[4]==='messages') {
     const chatId=url.searchParams.get('chatId'); if (!chatId) return send(res,400,{message:'chatId is required'});
     const limit=Math.min(Math.max(Number(url.searchParams.get('limit')) || 15, 1), 60);
-    // The first screen must be fast. Media download is intentionally opt-in,
-    // because the provider may need to retrieve every attachment before replying.
+    // The first screen must be fast. Eager media download is intentionally
+    // opt-in, because hydrating every attachment can be slow.
     const downloadMedia=url.searchParams.get('media') === '1';
     // `before` (the oldest currently-loaded message's timestamp) pages by a
     // stable point in time instead of a numeric offset, which drifts and can
     // skip a message if new ones arrive between page loads while the reader
-    // is paging back through history. WAHA has no id-based cursor, but does
-    // support filter.timestamp.lte, which is enough for a real cursor.
+    // is paging back through history.
     const before=Number(url.searchParams.get('before'));
-    const pagingQuery=Number.isFinite(before)&&before>0?`&filter.timestamp.lte=${Math.max(0,before-1)}`:`&offset=${Math.max(Number(url.searchParams.get('offset'))||0,0)}`;
-    const messages=await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}${pagingQuery}&sortBy=timestamp&sortOrder=desc&merge=true&downloadMedia=${downloadMedia}`);
+    const messages=await provider.getMessages(id,chatId,{limit,before:Number.isFinite(before)&&before>0?before:undefined,downloadMedia});
     return send(res,200,(await Promise.all(messages.map(message=>enrichMessage(id,message)))).sort((a,b) => a.timestamp - b.timestamp));
   }
   if (req.method==='GET' && parts[4]==='message-media') {
     const chatId=url.searchParams.get('chatId'),messageId=url.searchParams.get('messageId');
     if(!chatId||!messageId)return send(res,400,{message:'chatId and messageId are required'});
-    return send(res,200,{message:await enrichMessage(id,await providerRequest(`/api/${encodeURIComponent(id)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}?downloadMedia=true`))});
+    const message=await provider.getMessage(id,chatId,messageId);
+    if(!message)return send(res,404,{message:'Message not found'});
+    return send(res,200,{message:await enrichMessage(id,message)});
   }
   if(req.method==='POST'&&parts[4]==='messages'&&parts[5]&&parts[6]==='reaction'){
-    const input=await readBody(req),messageId=providerMessageId(decodeURIComponent(parts[5]));
+    const input=await readBody(req),messageId=decodeURIComponent(parts[5]);
     if(!messageId)return send(res,400,{message:'Invalid message ID'});
     const reaction=String(input.reaction||'');if(reaction.length>16)return send(res,400,{message:'Invalid reaction'});
-    await providerRequest('/api/reaction',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,messageId,reaction})});
-    store.messageReactions=(store.messageReactions||[]).filter(item=>!(item.accountId===id&&item.messageId===messageId));if(reaction)store.messageReactions.push({accountId:id,messageId,reaction,reactedAt:new Date().toISOString()});await persist();
+    await provider.setReaction(id,url.searchParams.get('chatId')||null,messageId,reaction);
     return send(res,200,{ok:true,reaction});
   }
   if (req.method==='POST' && parts[4]==='messages') {
-    const input=await readBody(req),replyTo=providerMessageId(input.replyTo); if (!input.chatId || !input.text?.trim()) return send(res,400,{message:'Recipient and message are required'});
-    const sent=await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,chatId:input.chatId,text:input.text.trim(),...(replyTo?{reply_to:replyTo}:{})})});
-    return send(res,200,{message:messageView(sent || {})});
+    const input=await readBody(req),replyTo=input.replyTo?String(input.replyTo):null; if (!input.chatId || !input.text?.trim()) return send(res,400,{message:'Recipient and message are required'});
+    const sent=await provider.sendText(id,input.chatId,input.text.trim(),{quotedMessageId:replyTo});
+    return send(res,200,{message:await enrichMessage(id,sent)});
   }
-  if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req),label=String(input.label||'').trim().slice(0,80);if(!label)return send(res,400,{message:'Account name is required'});store.accountLabels[id]=label;await persist();try{const session=await providerRequest(`/api/sessions/${encodeURIComponent(id)}`),next={...(session.config||{}),metadata:{...(session.config?.metadata||{}),'gakai.label':label}};await providerRequest(`/api/sessions/${encodeURIComponent(id)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({config:next})});}catch{}return send(res,200,{ok:true,label});}
+  if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req),label=String(input.label||'').trim().slice(0,80);if(!label)return send(res,400,{message:'Account name is required'});store.accountLabels[id]=label;await persist();return send(res,200,{ok:true,label});}
   if(parts[4]==="integration-keys"&&parts[5]==="n8n"&&req.method==="GET"){const key=store.keys.find(k=>k.accountId===id&&k.name==="n8n integration");return send(res,200,{token:key?.token||null});}
   if(parts[4]==="integration-keys"&&parts[5]==="n8n"&&req.method==="POST"){let key=store.keys.find(k=>k.accountId===id&&k.name==="n8n integration");const token=`wh_live_${randomBytes(24).toString("base64url")}`;if(key){key.token=token;key.hash=hash(token);key.lastUsedAt=null}else{key={id:randomBytes(8).toString("hex"),accountId:id,name:"n8n integration",scopes:["messages:read","messages:send"],createdAt:new Date().toISOString(),lastUsedAt:null,token,hash:hash(token)}}store.keys=store.keys.filter(item=>item===key||!(item.accountId===id&&item.name==="n8n integration"));store.keys.push(key);await persist();return send(res,200,{token});}
   if(parts[4]==="integration-keys"&&req.method==="GET")return send(res,200,{keys:store.keys.filter(k=>k.accountId===id).map(({hash,token,...key})=>key)});
   if(parts[4]==="integration-keys"&&req.method==="POST"){const input=await readBody(req);const token=`wh_live_${randomBytes(24).toString("base64url")}`;const key={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"Integration").slice(0,80),scopes:Array.isArray(input.scopes)?input.scopes:["messages:read","messages:send"],createdAt:new Date().toISOString(),lastUsedAt:null,hash:hash(token)};store.keys.push(key);await persist();return send(res,201,{key:{...key,hash:undefined},token});}
   if(parts[4]==="automations"&&req.method==="GET")return send(res,200,{subscriptions:store.automationSubscriptions.filter(subscription=>subscription.accountId===id).map(automationSummary)});
-  if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await n8nWebhookUrl(input.url||""),secret=String(input.secret||"").trim();if(!url)return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@c.us",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await automationFetch({secret,url:url.href},event);if(!response.ok)return send(res,502,{message:await describeWebhookFailure(response)});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
+  if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await n8nWebhookUrl(input.url||""),secret=String(input.secret||"").trim();if(!url)return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@s.whatsapp.net",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await automationFetch({secret,url:url.href},event);if(!response.ok)return send(res,502,{message:await describeWebhookFailure(response)});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
   if(parts[4]==="automations"&&!parts[5]&&req.method==="POST"){const input=await readBody(req),production=await n8nWebhookUrl(input.productionUrl||input.url||""),test=await n8nWebhookUrl(input.testUrl||""),requestedSecret=String(input.secret||"").trim();if(!production)return send(res,400,{message:"Use an HTTPS n8n production webhook URL"});if(input.testUrl&&!test)return send(res,400,{message:"Use an HTTPS n8n test webhook URL"});if(requestedSecret.length>256)return send(res,400,{message:"Invalid Header Auth secret"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:production.href,productionUrl:production.href,testUrl:test?.href||null,testPhone:String(input.testPhone||"").replace(/[^0-9]/g,"")||null,enabled:true,events:["message.received"],secret:requestedSecret||ensureN8nKey(id),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}
   if(parts[4]==="automations"&&parts[5]&&req.method==="PATCH"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req);if(typeof input.enabled==="boolean")subscription.enabled=input.enabled;await persist();return send(res,200,{subscription:automationSummary(subscription)});}
-  if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@c.us`:"demo@c.us",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});
+  if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@s.whatsapp.net`:"demo@s.whatsapp.net",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});
     // Route through the same delivery path production events use so this
     // test send updates subscription.lastDelivery like a real one does,
     // instead of the status vanishing after a hand-rolled fetch.
@@ -1044,11 +986,11 @@ async function enrichMessage(session,message){
     let reply;
     try{reply=await llmChat(cfg,[{role:'system',content:cfg.systemPrompt||'You are a helpful assistant.'},{role:'user',content:prompt}]);}
     catch(error){return send(res,502,{message:error.message||'LLM test failed'});}
-    // A phone number is opt-in delivery: same providerRequest('/api/sendText')
-    // call dispatchLLMReply makes for a real inbound message, so this
-    // actually proves the full native-reply path, not just proxy connectivity.
+    // A phone number is opt-in delivery: same provider.sendText() call
+    // dispatchLLMReply makes for a real inbound message, so this actually
+    // proves the full native-reply path, not just proxy connectivity.
     if(phone&&reply.trim()){
-      try{await providerRequest('/api/sendText',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session:id,chatId:`${phone}@c.us`,text:reply.trim()})});}
+      try{await provider.sendText(id,`${phone}@s.whatsapp.net`,reply.trim());}
       catch(error){return send(res,502,{message:'The proxy replied, but delivering it to WhatsApp failed: '+(error.message||'Unknown error'),reply});}
       return send(res,200,{reply,delivered:true});
     }
@@ -1214,12 +1156,19 @@ const server=http.createServer(async (req,res)=>{ const url=new URL(req.url,`htt
 const wss=new WebSocketServer({noServer:true});
 wss.on('connection',(socket,req)=>{
   const url=new URL(req.url,`http://${req.headers.host}`);
-  socket.accountId=String(url.searchParams.get('accountId')||'');socket.chatId=String(url.searchParams.get('chatId')||'');typingSockets.add(socket);startPresencePoll(socket.accountId,socket.chatId);
+  socket.accountId=String(url.searchParams.get('accountId')||'');socket.chatId=String(url.searchParams.get('chatId')||'');typingSockets.add(socket);provider.subscribePresence(socket.accountId,socket.chatId).catch(()=>{});
   socket.send(JSON.stringify({type:'ready'}));
-  socket.on('message',raw=>{try{const input=JSON.parse(String(raw));if(input.type!=='presence'||input.accountId!==socket.accountId||input.chatId!==socket.chatId||!['typing','recording','paused'].includes(input.presence))return;providerRequest(`/api/${encodeURIComponent(socket.accountId)}/presence`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chatId:socket.chatId,presence:input.presence})}).catch(()=>{});broadcastTyping(socket.accountId,socket.chatId,{type:'presence',accountId:socket.accountId,chatId:socket.chatId,presence:input.presence},socket)}catch{}});
-  socket.on('close',()=>{typingSockets.delete(socket);maybeStopPresencePoll(`${socket.accountId}:${socket.chatId}`)});
+  socket.on('message',raw=>{try{const input=JSON.parse(String(raw));if(input.type!=='presence'||input.accountId!==socket.accountId||input.chatId!==socket.chatId||!['typing','recording','paused'].includes(input.presence))return;provider.publishPresence(socket.accountId,socket.chatId,input.presence).catch(()=>{});broadcastTyping(socket.accountId,socket.chatId,{type:'presence',accountId:socket.accountId,chatId:socket.chatId,presence:input.presence},socket)}catch{}});
+  socket.on('close',()=>{typingSockets.delete(socket)});
 });
 server.on('upgrade',(req,socket,head)=>{const url=new URL(req.url,`http://${req.headers.host}`);if(url.pathname!=='/api/app/ws'||!admin(req)||!url.searchParams.get('accountId')||!url.searchParams.get('chatId')){socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();return;}wss.handleUpgrade(req,socket,head,client=>wss.emit('connection',client,req));});
 server.listen(port,'0.0.0.0',()=>console.log(`Gakai is ready on port ${port}`));
+// Baileys sockets are in-process and don't survive a restart on their own —
+// only the on-disk auth state does — so every previously-linked account
+// needs an explicit reconnect on boot (the old external provider process
+// used to do this transparently).
+readdir(sessionsDir,{withFileTypes:true}).then(entries=>Promise.all(
+  entries.filter(entry=>entry.isDirectory()).map(entry=>provider.startAccount(entry.name,{label:store.accountLabels[entry.name]}).catch(error=>console.error(`Failed to reconnect account ${entry.name}:`,error.message)))
+)).catch(error=>console.error('Failed to read sessions directory:',error.message));
 
-export { server, readBody, store, sessions, buildN8nWorkflowGraph, sendAutomationReply, describeWebhookFailure };
+export { server, readBody, store, sessions, buildN8nWorkflowGraph, sendAutomationReply, describeWebhookFailure, provider, dispatchAutomationEvent };
