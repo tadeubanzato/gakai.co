@@ -159,6 +159,15 @@ function App(){
   const autoPairStartedRef=useRef(false);
   const accountsRequestRef=useRef(0);
   const chatsRequestRef=useRef(0);
+  // Session-only (in-memory, gone on reload) stale-while-revalidate cache of
+  // each account's last-known chat list. Switching accounts always kicked
+  // off a fresh fetch AND blanked the list to show a loading spinner in the
+  // meantime — even when re-visiting an account seen moments ago this tab
+  // session. Painting the cached snapshot instantly while load() refreshes
+  // it in the background removes that flash without weakening freshness:
+  // load()'s own version guard and the account's live SSE stream still
+  // decide what's authoritative, exactly as before this cache existed.
+  const chatsCacheRef=useRef(new Map());
 
   const fail=useCallback(x=>{setNote(x);setTimeout(()=>setNote(""),4500)},[]);
 
@@ -183,11 +192,15 @@ function App(){
     // selected account can resolve after a newer one and stomp the current
     // account's chat list with the old account's conversations.
     const version=++chatsRequestRef.current;
-    setChatsLoading(true);
+    // Only show the loading state for a true cold start (nothing cached for
+    // this account yet, e.g. first visit this tab session) — a revisit
+    // already has something to paint, so this refresh happens quietly.
+    if(!chatsCacheRef.current.has(id))setChatsLoading(true);
     try{
       const d=await api("/api/app/accounts/"+encodeURIComponent(id)+"/chats");
       if(chatsRequestRef.current!==version)return;
       const next=(Array.isArray(d)?d:d.chats||[]).sort((left,right)=>Number(right.timestamp||right.lastMessage?.timestamp||0)-Number(left.timestamp||left.lastMessage?.timestamp||0));
+      chatsCacheRef.current.set(id,next);
       setChats(next);
       // A working inbox should open on a useful conversation, not a blank
       // "Select a conversation" placeholder. Keep the reader's existing chat
@@ -230,27 +243,52 @@ function App(){
   // per account (the endpoint already scopes broadcasts by accountId, so
   // this is cheap: one more listener, not one more poll loop). Keyed off a
   // derived id+status string rather than the `accounts` array itself, since
-  // refresh() replaces that array on every single event this effect reacts
-  // to — depending on the array reference would tear down and reopen every
-  // stream on every unread change it's meant to observe.
+  // this effect must not tear down and reopen every stream just because an
+  // unread flag it's meant to observe changed.
+  //
+  // An event on account X's own stream already means "X just got a real
+  // message" — the server only emits these for genuine inbound content (see
+  // dispatchAutomationEvent) — so there's no need to re-ask the provider for
+  // anything to know X now has something unread. Flip its flag locally.
+  // Re-fetching *every* account's full chat overview on *any* one event (the
+  // previous approach) doesn't just waste provider calls: WAHA's engine
+  // automates an actual WhatsApp Web browser session, and forcing every
+  // account's chat list to re-render far more often than necessary is
+  // exactly the kind of extra activity that can make WhatsApp Web's own
+  // client-side code mark things as seen on its own, and can also starve
+  // the picture-fetch enrichment that the same overview call feeds — both
+  // observed live (a message reading itself within seconds; avatars that
+  // had been resolving fine going blank).
   const refreshRef=useRef(refresh);
   useEffect(()=>{refreshRef.current=refresh},[refresh]);
   const workingAccountsKey=accounts.filter(item=>item.status==="WORKING").map(item=>item.id).join(",");
   useEffect(()=>{
     const ids=workingAccountsKey?workingAccountsKey.split(","):[];
     if(!ids.length)return undefined;
-    const update=()=>refreshRef.current();
-    const streams=ids.map(id=>{const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(id));stream.addEventListener("gakai",update);return stream});
-    // A low-frequency fallback, same reasoning as the active chat list's own
-    // poll: a read that happens outside Gakai (another linked device) never
-    // emits a webhook, so the dot needs an eventual-consistency check too.
-    const timer=window.setInterval(update,30000);
-    return()=>{streams.forEach(stream=>{stream.removeEventListener("gakai",update);stream.close()});window.clearInterval(timer)};
+    const streams=ids.map(id=>{
+      // after=now: this stream already has the true current unread state
+      // from the regular /accounts fetch — without opting out, every fresh
+      // connection replays recent history (for reconnect catch-up), and
+      // this handler has no way to tell that apart from something genuinely
+      // new, so it pinned the dot on immediately regardless of real state.
+      const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(id)+"&after=now");
+      const update=()=>setAccounts(current=>current.map(item=>item.id===id?{...item,hasUnread:true}:item));
+      stream.addEventListener("gakai",update);
+      stream._gakaiUpdate=update;
+      return stream;
+    });
+    // A rare, low-frequency fallback: a read that happens entirely outside
+    // Gakai (another linked device) never emits a webhook, so this alone
+    // still needs an eventual-consistency check — deliberately infrequent
+    // now that turning the dot on (above) and off (see handleChatClick)
+    // no longer depend on it for the normal case.
+    const timer=window.setInterval(()=>refreshRef.current(),5*60*1000);
+    return()=>{streams.forEach(stream=>{stream.removeEventListener("gakai",stream._gakaiUpdate);stream.close()});window.clearInterval(timer)};
   },[workingAccountsKey]);
 
   useEffect(()=>{api("/api/app/auth/state").then(setAuth).catch(x=>fail(x.message))},[fail]);
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);
-  useEffect(()=>{suppressAutoSelectRef.current=false;setChat();setChats([]);if(account?.status==="WORKING")load(account.id)},[account?.id,account?.status,load]);
+  useEffect(()=>{suppressAutoSelectRef.current=false;setChat();setChats(chatsCacheRef.current.get(account?.id)||[]);if(account?.status==="WORKING")load(account.id)},[account?.id,account?.status,load]);
 
   const logout=async()=>{await api("/api/app/auth/logout",{method:"POST"}).catch(()=>{});window.location.assign("/")};
   
@@ -268,16 +306,22 @@ function App(){
       runExclusive(markingReadRef.current,chatItem.id,async()=>{
         try{
           await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(chatItem.id)+"/read",{method:"POST"});
-          setChats(current=>current.map(c=>c.id===chatItem.id?{...c,unreadCount:0}:c));
+          setChats(current=>{
+            const next=current.map(c=>c.id===chatItem.id?{...c,unreadCount:0}:c);
+            chatsCacheRef.current.set(account.id,next);
+            // The sidebar's unread dot should clear the moment the reader
+            // actually reads the last unread conversation, not on some
+            // later poll — computed straight from the list already in
+            // hand (no extra provider round trip needed to know this).
+            const stillUnread=next.some(c=>c.unreadCount>0);
+            setAccounts(list=>list.map(a=>a.id===account.id?{...a,hasUnread:stillUnread}:a));
+            return next;
+          });
           load(account.id);
-          // The sidebar's unread dot should clear the moment the reader
-          // actually reads the last unread conversation, not on the next
-          // 30-second fallback poll.
-          refresh();
         }catch(x){fail(x.message||"Could not mark this conversation as read");}
       });
     }
-  },[account,fail,load,refresh]);
+  },[account,fail,load]);
 
   const pairingLockRef=useRef(new Set());
   const beginPairing=()=>runExclusive(pairingLockRef.current,"pairing",async()=>{
@@ -325,9 +369,17 @@ function App(){
   },[account?.id, load]);
   const handleChatDeleted=useCallback(chatId=>{
     suppressAutoSelectRef.current=true;
-    setChats(current=>current.filter(item=>item.id!==chatId));
+    setChats(current=>{
+      const next=current.filter(item=>item.id!==chatId);
+      // No load() follows this one (unlike handleChatClick's read-marking),
+      // so without this the cache would resurrect the deleted chat the next
+      // time this account is switched back to, until something else
+      // happened to refresh it.
+      if(account)chatsCacheRef.current.set(account.id,next);
+      return next;
+    });
     setChat(current=>current?.id===chatId?undefined:current);
-  },[]);
+  },[account]);
 
   if(!auth)return <main className="pairing">Loading Gakai…</main>;
   if(!auth.authenticated)return <Login setup={!!auth.setup} done={()=>location.reload()} fail={fail}/>;
@@ -368,7 +420,7 @@ function App(){
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>
               <input placeholder="Search conversations" value={q} onChange={e=>setQ(e.target.value)} aria-label="Search conversations"/>
               {visible.map(x=><button key={x.id} className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}><Avatar item={x}/><span><b>{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||x.lastMessage?.system?.label||"Photo or message"}</small></span>{x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}</button>)}
-              {chatsLoading?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">No conversations yet. Gakai is waiting for WhatsApp to finish syncing.</p>:null}
+              {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">No conversations yet. Gakai is waiting for WhatsApp to finish syncing.</p>:null}
             </section>
             <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} onBack={()=>setChat()} onSent={handleSent} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
