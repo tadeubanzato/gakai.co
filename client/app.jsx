@@ -157,24 +157,43 @@ function App(){
   const chatListRef=useRef(null);
   const suppressAutoSelectRef=useRef(false);
   const autoPairStartedRef=useRef(false);
+  const accountsRequestRef=useRef(0);
+  const chatsRequestRef=useRef(0);
 
   const fail=useCallback(x=>{setNote(x);setTimeout(()=>setNote(""),4500)},[]);
-  
+
   const refresh=useCallback(async()=>{
-    try{const d=await api("/api/app/accounts"),a=d.accounts||[];const requestedDetails=detailsSlug(),requestedAccount=requestedDetails?a.find(item=>slug(item.label)===requestedDetails||slug(item.id)===requestedDetails):null;setAccounts(a);if(requestedAccount){setAccount(requestedAccount);if(requestedAccount.status!=="WORKING"){history.replaceState({},"","/");setSettings(false);setPairCreated(false);setPair(requestedAccount)}else setSettings(true)}else setAccount(old=>a.find(x=>x.id===old?.id)||a.find(x=>x.status==="WORKING")||a[0])}catch(x){fail(x.message)}finally{setAccountsReady(true)}
+    // Several call sites (mount, pairing, account delete, SSE-driven polling)
+    // can each kick off a /accounts fetch. Only the most recently started one
+    // is allowed to apply its result — an older, slower response landing
+    // after a newer one must never overwrite it.
+    const version=++accountsRequestRef.current;
+    try{
+      const d=await api("/api/app/accounts"),a=d.accounts||[];
+      if(accountsRequestRef.current!==version)return;
+      const requestedDetails=detailsSlug(),requestedAccount=requestedDetails?a.find(item=>slug(item.label)===requestedDetails||slug(item.id)===requestedDetails):null;setAccounts(a);if(requestedAccount){setAccount(requestedAccount);if(requestedAccount.status!=="WORKING"){history.replaceState({},"","/");setSettings(false);setPairCreated(false);setPair(requestedAccount)}else setSettings(true)}else setAccount(old=>a.find(x=>x.id===old?.id)||a.find(x=>x.status==="WORKING")||a[0])
+    }catch(x){if(accountsRequestRef.current===version)fail(x.message)}finally{if(accountsRequestRef.current===version)setAccountsReady(true)}
   },[fail]);
 
   const load=useCallback(async id=>{
+    // load() is called from account switches, the SSE change handler, a
+    // background poll timer, and after sending a message — any of which can
+    // overlap across different accounts while the reader switches accounts.
+    // Without this version guard, a slower request for the previously
+    // selected account can resolve after a newer one and stomp the current
+    // account's chat list with the old account's conversations.
+    const version=++chatsRequestRef.current;
     setChatsLoading(true);
     try{
       const d=await api("/api/app/accounts/"+encodeURIComponent(id)+"/chats");
+      if(chatsRequestRef.current!==version)return;
       const next=(Array.isArray(d)?d:d.chats||[]).sort((left,right)=>Number(right.timestamp||right.lastMessage?.timestamp||0)-Number(left.timestamp||left.lastMessage?.timestamp||0));
       setChats(next);
       // A working inbox should open on a useful conversation, not a blank
       // "Select a conversation" placeholder. Keep the reader's existing chat
       // selected during refreshes, otherwise open the newest one.
       setChat(current=>current?next.find(item=>item.id===current.id):suppressAutoSelectRef.current?undefined:next[0]);
-    }catch(x){fail(x.message)}finally{setChatsLoading(false)}
+    }catch(x){if(chatsRequestRef.current===version)fail(x.message)}finally{if(chatsRequestRef.current===version)setChatsLoading(false)}
   },[fail]);
 
   const handleAccountRenamed=useCallback((id,label)=>{
@@ -206,6 +225,29 @@ function App(){
     return()=>{stream.removeEventListener("gakai",update);stream.close();window.clearTimeout(timer)};
   },[account?.id, account?.status]);
 
+  // The sidebar's unread dot must reflect every connected account, not just
+  // whichever one is currently open — so it needs its own SSE subscription
+  // per account (the endpoint already scopes broadcasts by accountId, so
+  // this is cheap: one more listener, not one more poll loop). Keyed off a
+  // derived id+status string rather than the `accounts` array itself, since
+  // refresh() replaces that array on every single event this effect reacts
+  // to — depending on the array reference would tear down and reopen every
+  // stream on every unread change it's meant to observe.
+  const refreshRef=useRef(refresh);
+  useEffect(()=>{refreshRef.current=refresh},[refresh]);
+  const workingAccountsKey=accounts.filter(item=>item.status==="WORKING").map(item=>item.id).join(",");
+  useEffect(()=>{
+    const ids=workingAccountsKey?workingAccountsKey.split(","):[];
+    if(!ids.length)return undefined;
+    const update=()=>refreshRef.current();
+    const streams=ids.map(id=>{const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(id));stream.addEventListener("gakai",update);return stream});
+    // A low-frequency fallback, same reasoning as the active chat list's own
+    // poll: a read that happens outside Gakai (another linked device) never
+    // emits a webhook, so the dot needs an eventual-consistency check too.
+    const timer=window.setInterval(update,30000);
+    return()=>{streams.forEach(stream=>{stream.removeEventListener("gakai",update);stream.close()});window.clearInterval(timer)};
+  },[workingAccountsKey]);
+
   useEffect(()=>{api("/api/app/auth/state").then(setAuth).catch(x=>fail(x.message))},[fail]);
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);
   useEffect(()=>{suppressAutoSelectRef.current=false;setChat();setChats([]);if(account?.status==="WORKING")load(account.id)},[account?.id,account?.status,load]);
@@ -228,10 +270,14 @@ function App(){
           await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(chatItem.id)+"/read",{method:"POST"});
           setChats(current=>current.map(c=>c.id===chatItem.id?{...c,unreadCount:0}:c));
           load(account.id);
+          // The sidebar's unread dot should clear the moment the reader
+          // actually reads the last unread conversation, not on the next
+          // 30-second fallback poll.
+          refresh();
         }catch(x){fail(x.message||"Could not mark this conversation as read");}
       });
     }
-  },[account,fail,load]);
+  },[account,fail,load,refresh]);
 
   const pairingLockRef=useRef(new Set());
   const beginPairing=()=>runExclusive(pairingLockRef.current,"pairing",async()=>{
@@ -300,7 +346,7 @@ function App(){
           <div className="account-switch">
             {accounts.map(x=><div className="account-row" key={x.id}>
               <button className={"account "+(x.id===account?.id?"selected":"")} onClick={()=>setAccount(x)}>
-                <i className={x.status==="WORKING"?"good":""}/>
+                <i className={x.hasUnread?"good":""}/>
                 <Avatar item={x}/>
                 <span><b>{x.label}</b><small>{status(x.status)}</small></span>
               </button>
@@ -321,10 +367,10 @@ function App(){
           {account?.status!=="WORKING"?<div className="empty"><div><h1>Account needs attention</h1><p>Reconnect this account to continue.</p><button className="primary" onClick={()=>{setPairCreated(false);setPair(account)}}>Reconnect with QR code</button></div></div>:<div className="inbox">
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>
               <input placeholder="Search conversations" value={q} onChange={e=>setQ(e.target.value)} aria-label="Search conversations"/>
-              {visible.map(x=><button key={x.id} className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}><Avatar item={x}/><span><b>{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||"Photo or message"}</small></span>{x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}</button>)}
-              {chatsLoading?<p className="hint" role="status">Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">No conversations yet. Gakai is waiting for WhatsApp to finish syncing.</p>:null}
+              {visible.map(x=><button key={x.id} className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}><Avatar item={x}/><span><b>{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||x.lastMessage?.system?.label||"Photo or message"}</small></span>{x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}</button>)}
+              {chatsLoading?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">No conversations yet. Gakai is waiting for WhatsApp to finish syncing.</p>:null}
             </section>
-            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} chat={chat} onBack={()=>setChat()} onSent={handleSent} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
+            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} onBack={()=>setChat()} onSent={handleSent} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
         </main>
       </div>
