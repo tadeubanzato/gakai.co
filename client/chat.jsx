@@ -33,18 +33,28 @@ function mediaTime(value) {
 function PlayableMedia({ kind, src, filename }) {
   const playerRef = useRef(null);
   const [duration, setDuration] = useState(0), [position, setPosition] = useState(0), [playing, setPlaying] = useState(false);
+  const [playError, setPlayError] = useState("");
   const updateDuration = event => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0);
   const updatePosition = event => setPosition(event.currentTarget.currentTime || 0);
+  // A load/decode failure on <audio>/<video> previously had no handler at
+  // all — the element just sat there silently inert: no duration ever
+  // arrives (so the progress bar stays permanently disabled-looking), and
+  // play() rejects into a swallowed .catch(() => {}), so clicking play does
+  // nothing with zero feedback. Surface it the same way MediaCard already
+  // does for a failed image/resolve.
+  const handleMediaError = () => setPlayError(`Couldn't load this ${kind}`);
   const toggle = () => {
     const player = playerRef.current; if (!player) return;
-    if (player.paused) player.play().catch(() => {}); else player.pause();
+    if (player.paused) player.play().then(() => setPlayError("")).catch(() => setPlayError(`Couldn't play this ${kind}`));
+    else player.pause();
   };
   const seek = event => {
     const player = playerRef.current, value = Number(event.currentTarget.value);
     if (!player || !Number.isFinite(value)) return;
     player.currentTime = value; setPosition(value);
   };
-  const mediaProps = { ref: playerRef, className: `message-media media ${kind}`, preload: "metadata", src, onLoadedMetadata:updateDuration, onDurationChange:updateDuration, onTimeUpdate:updatePosition, onPlay:() => setPlaying(true), onPause:() => setPlaying(false), onEnded:() => { setPlaying(false); setPosition(0); } };
+  const mediaProps = { ref: playerRef, className: `message-media media ${kind}`, preload: "metadata", src, onLoadedMetadata:updateDuration, onDurationChange:updateDuration, onTimeUpdate:updatePosition, onPlay:() => { setPlaying(true); setPlayError(""); }, onPause:() => setPlaying(false), onEnded:() => { setPlaying(false); setPosition(0); }, onError:handleMediaError };
+  if (playError) return <p className="media-unavailable media-failed">{playError} <a href={src} download={filename||kind}>Download instead</a></p>;
   const download = <a className={kind === "audio" ? "audio-download" : "video-download"} href={src} download={filename || kind} aria-label={`Download ${filename || kind}`} title={`Download ${filename || kind}`}>⇩</a>;
   const progress = <input className={kind === "audio" ? "audio-progress" : "video-progress"} type="range" min="0" max={duration || 0} step="0.01" value={Math.min(position, duration || 0)} onChange={seek} aria-label={`${kind} playback position`} disabled={!duration}/>;
   if (kind === "audio") return <div className={`audio-player${playing ? " playing" : ""}`}><audio {...mediaProps}/><button type="button" className="audio-play" onClick={toggle} aria-label={playing ? "Pause audio" : "Play audio"}>{playing ? "Ⅱ" : "▶"}</button><div className="audio-main">{progress}<div className="audio-meta"><span>{mediaTime(position)}</span><span>{mediaTime(duration)}</span></div></div>{download}</div>;
@@ -77,7 +87,12 @@ function MediaCard({ message, accountId, chatId, onResolved }) {
   if (kind === "image") return <img className="message-media media image" src={src} alt={message.body || message.text || "Image attachment"} loading="lazy" onError={() => setDisplayFailed(true)} />;
   if (kind === "video") return <PlayableMedia kind="video" src={src} filename={filename||"video"}/>;
   if (kind === "audio") return <PlayableMedia kind="audio" src={src} filename={filename||"audio"}/>;
-  return <a className="message-document" href={src} target="_blank" rel="noreferrer" download={filename}><span aria-hidden="true">▧</span><span>{filename}</span></a>;
+  const ext = (filename.match(/\.([a-z0-9]{2,5})$/i)?.[1] || "").toUpperCase();
+  return <a className="message-document" href={src} target="_blank" rel="noreferrer" download={filename}>
+    <span className="message-document-icon" aria-hidden="true">{ext || "▧"}</span>
+    <span className="message-document-info"><b>{filename}</b><small>{ext ? `${ext} document` : "Document"} · Tap to open</small></span>
+    <span className="message-document-download" aria-hidden="true">⇩</span>
+  </a>;
 }
 function LinkPreview({ body, preview }) {
   const match = String(body || "").match(/https?:\/\/[^\s]+/i);
