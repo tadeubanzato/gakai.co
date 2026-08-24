@@ -14,6 +14,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
+import { createBoundedCache } from '../../lib/lru-cache.mjs';
 import { messageView, chatOverview as domainChatOverview, reactionView, revokeView } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
@@ -29,6 +30,11 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   const logger = pino({ level: logLevel || 'silent' });
   const media = createMediaStore({ cacheDir: mediaCacheDir, logger });
   const accounts = new Map(); // accountId -> { sock, status, qr, me, saveCreds, reconnecting }
+  // A contact/chat with genuinely no photo set would otherwise be re-fetched
+  // from WhatsApp on every single lookup, since store.setContactPicture only
+  // ever persists a truthy result. This remembers a negative result for a
+  // while so a photo-less chat doesn't cost a live request on every poll.
+  const noPictureCache = createBoundedCache({ limit: 2000, ttlMs: 30 * 60 * 1000 });
 
   const accountDir = accountId => join(sessionsDir, accountId);
 
@@ -44,9 +50,20 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   function wireEvents(accountId, entry) {
     const { sock } = entry;
 
+    // A live WhatsApp event handler throwing synchronously is an uncaught
+    // exception at the process level — Node's default response to that is
+    // to crash the entire server, taking every account and every in-flight
+    // HTTP request down with it (this actually happened once: a malformed
+    // reply payload crashed the process mid-message). One bad message must
+    // never do that — log it and keep the connection alive instead.
+    const safe = (name, handler) => async (...args) => {
+      try { await handler(...args); }
+      catch (error) { logger.error({ error: error.message, stack: error.stack, accountId, event: name }, 'Provider event handler failed'); }
+    };
+
     sock.ev.on('creds.update', entry.saveCreds);
 
-    sock.ev.on('connection.update', async update => {
+    sock.ev.on('connection.update', safe('connection.update', async update => {
       if (update.qr) { entry.qr = update.qr; entry.status = 'SCAN_QR_CODE'; }
       if (update.connection === 'open') {
         entry.qr = null;
@@ -71,26 +88,26 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
         entry.reconnecting = true;
         setTimeout(() => { startAccount(accountId, { label: entry.label }).catch(error => logger.error({ error: error.message, accountId }, 'Reconnect failed')); }, RECONNECT_DELAY_MS);
       }
-    });
+    }));
 
-    sock.ev.on('messaging-history.set', ({ chats, contacts, messages }) => {
+    sock.ev.on('messaging-history.set', safe('messaging-history.set', ({ chats, contacts, messages }) => {
       store.upsertChats(accountId, chats || []);
       store.upsertContacts(accountId, (contacts || []).map(mapContact));
       ingestMessages(accountId, messages || [], { live: false });
-    });
+    }));
 
-    sock.ev.on('chats.upsert', chats => store.upsertChats(accountId, chats));
-    sock.ev.on('chats.update', updates => store.upsertChats(accountId, updates.filter(u => u.id)));
-    sock.ev.on('contacts.upsert', contacts => store.upsertContacts(accountId, contacts.map(mapContact)));
-    sock.ev.on('contacts.update', updates => store.upsertContacts(accountId, updates.filter(u => u.id).map(mapContact)));
+    sock.ev.on('chats.upsert', safe('chats.upsert', chats => store.upsertChats(accountId, chats)));
+    sock.ev.on('chats.update', safe('chats.update', updates => store.upsertChats(accountId, updates.filter(u => u.id))));
+    sock.ev.on('contacts.upsert', safe('contacts.upsert', contacts => store.upsertContacts(accountId, contacts.map(mapContact))));
+    sock.ev.on('contacts.update', safe('contacts.update', updates => store.upsertContacts(accountId, updates.filter(u => u.id).map(mapContact))));
 
-    sock.ev.on('messages.upsert', ({ messages, type }) => {
+    sock.ev.on('messages.upsert', safe('messages.upsert', ({ messages, type }) => {
       ingestMessages(accountId, messages, { live: type === 'notify' });
-    });
+    }));
 
-    sock.ev.on('presence.update', ({ id: chatId, presences }) => {
+    sock.ev.on('presence.update', safe('presence.update', ({ id: chatId, presences }) => {
       onEvent?.('presence', { accountId, chatId, presences });
-    });
+    }));
   }
 
   function mapContact(contact) {
@@ -100,19 +117,26 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   function ingestMessages(accountId, messages, { live }) {
     const toStore = [];
     for (const raw of messages) {
-      const chatId = raw.key?.remoteJid;
-      if (!chatId) continue;
+      // One malformed message (an unexpected payload shape, a field WhatsApp
+      // changed) must not drop every other message in the same batch — skip
+      // and log just that one.
+      try {
+        const chatId = raw.key?.remoteJid;
+        if (!chatId) continue;
 
-      const reaction = reactionView(raw);
-      if (reaction) { store.applyReaction(accountId, reaction); continue; }
+        const reaction = reactionView(raw);
+        if (reaction) { store.applyReaction(accountId, reaction); continue; }
 
-      const revoke = revokeView(raw);
-      if (revoke?.targetMessageId) { store.deleteMessage(accountId, chatId, revoke.targetMessageId); continue; }
+        const revoke = revokeView(raw);
+        if (revoke?.targetMessageId) { store.deleteMessage(accountId, chatId, revoke.targetMessageId); continue; }
 
-      const normalized = messageView(raw, { accountId, chatId });
-      toStore.push({ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: normalized.fromMe, waMessage: raw, overviewMessage: overviewFromMessage(normalized) });
+        const normalized = messageView(raw, { accountId, chatId });
+        toStore.push({ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: normalized.fromMe, waMessage: raw, overviewMessage: overviewFromMessage(normalized) });
 
-      if (live && !normalized.fromMe) onEvent?.('message', { accountId, chatId, message: normalized, raw });
+        if (live && !normalized.fromMe) onEvent?.('message', { accountId, chatId, message: normalized, raw });
+      } catch (error) {
+        logger.error({ error: error.message, stack: error.stack, accountId, messageId: raw.key?.id }, 'Failed to normalize an inbound message; skipping just this one');
+      }
     }
     if (toStore.length) store.upsertMessages(accountId, toStore);
   }
@@ -239,10 +263,12 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   async function getContact(accountId, contactId) {
     const cached = store.getContact(accountId, contactId);
     const entry = accounts.get(accountId);
+    const cacheKey = `${accountId}:${contactId}`;
     let picture = cached?.picture || null;
-    if (!picture && entry) {
+    if (!picture && entry && !noPictureCache.get(cacheKey)) {
       picture = (await entry.sock.profilePictureUrl(contactId, 'preview').catch(() => null)) || null;
       if (picture) store.setContactPicture(accountId, contactId, picture);
+      else noPictureCache.set(cacheKey, true);
     }
     return {
       id: contactId,

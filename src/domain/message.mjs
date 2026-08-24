@@ -147,7 +147,7 @@ const MEDIA_TYPES = new Set(['imageMessage', 'videoMessage', 'audioMessage', 'do
 
 function mediaView(contentType, content, accountId, chatId, messageId) {
   if (!MEDIA_TYPES.has(contentType)) return null;
-  const inner = contentType === 'documentWithCaptionMessage' ? content.message?.documentMessage : content;
+  const inner = contentType === 'documentWithCaptionMessage' ? content?.message?.documentMessage : content;
   return {
     url: messageMediaUrl(accountId, chatId, messageId),
     mimetype: inner?.mimetype || null,
@@ -156,7 +156,8 @@ function mediaView(contentType, content, accountId, chatId, messageId) {
 }
 
 function bodyTextFor(contentType, content) {
-  if (contentType === 'conversation') return content;
+  if (contentType === 'conversation') return content || '';
+  if (!content) return '';
   if (contentType === 'extendedTextMessage') return content.text || '';
   if (contentType === 'imageMessage' || contentType === 'videoMessage') return content.caption || '';
   if (contentType === 'documentMessage') return content.caption || '';
@@ -178,8 +179,9 @@ function replyView(contextInfo, accountId, chatId) {
   const quoted = contextInfo?.quotedMessage;
   const stanzaId = contextInfo?.stanzaId;
   if (!quoted || !stanzaId) return null;
-  const quotedType = getContentType(normalizeMessageContent(quoted) || {});
-  const quotedContent = quotedType ? quoted[quotedType] : null;
+  const normalizedQuoted = normalizeMessageContent(quoted) || {};
+  const quotedType = getContentType(normalizedQuoted);
+  const quotedContent = quotedType ? normalizedQuoted[quotedType] : null;
   return {
     id: stanzaId,
     body: quotedType ? bodyTextFor(quotedType, quotedContent) : '',
@@ -199,7 +201,9 @@ function vCardsFor(contentType, content) {
 // caller and render — Baileys always sets key.id in practice, but nothing
 // downstream should assume that unconditionally.
 function derivedMessageId(waMessage, timestamp, senderId) {
-  const seed = `${timestamp}|${waMessage.key?.fromMe ? 'out' : 'in'}|${senderId || ''}|${bodyTextFor(getContentType(waMessage.message || {}) || '', waMessage.message?.[getContentType(waMessage.message || {})] || {})}`;
+  const content = normalizeMessageContent(waMessage.message || {}) || {};
+  const contentType = getContentType(content) || '';
+  const seed = `${timestamp}|${waMessage.key?.fromMe ? 'out' : 'in'}|${senderId || ''}|${bodyTextFor(contentType, contentType ? content[contentType] : null)}`;
   return `derived_${createHash('sha1').update(seed).digest('hex').slice(0, 16)}`;
 }
 
@@ -253,6 +257,7 @@ export function reactionView(waMessage) {
   const content = normalizeMessageContent(waMessage.message || {}) || {};
   if (getContentType(content) !== 'reactionMessage') return null;
   const reaction = content.reactionMessage;
+  if (!reaction) return null;
   const key = waMessage.key || {};
   return {
     targetMessageId: reaction.key?.id || null,

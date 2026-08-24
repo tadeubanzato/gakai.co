@@ -262,6 +262,12 @@ async function accountView(s){
 // The inbox list's "last message" preview can contain an unresolved
 // @<number> mention — resolve it the same way a full message body does.
 async function enrichChatOverview(session,view){
+  // Baileys never delivers a picture on a chat-sync event (unlike the old
+  // provider, which resolved and attached one itself) — the only way to get
+  // one is a live per-jid profilePictureUrl() lookup, same call whether the
+  // chat is a 1:1 contact or a group. resolveContact() already does that
+  // fetch-and-cache for message-sender avatars; reuse it here.
+  if(!view.picture&&view.id){const contact=await resolveContact(session,view.id);if(contact.picture)view={...view,picture:contact.picture}}
   if(view.lastMessage){
     const mentionIds=extractMentionIds(view.lastMessage.body,view.lastMessage.text);
     if(mentionIds.length){
@@ -285,6 +291,10 @@ async function resolveContact(session,rawId){
   if(contactId.endsWith('@lid'))contactId=provider.resolveLid(session,contactId);
   return provider.getContact(session,contactId);
 }
+// A chat/contact picture that isn't already cached costs a live WhatsApp
+// request (see enrichChatOverview) — cap how many of those run at once so a
+// fresh inbox full of uncached avatars doesn't fire dozens simultaneously.
+async function mapWithConcurrency(values,limit,worker){const result=new Array(values.length);let next=0;await Promise.all(Array.from({length:Math.min(limit,values.length)},async()=>{while(next<values.length){const index=next++;result[index]=await worker(values[index])}}));return result}
 const automationSummary=subscription=>({id:subscription.id,accountId:subscription.accountId,name:subscription.name,url:subscription.url,productionUrl:subscription.productionUrl||subscription.url,testUrl:subscription.testUrl||null,testPhone:subscription.testPhone||null,enabled:subscription.enabled,events:subscription.events,secret:subscription.secret,createdAt:subscription.createdAt,lastDelivery:subscription.lastDelivery||null});
 async function automationFetch(subscription,event,{url:overrideUrl}={}){
   const targetUrl=overrideUrl||subscription.url;
@@ -923,7 +933,7 @@ async function enrichMessage(session,view){
     const chats=await provider.getChatsOverview(id);
     const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
     const recent=chats.filter(chat=>hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
-    return send(res,200,(await Promise.all(recent.map(chat=>enrichChatOverview(id,chat)))).sort((a,b) => b.timestamp - a.timestamp));
+    return send(res,200,(await mapWithConcurrency(recent,3,chat=>enrichChatOverview(id,chat))).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
   if (req.method==='GET' && parts[4]==='messages') {
