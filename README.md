@@ -214,19 +214,28 @@ Works with both self-hosted n8n and n8n Cloud.
 
 ```json
 {
-  "event": "message",
-  "session": "my-account",
-  "payload": {
-    "id": "...",
-    "from": "1234567890@c.us",
-    "body": "Hello from WhatsApp",
+  "id": "evt_3EB0F1A2B3C4D5E6F708",
+  "type": "message.received",
+  "occurredAt": "2026-08-24T12:34:56.000Z",
+  "account": { "id": "account-abc123" },
+  "chat": { "id": "5511999999999@s.whatsapp.net", "kind": "direct", "phone": "5511999999999" },
+  "message": {
+    "id": "3EB0F1A2B3C4D5E6F708",
     "timestamp": 1700000000,
-    "type": "chat"
-  }
+    "fromMe": false,
+    "body": "Hello from WhatsApp",
+    "text": "Hello from WhatsApp",
+    "hasMedia": false,
+    "media": null,
+    "mediaUrl": null,
+    "sender": { "id": "5511999999999@s.whatsapp.net", "name": "Jane Doe", "phone": "5511999999999" },
+    "mentionedJids": []
+  },
+  "source": "whatsapp"
 }
 ```
 
-Gakai normalizes all provider payloads before forwarding — your automation never sees provider-specific internals.
+For a group chat, `chat.kind` is `"group"` and `chat.id` ends in `@g.us` instead. Gakai normalizes every WhatsApp payload before forwarding — your automation never sees provider-specific internals, and the JID shape above (`@s.whatsapp.net`/`@g.us`) is Baileys' real format, not a placeholder.
 
 ---
 
