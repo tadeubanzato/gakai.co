@@ -53,6 +53,7 @@ test('buildN8nWorkflowGraph (agentic) wires Webhook -> AI Agent -> Respond to We
   assert.equal(agent.parameters.options.systemMessage, 'Be helpful.');
   const model = nodes.find(node => node.name === 'OpenAI Chat Model');
   assert.equal(model.credentials.openAiApi.id, llmCred.id);
+  assert.equal(model.parameters.responsesApiEnabled, false, 'Gakai proxies use Chat Completions, not the Responses API');
   assert.ok(nodes.some(node => node.name === 'Respond to Webhook' && node.type === 'n8n-nodes-base.respondToWebhook'));
 
   assert.deepEqual(connections.Webhook.main[0][0].node, 'AI Agent');

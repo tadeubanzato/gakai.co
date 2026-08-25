@@ -24,7 +24,14 @@ function encryptSecret(value) {
 // sync, backing an already-existing AI Agent workflow (the "enable an
 // existing workflow" path — the new behavior under test here).
 let storedWorkflow;
+let unpublishedWorkflowIds=[];
+let createdWorkflowCount=0;
+let llmCredentialMissing=false;
+let workflowActive={};
 function resetWorkflow() {
+  unpublishedWorkflowIds=[];
+  createdWorkflowCount=0;
+  llmCredentialMissing=false;
   storedWorkflow = {
     id: 'wf-agentic-1',
     name: 'Gakai – Test Account (AI Agent)',
@@ -37,6 +44,7 @@ function resetWorkflow() {
     ],
     connections: {},
   };
+  workflowActive={[storedWorkflow.id]:true,'wf-standard-1':true};
 }
 resetWorkflow();
 
@@ -47,10 +55,16 @@ const mockN8n = http.createServer((req, res) => {
   req.on('data', chunk => { body += chunk; });
   req.on('end', () => {
     if (req.method === 'GET' && url.pathname === '/api/v1/workflows') return respond(200, { data: [] });
-    if (req.method === 'GET' && url.pathname === `/api/v1/workflows/${storedWorkflow.id}`) return respond(200, storedWorkflow);
+    if (req.method === 'GET' && url.pathname === `/api/v1/workflows/${storedWorkflow.id}`) return respond(200, { ...storedWorkflow, active: workflowActive[storedWorkflow.id] });
+    if (req.method === 'GET' && /^\/api\/v1\/workflows\/(wf-standard-1|wf-created-\d+)$/.test(url.pathname)) { const id=url.pathname.split('/')[4]; return respond(200,{id,name:id,nodes:[],active:workflowActive[id]}); }
     if (req.method === 'PUT' && url.pathname === `/api/v1/workflows/${storedWorkflow.id}`) { const patch = JSON.parse(body); storedWorkflow = { ...storedWorkflow, ...patch }; return respond(200, storedWorkflow); }
     if (req.method === 'POST' && url.pathname === `/api/v1/workflows/${storedWorkflow.id}/activate`) return respond(200, {});
-    if (req.method === 'PUT' && url.pathname === '/api/v1/credentials/cred-llm') return respond(200, { id: 'cred-llm', name: 'Gakai LLM Proxy' });
+    if (req.method === 'POST' && url.pathname === '/api/v1/workflows') { const workflow = JSON.parse(body); createdWorkflowCount += 1; const id=`wf-created-${createdWorkflowCount}`; workflowActive[id]=false; return respond(200, { id, name: workflow.name, nodes: workflow.nodes }); }
+    if (req.method === 'POST' && /^\/api\/v1\/workflows\/[^/]+\/(publish|activate)$/.test(url.pathname)) { workflowActive[url.pathname.split('/')[4]]=true; return respond(200, {}); }
+    if (req.method === 'POST' && url.pathname === '/api/v1/credentials') return respond(200, { id: 'cred-created', name: 'Gakai credential' });
+    if (req.method === 'POST' && /^\/api\/v1\/workflows\/wf-missing\/(unpublish|deactivate)$/.test(url.pathname)) return respond(404, { message: 'workflow not found' });
+    if (req.method === 'POST' && /^\/api\/v1\/workflows\/[^/]+\/unpublish$/.test(url.pathname)) { const id=url.pathname.split('/')[4];workflowActive[id]=false;unpublishedWorkflowIds.push(id); return respond(200, {}); }
+    if (req.method === 'PATCH' && url.pathname === '/api/v1/credentials/cred-llm') return llmCredentialMissing ? respond(404, { message: 'credential not found' }) : respond(200, { id: 'cred-llm', name: 'Gakai LLM Proxy' });
     return respond(404, { message: 'not found in mock' });
   });
 });
@@ -80,6 +94,7 @@ function seedAccount(accountId, { nativeEnabled, agenticEnabled, standardEnabled
   store.n8nConnections.push({ accountId, kind: 'agentic', n8nUrl: mockN8nUrl, n8nApiKeyEncrypted: encryptSecret('mock-n8n-api-key'), workflowId: storedWorkflow.id, workflowName: storedWorkflow.name, webhookUrl: `${mockN8nUrl}/webhook/gakai-test-account-ai`, inboundCredentialId: 'cred-inbound', llmCredentialId: 'cred-llm', inboundSecret: 'secret', connectedAt: new Date().toISOString() });
   store.automationSubscriptions.push({ id: `sub-${accountId}`, accountId, name: 'n8n auto-connect (AI Agent)', url: `${mockN8nUrl}/webhook/gakai-test-account-ai`, productionUrl: `${mockN8nUrl}/webhook/gakai-test-account-ai`, testUrl: null, testPhone: null, enabled: agenticEnabled, events: ['message.received'], secret: 'secret', createdAt: new Date().toISOString(), lastDelivery: null });
   if (standardEnabled !== undefined) {
+    store.n8nConnections.push({ accountId, kind: 'standard', n8nUrl: mockN8nUrl, n8nApiKeyEncrypted: encryptSecret('mock-n8n-api-key'), workflowId: 'wf-standard-1', workflowName: 'Gakai – Test Account', webhookUrl: `${mockN8nUrl}/webhook/gakai-test-account`, inboundCredentialId: 'cred-inbound', inboundSecret: 'secret', connectedAt: new Date().toISOString() });
     store.automationSubscriptions.push({ id: `sub-standard-${accountId}`, accountId, name: 'n8n auto-connect', url: `${mockN8nUrl}/webhook/gakai-test-account`, productionUrl: `${mockN8nUrl}/webhook/gakai-test-account`, testUrl: null, testPhone: null, enabled: standardEnabled, events: ['message.received'], secret: 'secret', createdAt: new Date().toISOString(), lastDelivery: null });
   }
 }
@@ -132,13 +147,7 @@ test('saving the LLM proxy form (baseUrl/model/instructions) never resets native
   assert.equal(config.systemPrompt, 'updated instructions');
 });
 
-// The plain "standard" n8n automation (its default Set node just echoes the
-// inbound message back, but the workflow is the user's own to customize in
-// n8n) is a deliberately separate concept from native/agentic AI replies —
-// it must never be part of that mutual-exclusivity dance in either
-// direction. Only native and agentic are two faces of the same "Gakai
-// answers using the LLM proxy" toggle and stay exclusive of each other.
-test('PATCH /automations/:id enabling the standard n8n subscription leaves an enabled AI Agent subscription and native replies untouched', async () => {
+test('PATCH /automations/:id enabling the standard n8n reply subscription disables competing AI reply paths', async () => {
   const accountId = 'agent-toggle-standard-independent';
   seedAccount(accountId, { nativeEnabled: true, agenticEnabled: true, standardEnabled: false });
   const standardSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect');
@@ -151,12 +160,15 @@ test('PATCH /automations/:id enabling the standard n8n subscription leaves an en
 
   assert.equal(store.automationSubscriptions.find(s => s.id === standardSub.id).enabled, true);
   const agenticSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect (AI Agent)');
-  assert.equal(agenticSub.enabled, true, 'enabling the standard n8n subscription must not disable the AI Agent subscription');
+  assert.equal(agenticSub.enabled, false, 'only one automatic WhatsApp reply handler may be enabled');
   const config = store.llmConfigs.find(c => c.accountId === accountId);
-  assert.equal(config.nativeEnabled, true, 'enabling the standard n8n subscription must not disable native replies');
+  assert.equal(config.nativeEnabled, false, 'only one automatic WhatsApp reply handler may be enabled');
+  assert.deepEqual(unpublishedWorkflowIds, [storedWorkflow.id], 'enabling standard replies must unpublish the AI Agent workflow');
+  assert.equal(workflowActive['wf-standard-1'], true, 'the selected standard workflow must be active in n8n');
+  assert.equal(workflowActive[storedWorkflow.id], false, 'the AI Agent workflow must be inactive in n8n');
 });
 
-test('POST /n8n/connect/ai leaves an enabled standard n8n subscription untouched when enabling AI Agent replies', async () => {
+test('POST /n8n/connect/ai disables an enabled standard n8n reply subscription', async () => {
   const accountId = 'agent-toggle-agentic-independent';
   seedAccount(accountId, { nativeEnabled: false, agenticEnabled: false, standardEnabled: true });
 
@@ -164,10 +176,63 @@ test('POST /n8n/connect/ai leaves an enabled standard n8n subscription untouched
   assert.equal(response.status, 200);
 
   const standardSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect');
-  assert.equal(standardSub.enabled, true, 'the standard n8n subscription must stay enabled — it is independent of AI Agent replies');
+  assert.equal(standardSub.enabled, false, 'the standard reply template must not echo alongside the AI Agent');
+  assert.deepEqual(unpublishedWorkflowIds, ['wf-standard-1'], 'enabling AI Agent replies must unpublish the standard workflow');
+  assert.equal(workflowActive[storedWorkflow.id], true, 'the selected AI Agent workflow must be active in n8n');
+  assert.equal(workflowActive['wf-standard-1'], false, 'the standard workflow must be inactive in n8n');
 });
 
-test('PATCH /llm/native leaves an enabled standard n8n subscription untouched when enabling native replies', async () => {
+test('enabling standard n8n replies succeeds when the old AI workflow was deleted in n8n', async () => {
+  const accountId = 'agent-toggle-standard-missing-agent';
+  seedAccount(accountId, { nativeEnabled: false, agenticEnabled: true, standardEnabled: false });
+  const agentConnection = store.n8nConnections.find(c => c.accountId === accountId && c.kind === 'agentic');
+  agentConnection.workflowId = 'wf-missing';
+  const standardSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect');
+
+  const response = await fetch(`${base}/api/app/accounts/${accountId}/automations/${standardSub.id}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ enabled: true }),
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 200, body.message);
+  assert.equal(body.aiWorkflowMissing, true);
+  assert.equal(store.automationSubscriptions.find(s => s.id === standardSub.id).enabled, true);
+  assert.equal(store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect (AI Agent)').enabled, false);
+});
+
+test('enabling AI Agent replies recreates its workflow and missing credentials after they were deleted in n8n', async () => {
+  const accountId = 'agent-toggle-recreate-agent';
+  seedAccount(accountId, { nativeEnabled: false, agenticEnabled: false, standardEnabled: true });
+  const agentConnection = store.n8nConnections.find(c => c.accountId === accountId && c.kind === 'agentic');
+  agentConnection.workflowId = 'wf-missing';
+  llmCredentialMissing = true;
+
+  const response = await fetch(`${base}/api/app/accounts/${accountId}/n8n/connect/ai`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: '{}' });
+  const body = await response.json();
+
+  assert.equal(response.status, 200, body.message);
+  assert.equal(agentConnection.workflowId, 'wf-created-1');
+  assert.equal(agentConnection.inboundCredentialId, 'cred-created');
+  assert.equal(agentConnection.llmCredentialId, 'cred-created');
+});
+
+test('disabling the last selected n8n reply mode deactivates both n8n workflows', async () => {
+  const accountId = 'agent-toggle-disable-all';
+  seedAccount(accountId, { nativeEnabled: false, agenticEnabled: false, standardEnabled: true });
+  const standardSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect');
+
+  const response = await fetch(`${base}/api/app/accounts/${accountId}/automations/${standardSub.id}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ enabled: false }),
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 200, body.message);
+  assert.equal(body.n8nWorkflowsDeactivated, true);
+  assert.equal(workflowActive['wf-standard-1'], false);
+  assert.equal(workflowActive[storedWorkflow.id], false);
+});
+
+test('PATCH /llm/native disables both n8n reply subscriptions and unpublishes both workflows', async () => {
   const accountId = 'agent-toggle-native-independent';
   seedAccount(accountId, { nativeEnabled: false, agenticEnabled: false, standardEnabled: true });
 
@@ -175,10 +240,16 @@ test('PATCH /llm/native leaves an enabled standard n8n subscription untouched wh
     method: 'PATCH', headers: { 'content-type': 'application/json', cookie },
     body: JSON.stringify({ nativeEnabled: true }),
   });
-  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(response.status, 200, body.message);
+  assert.equal(body.n8nWorkflowsDeactivated, true);
 
   const standardSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect');
-  assert.equal(standardSub.enabled, true, 'the standard n8n subscription must stay enabled — it is independent of native replies');
+  const agentSub = store.automationSubscriptions.find(s => s.accountId === accountId && s.name === 'n8n auto-connect (AI Agent)');
+  assert.equal(standardSub.enabled, false);
+  assert.equal(agentSub.enabled, false);
+  assert.equal(workflowActive['wf-standard-1'], false);
+  assert.equal(workflowActive[storedWorkflow.id], false);
 });
 
 test('PATCH /automations/:id enabling a hand-authored automation does not disturb any AI reply path', async () => {
