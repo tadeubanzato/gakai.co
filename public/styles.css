@@ -532,6 +532,10 @@ video.media{background:#000}
 .message-list { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; min-width:0; }
 .message-row { display:flex; width:100%; min-width:0; padding:0 12px; justify-content:flex-start; }
 .message-row.mine { justify-content:flex-end; }
+/* The reaction pill overlaps its own bubble's bottom edge — without extra
+   room below, it sits almost flush against the next message row given the
+   normal 8px row gap. Only rows that actually have a reaction need it. */
+.message-row:has(.reaction-pill) { padding-bottom:12px; }
 
 /* Rich links read as a compact card: visual first, then title and description. */
 .site-preview-mark { display:grid; place-items:center; width:100%; height:132px; background:linear-gradient(135deg,#1d3a45,#123c43); color:#bff7e7; font-size:52px; font-weight:800; }
