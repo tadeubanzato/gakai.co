@@ -42,7 +42,7 @@ test('native LLM reply fires when no agentic n8n automation is enabled for the a
   assert.equal(llmHits, before + 1, 'native LLM must be dispatched when nothing else is handling AI replies for this account');
 });
 
-test('native LLM reply is skipped when an enabled n8n AI Agent automation exists for the account', async () => {
+test('native LLM reply takes precedence over a stale enabled n8n AI Agent automation', async () => {
   const accountId = 'has-n8n-account';
   store.llmConfigs.push(llmConfigFor(accountId));
   store.automationSubscriptions.push({
@@ -53,7 +53,7 @@ test('native LLM reply is skipped when an enabled n8n AI Agent automation exists
 
   const before = llmHits;
   await dispatchMessage(accountId, 'msg-2');
-  assert.equal(llmHits, before, 'the n8n AI Agent must win: native LLM must not also reply');
+  assert.equal(llmHits, before + 1, 'native mode must bypass the stale n8n AI Agent subscription');
 });
 
 test('a disabled n8n AI Agent automation does not suppress the native LLM reply', async () => {

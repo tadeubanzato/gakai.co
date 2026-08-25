@@ -379,10 +379,15 @@ async function dispatchAutomationEvent(payload){
   if(!ownMentioned&&Array.isArray(message.mentionedJids)&&message.mentionedJids.length){
     ownMentioned=mentionsIdentity(message.mentionedJids,provider.getAccount(accountId)?.ownJid);
   }
-  const subscriptions=store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)&&(!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)||ownMentioned));
+  const nativeEnabled=Boolean(llmConfig(accountId)?.nativeEnabled);
+  // Native mode is intentionally a hard boundary for Gakai-managed n8n
+  // reply templates. This also protects an account that has stale persisted
+  // subscriptions from producing a duplicate n8n reply while native mode is
+  // selected. Hand-authored automations remain opt-in and untouched.
+  const subscriptions=store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)&&(!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)||ownMentioned)&&(!nativeEnabled||!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)));
   await Promise.allSettled([
     ...subscriptions.map(subscription=>deliverAutomation(subscription,event)),
-    hasEnabledAgenticN8n(accountId)?Promise.resolve():dispatchLLMReply(accountId,event)
+    nativeEnabled?dispatchLLMReply(accountId,event):hasEnabledAgenticN8n(accountId)?Promise.resolve():dispatchLLMReply(accountId,event)
   ]);
 }
 
@@ -411,6 +416,19 @@ async function n8nRequest(n8nUrl, n8nApiKey, path, options={}) {
   return data;
 }
 
+async function n8nWorkflowExists(n8nUrl,n8nApiKey,workflowId){
+  try{await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(workflowId)}`);return true;}
+  catch(error){if(error.status===404)return false;throw error;}
+}
+async function n8nWorkflowActive(n8nUrl,n8nApiKey,workflowId){
+  const workflow=await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(workflowId)}`);
+  return typeof workflow?.active==='boolean'?workflow.active:(typeof workflow?.isActive==='boolean'?workflow.isActive:null);
+}
+async function n8nCredentialExists(n8nUrl,n8nApiKey,credentialId){
+  try{await n8nRequest(n8nUrl,n8nApiKey,`/credentials/${encodeURIComponent(credentialId)}`);return true;}
+  catch(error){if(error.status===404)return false;throw error;}
+}
+
 async function publishN8nWorkflow(n8nUrl,n8nApiKey,workflowId){
   try{
     return await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${workflowId}/publish`,{method:'POST'});
@@ -420,6 +438,35 @@ async function publishN8nWorkflow(n8nUrl,n8nApiKey,workflowId){
     if(![404,405].includes(error.status))throw error;
     return await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${workflowId}/activate`,{method:'POST'});
   }
+}
+
+async function activateAndVerifyN8nWorkflow(n8nUrl,n8nApiKey,workflowId){
+  const before=await n8nWorkflowActive(n8nUrl,n8nApiKey,workflowId);
+  if(before!==true)await publishN8nWorkflow(n8nUrl,n8nApiKey,workflowId);
+  const after=await n8nWorkflowActive(n8nUrl,n8nApiKey,workflowId);
+  if(after===false)throw new Error('n8n did not activate the selected workflow');
+}
+
+async function unpublishN8nWorkflow(n8nUrl,n8nApiKey,workflowId){
+  if(!(await n8nWorkflowExists(n8nUrl,n8nApiKey,workflowId)))return {missing:true};
+  if((await n8nWorkflowActive(n8nUrl,n8nApiKey,workflowId))===false)return {missing:false};
+  try{
+    await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${workflowId}/unpublish`,{method:'POST'});
+  }catch(error){
+    // n8n previously called this operation deactivate. Keep older
+    // self-hosted installs compatible while using the current API first.
+    if(![404,405].includes(error.status))throw error;
+    try{await n8nRequest(n8nUrl,n8nApiKey,`/workflows/${workflowId}/deactivate`,{method:'POST'});}
+    catch(fallbackError){
+      // The workflow may have been deleted directly in n8n. It cannot be
+      // active in that state, so it must not prevent the remaining reply
+      // mode from being selected.
+      if(fallbackError.status===404)return {missing:true};
+      throw fallbackError;
+    }
+  }
+  if((await n8nWorkflowActive(n8nUrl,n8nApiKey,workflowId))===true)throw new Error('n8n did not deactivate the other workflow');
+  return {missing:false};
 }
 
 async function deleteN8nCredentialQuietly(n8nUrl,n8nApiKey,credentialId){
@@ -441,19 +488,32 @@ function llmConfig(accountId){return store.llmConfigs.find(c=>c.accountId===acco
 // native dispatch is skipped, so an inbound message never gets two
 // independent AI replies.
 function hasEnabledAgenticN8n(accountId){return store.automationSubscriptions.some(item=>item.accountId===accountId&&item.enabled&&item.name==='n8n auto-connect (AI Agent)');}
-// Native LLM replies and the n8n AI Agent workflow are two faces of the same
-// thing — Gakai answering automatically using the configured LLM proxy — so
-// only one may be live at a time. The plain "standard" n8n automation is a
-// separate, independent concept: a generic webhook subscription the user
-// customizes for their own purposes in n8n (its default Set node just echoes
-// the inbound message back as a placeholder, but what it actually does is
-// entirely up to the workflow the user builds). Enabling or disabling it
-// must never touch native or agentic replies, and vice versa — each of the
-// three toggles only ever affects itself and, for native/agentic, the other
-// one of that pair.
+// An account has one automatic WhatsApp reply handler. The standard n8n
+// reply template, the n8n AI Agent, and native AI each send replies through
+// the same inbound event, so allowing more than one live handler produces
+// duplicate messages.
 function disableTheOtherAiReplyPath(accountId,keep){
   if(keep!=='native'){const config=llmConfig(accountId);if(config)config.nativeEnabled=false;}
   if(keep!=='agentic'){const sub=store.automationSubscriptions.find(item=>item.accountId===accountId&&item.name==='n8n auto-connect (AI Agent)');if(sub)sub.enabled=false;}
+}
+function disableStandardN8nReplies(accountId){const sub=store.automationSubscriptions.find(item=>item.accountId===accountId&&item.name==='n8n auto-connect');if(!sub||!sub.enabled)return false;sub.enabled=false;return true;}
+async function unpublishOtherN8nReplyWorkflow(accountId,selectedKind){
+  const otherKind=selectedKind==='agentic'?'standard':'agentic';
+  const connection=store.n8nConnections.find(item=>item.accountId===accountId&&item.kind===otherKind);
+  if(!connection?.workflowId)return {unpublished:false,missing:false};
+  const n8nApiKey=decryptSecret(connection.n8nApiKeyEncrypted);
+  if(!n8nApiKey)throw Object.assign(new Error(`The ${otherKind==='agentic'?'AI Agent':'standard'} n8n workflow has no saved API key`),{status:409});
+  const result=await unpublishN8nWorkflow(connection.n8nUrl,n8nApiKey,connection.workflowId);
+  return {unpublished:!result?.missing,missing:Boolean(result?.missing)};
+}
+async function deactivateN8nReplyWorkflows(accountId){
+  for(const kind of ['standard','agentic']){
+    const connection=store.n8nConnections.find(item=>item.accountId===accountId&&item.kind===kind);
+    if(!connection?.workflowId)continue;
+    const n8nApiKey=decryptSecret(connection.n8nApiKeyEncrypted);
+    if(!n8nApiKey)throw Object.assign(new Error('Reauthorize n8n before disabling replies'),{status:409});
+    await unpublishN8nWorkflow(connection.n8nUrl,n8nApiKey,connection.workflowId);
+  }
 }
 const llmProviders=new Set(['omniroute','litellm']);
 function inferLlmProvider(baseUrl,requested){
@@ -487,18 +547,20 @@ Use a friendly, warm, professional tone. Keep replies concise and natural for Wh
 Do not make up facts, prices, availability, or promises. If a request needs a human, say that you will pass it on. Reply with only the message text—no labels, markdown, or explanation.`;
 function assistantInstructions(value){return String(value||'').trim()||defaultAssistantInstructions;}
 
-// n8n versions released before the public credential-update endpoint return
-// 405 for PUT /credentials/{id}. For those versions, replace only Gakai's
-// dedicated credential and repoint the generated Chat Model in the same
-// workflow update. This leaves customer-owned credentials untouched.
+// n8n's current public API updates a credential in place with PATCH. Keeping
+// this account-scoped credential ID stable avoids creating a new credential
+// every time the proxy URL or API key is saved. Older n8n versions that do
+// not expose PATCH use the replacement fallback below.
 async function syncN8nLlmCredential(connection,n8nApiKey,config){
   const name=`Gakai LLM Proxy – ${config.accountId}`;
-  const body={name,type:'openAiApi',data:{apiKey:config.apiKey,url:config.baseUrl}};
+  const body={name,type:'openAiApi',data:{apiKey:config.apiKey,url:config.baseUrl},isPartialData:false};
   try{
-    await n8nRequest(connection.n8nUrl,n8nApiKey,`/credentials/${encodeURIComponent(connection.llmCredentialId)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    await n8nRequest(connection.n8nUrl,n8nApiKey,`/credentials/${encodeURIComponent(connection.llmCredentialId)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
     return {id:String(connection.llmCredentialId),name,replacedCredentialId:null};
   }catch(error){
-    if(error.status!==405)throw error;
+    // A credential can be removed directly in n8n. Create a replacement
+    // only in that case (or on legacy n8n without PATCH), then store its ID.
+    if(![404,405].includes(error.status))throw error;
     const replacement=await n8nRequest(connection.n8nUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
     return {id:String(replacement.id),name:replacement.name||name,replacedCredentialId:String(connection.llmCredentialId)};
   }
@@ -562,7 +624,10 @@ function buildN8nWorkflowGraph({kind,webhookPath,inboundCred,accountLlm,llmCred,
       type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',
       typeVersion:1.3,
       position:[625,500],
-      parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},options:{}},
+      // n8n 1.3 defaults this node to the newer Responses API when the
+      // setting is omitted. Gakai proxies use OpenAI Chat Completions, so
+      // make the compatible mode explicit for both new and repaired flows.
+      parameters:{model:{__rl:true,mode:'list',value:accountLlm.model},responsesApiEnabled:false,options:{}},
       credentials:{openAiApi:{id:String(llmCred.id),name:llmCred.name}}
     };
     nodes=[webhookNode,agentNode,llmNode,respondNode];
@@ -622,40 +687,67 @@ async function repairN8nWorkflowGraph(n8nUrl,n8nApiKey,connection,accountId){
 
 // Keep Gakai's LLM settings and the generated n8n AI Agent in lockstep.
 // We fetch first so any customer edits to other workflow nodes remain intact.
-async function syncAgenticN8nInstructions(accountId,config){
+async function syncAgenticN8nInstructions(accountId,config,{workflowId:requestedWorkflowId}={}){
   const connection=store.n8nConnections.find(item=>item.accountId===accountId&&item.kind==='agentic');
-  if(!connection)return false;
+  if(!connection)return {synced:false,agentExampleAdded:false};
   const n8nApiKey=decryptSecret(connection.n8nApiKeyEncrypted);
   if(!n8nApiKey)throw new Error('Reauthorize n8n before updating the AI Agent settings');
+  const workflowId=requestedWorkflowId||connection.workflowId;
+  const retargeted=workflowId!==connection.workflowId;
+  if(!retargeted&&!(await n8nWorkflowExists(connection.n8nUrl,n8nApiKey,workflowId))){
+    const rebuilt=await recreateMissingN8nWorkflow(connection,accountId);
+    return {synced:true,agentExampleAdded:false,recreated:true,workflowId:rebuilt.workflowId};
+  }
   // Upgrade a legacy workflow shape (the old direct-callback Send Reply
   // node) before touching anything else, so the fetch below sees the
   // current node names.
-  await repairN8nWorkflowGraph(connection.n8nUrl,n8nApiKey,connection,accountId).catch(error=>console.error('Failed to upgrade n8n AI Agent workflow shape:',error.message));
-  const workflow=await n8nRequest(connection.n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`);
-  const agent=workflow?.nodes?.find(node=>node.name==='AI Agent'&&node.type==='@n8n/n8n-nodes-langchain.agent');
-  const model=workflow?.nodes?.find(node=>node.name==='OpenAI Chat Model'&&node.type==='@n8n/n8n-nodes-langchain.lmChatOpenAi');
-  if(!agent||!model)throw new Error('The generated n8n AI Agent or Chat Model node could not be found. Recreate the AI workflow before saving settings.');
+  if(!retargeted)await repairN8nWorkflowGraph(connection.n8nUrl,n8nApiKey,connection,accountId).catch(error=>console.error('Failed to upgrade n8n AI Agent workflow shape:',error.message));
+  const workflow=await n8nRequest(connection.n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(workflowId)}`);
+  if(!workflow?.id||!Array.isArray(workflow.nodes))throw new Error('The selected n8n workflow could not be loaded');
+  const webhook=workflow.nodes.find(node=>node.type==='n8n-nodes-base.webhook');
+  const webhookPath=String(webhook?.parameters?.path||'').replace(/^\/+|\/+$/g,'');
+  if(!webhookPath)throw new Error('The selected workflow needs a Webhook node with a path before Gakai can route messages to it');
+  let agent=workflow.nodes.find(node=>node.name==='AI Agent'&&node.type==='@n8n/n8n-nodes-langchain.agent');
+  let model=workflow.nodes.find(node=>node.name==='OpenAI Chat Model'&&node.type==='@n8n/n8n-nodes-langchain.lmChatOpenAi');
   if(!connection.llmCredentialId)throw new Error('The generated n8n LLM credential could not be found. Recreate the AI workflow before saving settings.');
   const credential=await syncN8nLlmCredential(connection,n8nApiKey,config);
+  let agentExampleAdded=false;
+  if(!agent||!model){
+    // A user-selected workflow keeps all of its nodes and main-flow links.
+    // This is an intentionally disconnected example: the user decides where
+    // their own workflow should connect it.
+    agentExampleAdded=true;
+    if(!agent){agent={id:makeUUID(),name:'AI Agent',type:'@n8n/n8n-nodes-langchain.agent',typeVersion:3.1,position:[625,300],parameters:{promptType:'define',text:"={{ $('Webhook').item.json.body.message.body || $('Webhook').item.json.body.message.text || '' }}",options:{systemMessage:assistantInstructions(config.systemPrompt)}}};workflow.nodes.push(agent);}
+    if(!model){model={id:makeUUID(),name:'OpenAI Chat Model',type:'@n8n/n8n-nodes-langchain.lmChatOpenAi',typeVersion:1.3,position:[625,500],parameters:{model:{__rl:true,mode:'list',value:config.model},responsesApiEnabled:false,options:{}},credentials:{openAiApi:{id:credential.id,name:credential.name}}};workflow.nodes.push(model);}
+    const modelLinks=workflow.connections?.[model.name]?.ai_languageModel||[];
+    if(!modelLinks.some(branch=>branch.some(link=>link.node===agent.name&&link.type==='ai_languageModel')))workflow.connections={...(workflow.connections||{}),[model.name]:{...(workflow.connections?.[model.name]||{}),ai_languageModel:[...modelLinks,[{node:agent.name,type:'ai_languageModel',index:0}]]}};
+  }
   agent.parameters={...(agent.parameters||{}),options:{...(agent.parameters?.options||{}),systemMessage:assistantInstructions(config.systemPrompt)}};
-  model.parameters={...(model.parameters||{}),model:{...(typeof model.parameters?.model==='object'?model.parameters.model:{}),__rl:true,mode:'list',value:config.model}};
+  model.parameters={...(model.parameters||{}),model:{...(typeof model.parameters?.model==='object'?model.parameters.model:{}),__rl:true,mode:'list',value:config.model},responsesApiEnabled:false};
   model.credentials={...(model.credentials||{}),openAiApi:{id:credential.id,name:credential.name}};
-  await n8nRequest(connection.n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(connection.workflowId)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({name:workflow.name,nodes:workflow.nodes,connections:workflow.connections,settings:workflow.settings||{executionOrder:'v1'}})});
-  await publishN8nWorkflow(connection.n8nUrl,n8nApiKey,connection.workflowId);
+  await n8nRequest(connection.n8nUrl,n8nApiKey,`/workflows/${encodeURIComponent(workflowId)}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({name:workflow.name,nodes:workflow.nodes,connections:workflow.connections||{},settings:workflow.settings||{executionOrder:'v1'}})});
+  await publishN8nWorkflow(connection.n8nUrl,n8nApiKey,workflowId);
+  if(retargeted){
+    connection.workflowId=String(workflow.id);connection.workflowName=workflow.name||String(workflow.id);connection.webhookUrl=`${connection.n8nUrl}/webhook/${webhookPath}`;
+    const subscription=store.automationSubscriptions.find(item=>item.accountId===accountId&&item.name==='n8n auto-connect (AI Agent)');
+    if(subscription){subscription.url=connection.webhookUrl;subscription.productionUrl=connection.webhookUrl;}
+  }
   connection.llmCredentialId=credential.id;
   if(credential.replacedCredentialId)await deleteN8nCredentialQuietly(connection.n8nUrl,n8nApiKey,credential.replacedCredentialId);
-  return true;
+  return {synced:true,agentExampleAdded,retargeted};
 }
 
 // Builds one n8n workflow (Webhook -> [Set | AI Agent] -> Respond to Webhook)
 // and its dedicated credentials. Used both for the initial n8n connect and
 // for creating the paired AI Agent workflow once LiteLLM is configured.
 // Never mutates an existing n8n workflow; each call creates a brand-new one.
-async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,kind}){
-  const inboundSecret='gs_inbound_'+randomBytes(24).toString('base64url');
-  let inboundCred=null,llmCred=null,workflow=null;
+async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,kind,existingConnection=null}){
+  const inboundSecret=existingConnection?.inboundSecret||'gs_inbound_'+randomBytes(24).toString('base64url');
+  let inboundCred=null,llmCred=null,workflow=null,inboundCredentialCreated=false,llmCredentialCreated=false;
   try{
-    inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai Inbound Secret – ${accountId}${kind==='agentic'?' (AI Agent)':''}`,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});
+    const inboundName=`Gakai Inbound Secret – ${accountId}${kind==='agentic'?' (AI Agent)':''}`;
+    if(existingConnection?.inboundCredentialId&&await n8nCredentialExists(n8nBaseUrl,n8nApiKey,existingConnection.inboundCredentialId))inboundCred={id:existingConnection.inboundCredentialId,name:inboundName};
+    else {inboundCredentialCreated=true;inboundCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:inboundName,type:'httpHeaderAuth',data:{name:'X-Gakai-Secret',value:inboundSecret}})});}
 
     const webhookPath='gakai-'+accountId.replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,24)+(kind==='agentic'?'-ai':'');
     const accountLabel=store.accountLabels[accountId]||provider.getAccount(accountId)?.profile||accountId;
@@ -663,7 +755,8 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,kind}){
     const accountLlm=kind==='agentic'?llmConfig(accountId):null;
     if(accountLlm){
       // n8n's OpenAI credential uses `url` for an OpenAI-compatible base endpoint.
-      llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${accountId}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,url:accountLlm.baseUrl}})});
+      if(existingConnection?.llmCredentialId)llmCred=await syncN8nLlmCredential(existingConnection,n8nApiKey,accountLlm);
+      else {llmCredentialCreated=true;llmCred=await n8nRequest(n8nBaseUrl,n8nApiKey,'/credentials',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`Gakai LLM Proxy – ${accountId}`,type:'openAiApi',data:{apiKey:accountLlm.apiKey,url:accountLlm.baseUrl}})});}
     }
     const {nodes,connections}=buildN8nWorkflowGraph({
       kind,
@@ -692,10 +785,32 @@ async function createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId,kind}){
     };
   }catch(err){
     await deleteN8nWorkflowQuietly(n8nBaseUrl,n8nApiKey,workflow?.id);
-    await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,llmCred?.id);
-    await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,inboundCred?.id);
+    if(llmCredentialCreated)await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,llmCred?.id);
+    if(inboundCredentialCreated)await deleteN8nCredentialQuietly(n8nBaseUrl,n8nApiKey,inboundCred?.id);
     throw err;
   }
+}
+
+async function recreateMissingN8nWorkflow(connection,accountId){
+  const n8nApiKey=decryptSecret(connection.n8nApiKeyEncrypted);
+  if(!n8nApiKey)throw new Error('Reauthorize n8n before recreating its workflow');
+  const built=await createN8nWorkflow({n8nBaseUrl:connection.n8nUrl,n8nApiKey,accountId,kind:connection.kind,existingConnection:connection});
+  connection.workflowId=built.workflowId;connection.workflowName=built.workflowName;connection.webhookUrl=built.webhookUrl;
+  connection.inboundCredentialId=built.inboundCredentialId;connection.llmCredentialId=built.llmCredentialId;connection.inboundSecret=built.inboundSecret;
+  const subscription=store.automationSubscriptions.find(item=>item.accountId===accountId&&item.name===(connection.kind==='agentic'?'n8n auto-connect (AI Agent)':'n8n auto-connect'));
+  if(subscription){subscription.url=built.webhookUrl;subscription.productionUrl=built.webhookUrl;subscription.secret=built.inboundSecret;}
+  return built;
+}
+
+async function ensureN8nReplyWorkflow(accountId,kind){
+  const connection=store.n8nConnections.find(item=>item.accountId===accountId&&item.kind===kind);
+  if(!connection)throw Object.assign(new Error(`No ${kind==='agentic'?'AI Agent':'standard'} n8n workflow is configured`),{status:409});
+  const n8nApiKey=decryptSecret(connection.n8nApiKeyEncrypted);
+  if(!n8nApiKey)throw Object.assign(new Error('Reauthorize n8n before enabling replies'),{status:409});
+  if(await n8nWorkflowExists(connection.n8nUrl,n8nApiKey,connection.workflowId)){await activateAndVerifyN8nWorkflow(connection.n8nUrl,n8nApiKey,connection.workflowId);return {connection,recreated:false};}
+  const built=await recreateMissingN8nWorkflow(connection,accountId);
+  await activateAndVerifyN8nWorkflow(connection.n8nUrl,n8nApiKey,built.workflowId);
+  return {connection,recreated:true,built};
 }
 
 // Creates the paired AI Agent workflow for an account that already has a
@@ -977,7 +1092,24 @@ async function enrichMessage(session,view){
   if(parts[4]==="automations"&&req.method==="GET")return send(res,200,{subscriptions:store.automationSubscriptions.filter(subscription=>subscription.accountId===id).map(automationSummary)});
   if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await n8nWebhookUrl(input.url||""),secret=String(input.secret||"").trim();if(!url)return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@s.whatsapp.net",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await automationFetch({secret,url:url.href},event);if(!response.ok)return send(res,502,{message:await describeWebhookFailure(response)});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
   if(parts[4]==="automations"&&!parts[5]&&req.method==="POST"){const input=await readBody(req),production=await n8nWebhookUrl(input.productionUrl||input.url||""),test=await n8nWebhookUrl(input.testUrl||""),requestedSecret=String(input.secret||"").trim();if(!production)return send(res,400,{message:"Use an HTTPS n8n production webhook URL"});if(input.testUrl&&!test)return send(res,400,{message:"Use an HTTPS n8n test webhook URL"});if(requestedSecret.length>256)return send(res,400,{message:"Invalid Header Auth secret"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:production.href,productionUrl:production.href,testUrl:test?.href||null,testPhone:String(input.testPhone||"").replace(/[^0-9]/g,"")||null,enabled:true,events:["message.received"],secret:requestedSecret||ensureN8nKey(id),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}
-  if(parts[4]==="automations"&&parts[5]&&req.method==="PATCH"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req);if(typeof input.enabled==="boolean")subscription.enabled=input.enabled;await persist();return send(res,200,{subscription:automationSummary(subscription)});}
+  if(parts[4]==="automations"&&parts[5]&&req.method==="PATCH"){
+    const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);
+    if(!subscription)return send(res,404,{message:"Automation not found"});
+    const input=await readBody(req);let aiRepliesDisabled=false,aiWorkflowUnpublished=false,aiWorkflowMissing=false,standardWorkflowRecreated=false,n8nWorkflowsDeactivated=false;
+    if(typeof input.enabled==="boolean"){
+      const isN8nReply=['n8n auto-connect','n8n auto-connect (AI Agent)'].includes(subscription.name);
+      if(input.enabled&&subscription.name==='n8n auto-connect'){
+        try{standardWorkflowRecreated=(await ensureN8nReplyWorkflow(id,'standard')).recreated;const result=await unpublishOtherN8nReplyWorkflow(id,'standard');aiWorkflowUnpublished=result.unpublished;aiWorkflowMissing=result.missing;}catch(error){return send(res,error.status||502,{message:'Failed to prepare standard n8n workflow: '+(error.message||'Unknown error')});}
+        subscription.enabled=true;const agent=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect (AI Agent)');if(agent?.enabled){agent.enabled=false;aiRepliesDisabled=true;}const config=llmConfig(id);if(config?.nativeEnabled){config.nativeEnabled=false;aiRepliesDisabled=true;}
+      }else if(!input.enabled&&isN8nReply){
+        const otherName=subscription.name==='n8n auto-connect'?'n8n auto-connect (AI Agent)':'n8n auto-connect';
+        const other=store.automationSubscriptions.find(item=>item.accountId===id&&item.name===otherName);
+        if(!other?.enabled){try{await deactivateN8nReplyWorkflows(id);n8nWorkflowsDeactivated=true;}catch(error){return send(res,error.status||502,{message:'Failed to deactivate n8n workflows: '+(error.message||'Unknown error')});}}
+        subscription.enabled=false;
+      }else subscription.enabled=input.enabled;
+    }
+    await persist();return send(res,200,{subscription:automationSummary(subscription),aiRepliesDisabled,aiWorkflowUnpublished,aiWorkflowMissing,standardWorkflowRecreated,n8nWorkflowsDeactivated});
+  }
   if(parts[4]==="automations"&&parts[5]&&parts[6]==="test"&&req.method==="POST"){const subscription=store.automationSubscriptions.find(item=>item.id===parts[5]&&item.accountId===id);if(!subscription)return send(res,404,{message:"Automation not found"});const input=await readBody(req),phone=String(input.phone||subscription.testPhone||"").replace(/[^0-9]/g,"");if(phone.length>30)return send(res,400,{message:"Invalid test phone number"});const target=phone?`${phone}@s.whatsapp.net`:"demo@s.whatsapp.net",event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:target,kind:"direct",phone:phone||null},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:String(input.text||"This is a Gakai test event."),text:String(input.text||"This is a Gakai test event."),hasMedia:false,media:null,sender:phone?{id:target,phone}:null},source:"test"};const destination=String(input.destination||"production")==="test"?subscription.testUrl:subscription.productionUrl||subscription.url;if(!destination)return send(res,400,{message:"This webhook URL is not configured"});
     // Route through the same delivery path production events use so this
     // test send updates subscription.lastDelivery like a real one does,
@@ -1032,12 +1164,14 @@ async function enrichMessage(session,view){
     // not this form — preserve whatever it's currently set to rather than
     // reading a stale/absent field from this save.
     const nextConfig={accountId:id,provider,baseUrl,apiKey,model,systemPrompt:assistantInstructions(String(input.systemPrompt||'').slice(0,4000)),nativeEnabled:existing?.nativeEnabled||false,configuredAt:existing?.configuredAt||new Date().toISOString()};
-    let n8nInstructionsSynced=false;
-    try{n8nInstructionsSynced=await syncAgenticN8nInstructions(id,nextConfig);}catch(error){return send(res,502,{message:'LLM proxy verified, but the n8n AI workflow was not updated: '+(error.message||'Unknown error')});}
+    const requestedWorkflowId=String(input.n8nWorkflowId||'').trim();
+    if(requestedWorkflowId.length>120)return send(res,400,{message:'The n8n workflow ID is too long'});
+    let n8nSync={synced:false,agentExampleAdded:false};
+    try{n8nSync=await syncAgenticN8nInstructions(id,nextConfig,{workflowId:requestedWorkflowId||undefined});}catch(error){return send(res,502,{message:'LLM proxy verified, but the n8n AI workflow was not updated: '+(error.message||'Unknown error')});}
     store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);
     store.llmConfigs.push(nextConfig);
     await persist();
-    return send(res,200,{ok:true,n8nInstructionsSynced});
+    return send(res,200,{ok:true,n8nInstructionsSynced:n8nSync.synced,n8nAgentExampleAdded:n8nSync.agentExampleAdded,n8nWorkflowRetargeted:n8nSync.retargeted||false});
   }
   // Immediate "Enable native AI replies" toggle — mirrors /n8n/connect/ai's
   // immediacy so both mutually-exclusive reply paths behave the same way
@@ -1046,11 +1180,21 @@ async function enrichMessage(session,view){
     const config=llmConfig(id);
     if(!config)return send(res,404,{message:'Save an LLM proxy before enabling native replies'});
     const input=await readBody(req);
-    config.nativeEnabled=Boolean(input.nativeEnabled);
-    // Mutual exclusivity: native and the n8n AI Agent are the same reply, twice.
-    if(config.nativeEnabled)disableTheOtherAiReplyPath(id,'native');
+    const nativeEnabled=Boolean(input.nativeEnabled);
+    let agentRepliesDisabled=false,standardRepliesDisabled=false,n8nWorkflowsDeactivated=false;
+    if(nativeEnabled){
+      // Do the remote operation before changing local routing. If n8n rejects
+      // the request, leave the current reply path intact instead of claiming
+      // native mode is safe while a workflow may still be published.
+      try{await deactivateN8nReplyWorkflows(id);n8nWorkflowsDeactivated=true;}
+      catch(error){return send(res,error.status||502,{message:'Could not deactivate the n8n reply workflows: '+(error.message||'Unknown error')});}
+      agentRepliesDisabled=hasEnabledAgenticN8n(id);
+      standardRepliesDisabled=disableStandardN8nReplies(id);
+      disableTheOtherAiReplyPath(id,'native');
+    }
+    config.nativeEnabled=nativeEnabled;
     await persist();
-    return send(res,200,{ok:true,nativeEnabled:config.nativeEnabled});
+    return send(res,200,{ok:true,nativeEnabled:config.nativeEnabled,agentRepliesDisabled,standardRepliesDisabled,n8nWorkflowsDeactivated});
   }
   if(parts[4]==='llm'&&req.method==='DELETE'){store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);await persist();return send(res,200,{ok:true});}
   if(parts[4]==='n8n'&&parts[5]==='connect'&&!parts[6]&&req.method==='POST'){
@@ -1067,12 +1211,31 @@ async function enrichMessage(session,view){
       try{await n8nRequest(n8nBaseUrl,n8nApiKey,'/workflows?limit=1')}catch(err){return send(res,400,{message:err.message||'Could not connect to n8n'});}
       if(existingStandard){
         existingStandard.n8nUrl=n8nBaseUrl;existingStandard.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);
+        const existingAgent=store.n8nConnections.find(connection=>connection.accountId===id&&connection.kind==='agentic');
+        if(existingAgent){existingAgent.n8nUrl=n8nBaseUrl;existingAgent.n8nApiKeyEncrypted=encryptSecret(n8nApiKey);}
+        const requestedWorkflowId=String(input.n8nWorkflowId||'').trim();
+        if(requestedWorkflowId.length>120)return send(res,400,{message:'The n8n workflow ID is too long'});
+        const retargeted=requestedWorkflowId&&requestedWorkflowId!==existingStandard.workflowId;
+        if(retargeted){
+          const workflow=await n8nRequest(n8nBaseUrl,n8nApiKey,`/workflows/${encodeURIComponent(requestedWorkflowId)}`);
+          const webhook=workflow?.nodes?.find(node=>node.type==='n8n-nodes-base.webhook');
+          const webhookPath=String(webhook?.parameters?.path||'').replace(/^\/+|\/+$/g,'');
+          if(!workflow?.id||!webhookPath)return send(res,400,{message:'The selected workflow needs a Webhook node with a path before Gakai can route messages to it'});
+          existingStandard.workflowId=String(workflow.id);existingStandard.workflowName=workflow.name||String(workflow.id);existingStandard.webhookUrl=`${n8nBaseUrl}/webhook/${webhookPath}`;
+          const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect');
+          if(subscription){subscription.url=existingStandard.webhookUrl;subscription.productionUrl=existingStandard.webhookUrl;}
+        }
+        let recreated=false,activationWarning=null;
+        if(!retargeted&&!(await n8nWorkflowExists(n8nBaseUrl,n8nApiKey,existingStandard.workflowId))){
+          const built=await recreateMissingN8nWorkflow(existingStandard,id);
+          recreated=true;activationWarning=built.activationWarning;
+        }
         // Reconnecting is also the repair path for a workflow still on the
         // old outbound-callback shape (see repairN8nWorkflowGraph) — fix it
         // in place rather than requiring the whole integration to be
         // deleted and recreated.
-        try{await repairN8nWorkflowGraph(n8nBaseUrl,n8nApiKey,existingStandard,id);}catch(error){console.error('Failed to upgrade n8n workflow shape:',error.message);}
-        await persist();return send(res,200,{ok:true,reused:true,workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`});
+        if(!retargeted&&!recreated)try{await repairN8nWorkflowGraph(n8nBaseUrl,n8nApiKey,existingStandard,id);}catch(error){console.error('Failed to upgrade n8n workflow shape:',error.message);}
+        await persist();return send(res,200,{ok:true,reused:!recreated,recreated,retargeted:Boolean(retargeted),workflowId:existingStandard.workflowId,workflowName:existingStandard.workflowName,workflowUrl:`${n8nBaseUrl}/workflow/${existingStandard.workflowId}`,activationWarning});
       }
       let built;
       try{ built=await createN8nWorkflow({n8nBaseUrl,n8nApiKey,accountId:id,kind:'standard'}); }
@@ -1111,14 +1274,20 @@ async function enrichMessage(session,view){
         }else{
           // Bring an already-existing workflow's instructions/model/shape
           // up to date before going live with it again.
-          await syncAgenticN8nInstructions(id,config).catch(error=>console.error('Failed to sync n8n AI Agent workflow on enable:',error.message));
+          const synced=await syncAgenticN8nInstructions(id,config);
+          if(synced.recreated)activationWarning='The missing AI Agent workflow was recreated.';
         }
+        await ensureN8nReplyWorkflow(id,'agentic');
+        let standardWorkflowUnpublished=false,standardWorkflowMissing=false;
+        try{const result=await unpublishOtherN8nReplyWorkflow(id,'agentic');standardWorkflowUnpublished=result.unpublished;standardWorkflowMissing=result.missing;}
+        catch(error){return send(res,error.status||502,{message:'Failed to unpublish standard n8n workflow: '+(error.message||'Unknown error')});}
         const subscription=store.automationSubscriptions.find(item=>item.accountId===id&&item.name==='n8n auto-connect (AI Agent)');
         if(subscription)subscription.enabled=true;
-        // Mutual exclusivity: native and the n8n AI Agent are the same reply, twice.
+        // One inbound event has one automatic reply handler.
         disableTheOtherAiReplyPath(id,'agentic');
+        const standardRepliesDisabled=disableStandardN8nReplies(id);
         await persist();
-        return send(res,200,{ok:true,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,activationWarning});
+        return send(res,200,{ok:true,workflowId:connection.workflowId,workflowName:connection.workflowName,workflowUrl:`${connection.n8nUrl}/workflow/${connection.workflowId}`,activationWarning,standardRepliesDisabled,standardWorkflowUnpublished,standardWorkflowMissing});
       }catch(error){return send(res,error.status||502,{message:'Failed to enable n8n AI Agent replies: '+(error.message||'Unknown error')});}
     })();
     n8nConnectLocks.set(lockKey,attempt);
