@@ -6,7 +6,7 @@ import { randomBytes, scryptSync, timingSafeEqual, createHash, createCipheriv, c
 import { DatabaseSync } from 'node:sqlite';
 import { createProviderClient } from './src/providers/index.mjs';
 import { WebSocketServer } from 'ws';
-import { chatTimestamp, extractMentionIds, hasMessageContent, mentionsIdentity, resolveMentionLabels } from './src/domain/message.mjs';
+import { chatTimestamp, extractMentionIds, hasMessageContent, mentionsIdentity, resolveMentionLabels, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from './src/domain/message.mjs';
 import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
 import { createBoundedCache } from './src/lib/lru-cache.mjs';
 import { decodeHtmlEntities } from './src/lib/html.mjs';
@@ -283,12 +283,12 @@ async function enrichChatOverview(session,view){
 // digits against the message's own contextInfo.mentionedJid list where
 // possible; falling back to a bare-number WhatsApp jid otherwise.
 async function resolveContactByNumber(session,number,mentionedJids=[]){
-  const jid=mentionedJids.find(candidate=>String(candidate||'').replace(/@.*$/,'').replace(/^0+/,'')===number.replace(/^0+/,''))||`${number}@s.whatsapp.net`;
+  const jid=mentionedJids.find(candidate=>bareJidUser(candidate).replace(/^0+/,'')===number.replace(/^0+/,''))||`${number}@s.whatsapp.net`;
   return resolveContact(session,jid);
 }
 async function resolveContact(session,rawId){
   let contactId=String(rawId||'');
-  if(contactId.endsWith('@lid'))contactId=provider.resolveLid(session,contactId);
+  if(isLidJid(contactId))contactId=provider.resolveLid(session,contactId);
   return provider.getContact(session,contactId);
 }
 // A chat/contact picture that isn't already cached costs a live WhatsApp
@@ -363,7 +363,7 @@ const N8N_REPLY_SUBSCRIPTION_NAMES=new Set(['n8n auto-connect','n8n auto-connect
 async function dispatchAutomationEvent(payload){
   const {accountId,chatId,message}=payload;
   if(!accountId||!chatId)return;
-  const kind=chatId.endsWith("@g.us")?"group":"direct";
+  const kind=isGroupChatId(chatId)?"group":"direct";
   // A message with no body, text, or media isn't real content (a metadata
   // touch, a call/group system event) — don't fire an AI reply or automation
   // for it either way.
@@ -757,13 +757,13 @@ function normalizedPreviewImage(value){
 async function enrichMessage(session,view){
   if(view.sender?.id){
     const resolved=await resolveContact(session,view.sender.id);
-    view={...view,sender:{...view.sender,id:resolved.id||view.sender.id,name:resolved.name||view.sender.name||String(resolved.id||view.sender.id).replace(/@(c|s|g)\.us$/,''),picture:resolved.picture||view.sender.picture||null}};
+    view={...view,sender:{...view.sender,id:resolved.id||view.sender.id,name:resolved.name||view.sender.name||bareJidUser(resolved.id||view.sender.id),picture:resolved.picture||view.sender.picture||null}};
   }
   if(view.linkPreview)view={...view,linkPreview:{...view.linkPreview,image:normalizedPreviewImage(view.linkPreview.image)}};
   const rawMentionIds=Array.isArray(view.mentionedJids)?view.mentionedJids:[];
   if(rawMentionIds.length){
     const ownJid=provider.getAccount(session)?.ownJid||'';
-    view={...view,mentions:(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId));const id=contact.id||String(rawId);const ownNumber=ownJid.replace(/@.*$/,''),mentionNumber=id.replace(/@.*$/,'');return {id,name:contact.name||mentionNumber,isMe:Boolean(ownJid&&(id===ownJid||mentionNumber===ownNumber))}}))).filter(mention=>mention.name)};
+    view={...view,mentions:(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId));const id=contact.id||String(rawId);return {id,name:contact.name||bareJidUser(id),isMe:isSameIdentity(id,ownJid)}}))).filter(mention=>mention.name)};
   }
   const body=String(view.body||view.text||'');
   // A mention inside the *quoted* text (replyTo.body) was never resolved —
@@ -773,7 +773,7 @@ async function enrichMessage(session,view){
   const mentionIds=extractMentionIds(body,replyBody);
   if(mentionIds.length){
     const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id,rawMentionIds)]));
-    const labels=new Map(contacts.map(([id,contact])=>[id,contact?.name||String(contact?.id||'').replace(/@(c|s|g)\.us$/,'')]).filter(([,label])=>label));
+    const labels=new Map(contacts.map(([id,contact])=>[id,contact?.name||bareJidUser(contact?.id||'')]).filter(([,label])=>label));
     view={...view,body:resolveMentionLabels(body,labels),text:resolveMentionLabels(body,labels),replyTo:view.replyTo?{...view.replyTo,body:resolveMentionLabels(replyBody,labels)}:view.replyTo};
   }
   return view;

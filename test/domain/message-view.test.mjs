@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, resolveMentionLabels } from '../../src/domain/message.mjs';
+import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, resolveMentionLabels, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../src/domain/message.mjs';
 
 const ctx = { accountId: 'account-fixture', chatId: '551199999999@s.whatsapp.net' };
 const fixture = name => readFile(fileURLToPath(new URL(`../fixtures/providers/baileys/${name}`, import.meta.url)), 'utf8').then(JSON.parse);
@@ -138,6 +138,37 @@ test('mentionsIdentity is false when the mention list is empty, missing the acco
   assert.equal(mentionsIdentity(['5511000000000@s.whatsapp.net'], '5511999999999@s.whatsapp.net'), false);
   assert.equal(mentionsIdentity(['5511999999999@s.whatsapp.net'], ''), false, 'an unresolved own identity must never be treated as a match');
   assert.equal(mentionsIdentity(undefined, '5511999999999@s.whatsapp.net'), false);
+});
+
+test('bareJidUser strips any JID domain via Baileys\' own decoder, not a hand-rolled suffix pattern', () => {
+  assert.equal(bareJidUser('5511999999999@s.whatsapp.net'), '5511999999999');
+  assert.equal(bareJidUser('120363000000000000@g.us'), '120363000000000000');
+  assert.equal(bareJidUser('123456789012345@lid'), '123456789012345');
+  assert.equal(bareJidUser('5511999999999:2@s.whatsapp.net'), '5511999999999', 'a device suffix must not leak into the bare user');
+  assert.equal(bareJidUser(''), '', 'an empty/missing jid must not throw');
+});
+
+test('isGroupChatId classifies group JIDs and rejects everything else', () => {
+  assert.equal(isGroupChatId('120363000000000000@g.us'), true);
+  assert.equal(isGroupChatId('5511999999999@s.whatsapp.net'), false);
+  assert.equal(isGroupChatId(''), false);
+});
+
+test('isLidJid classifies @lid JIDs and rejects everything else', () => {
+  assert.equal(isLidJid('123456789012345@lid'), true);
+  assert.equal(isLidJid('5511999999999@s.whatsapp.net'), false);
+  assert.equal(isLidJid(''), false);
+});
+
+test('isSameIdentity matches the same user across a device suffix, and rejects an unrelated identity', () => {
+  assert.equal(isSameIdentity('5511999999999@s.whatsapp.net', '5511999999999@s.whatsapp.net'), true);
+  assert.equal(isSameIdentity('5511999999999:2@s.whatsapp.net', '5511999999999@s.whatsapp.net'), true, 'a device suffix must not break the match — this is exactly what areJidsSameUser exists for');
+  // A LID is an opaque identifier, not the phone number itself — with a
+  // genuinely unrelated digit string (the realistic case), a LID and a
+  // phone number correctly do not match.
+  assert.equal(isSameIdentity('123456789012345@lid', '5511999999999@s.whatsapp.net'), false);
+  assert.equal(isSameIdentity('', '5511999999999@s.whatsapp.net'), false);
+  assert.equal(isSameIdentity('5511999999999@s.whatsapp.net', ''), false);
 });
 
 test('messageView maps a missed-call stub message to a system "call" view', () => {
