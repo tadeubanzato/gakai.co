@@ -1,6 +1,6 @@
 import React,{useCallback,useEffect,useMemo,useRef,useState}from"react";
 import{runExclusive,api}from"./app-helpers.mjs";
-import{Avatar}from"./ui-helpers.jsx";
+import{Avatar,IconLogout}from"./ui-helpers.jsx";
 import{createRoot}from"react-dom/client";
 import{ChatPanel}from"./chat.jsx";
 import{ConfirmHost,confirmDialog}from"./confirm.jsx";
@@ -359,7 +359,7 @@ function App(){
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);
   useEffect(()=>{suppressAutoSelectRef.current=false;setChat();setChats(chatsCacheRef.current.get(account?.id)||[]);if(account?.status==="WORKING")load(account.id)},[account?.id,account?.status,load]);
 
-  const logout=async()=>{if(!await confirmDialog({title:"Log off admin account?",message:"You'll need your administrator username and password to sign back in.",confirmLabel:"Log off"}))return;await api("/api/app/auth/logout",{method:"POST"}).catch(()=>{});window.location.assign("/")};
+  const logout=async()=>{if(!await confirmDialog({title:"Log off?",message:"You'll need your administrator username and password to sign back in.",confirmLabel:"Log off"}))return;await api("/api/app/auth/logout",{method:"POST"}).catch(()=>{});window.location.assign("/")};
   
   const visible=useMemo(()=>chats.filter(x=>(String(x.name||x.id)+" "+String(x.lastMessage?.body||x.lastMessage?.text||"")).toLowerCase().includes(q.toLowerCase())),[chats,q]);
 
@@ -487,12 +487,12 @@ function App(){
               {accounts.map(a=><option key={a.id} value={a.id}>{a.label} {a.status==="WORKING"?"✓":""}</option>)}
             </select>}
           </div>
-          <button type="button" className="logout subtle-btn" onClick={logout}>Log off admin account</button>
+          <button type="button" className="logout subtle-btn" onClick={logout}><IconLogout/> Log off</button>
         </aside>
         <main className="main">
           <header>
             <div><h2>Inbox</h2><small>{account?.label} · {status(account?.status)}</small></div>
-            <button type="button" className="subtle-btn" onClick={beginPairing}>+ Add new WhatsApp account</button>
+            <button type="button" className="subtle-btn" onClick={beginPairing}>+ Add account</button>
           </header>
           {account?.status!=="WORKING"?<div className="empty"><div><h1>Account needs attention</h1><p>Reconnect this account to continue.</p><button className="primary" onClick={()=>{setPairCreated(false);setPair(account)}}>Reconnect with QR code</button></div></div>:<div className="inbox">
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>

@@ -12,6 +12,24 @@ function avatarSrc(value) {
   return /^https?:\/\//i.test(picture) ? `/api/app/link-image?url=${encodeURIComponent(picture)}` : null;
 }
 
+// Small monochrome inline icons (inherit the button's text color via
+// currentColor). Kept as inline SVG rather than an icon font/library so they
+// stay self-contained and render identically everywhere.
+export function IconSend({ className = "btn-icon" }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+      <path fill="currentColor" d="M3.3 20.6l18-8a1 1 0 0 0 0-1.83l-18-8A1 1 0 0 0 2 3.9l1.6 6.7a1 1 0 0 0 .82.76L13 12.6l-8.58 1.24a1 1 0 0 0-.82.76L2 20.3a1 1 0 0 0 1.3 1.3z"/>
+    </svg>
+  );
+}
+export function IconLogout({ className = "btn-icon" }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+      <path fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" d="M14 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4M9 16l-4-4 4-4M5 12h9"/>
+    </svg>
+  );
+}
+
 // Shared avatar for both the sidebar/inbox (account or chat `item`) and
 // per-message sender avatars (`picture`/`label`/`className`). Passing an
 // `item` reads its `name`/`label` and `picture`; otherwise `picture` and
