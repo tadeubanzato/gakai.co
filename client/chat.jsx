@@ -122,7 +122,13 @@ function LinkPreview({ body, preview }) {
     url: preview?.url || url,
     title: preview?.title || fetched?.title || null,
     description: preview?.description || fetched?.description || null,
-    image: preview?.image || fetched?.image || null
+    // WhatsApp's own embedded preview.image is a tiny (often ~90x90px)
+    // thumbnail meant to keep the message payload light — Instagram's own
+    // og:image (what instagram-preview fetches) is far higher resolution.
+    // Prefer that fetched scrape for Instagram; fall back to WhatsApp's
+    // thumbnail only if the scrape hasn't landed yet or failed. Every other
+    // site keeps preview.image first, same as before.
+    image: (instagram ? fetched?.image : null) || preview?.image || fetched?.image || null
   };
   const imageUrl = typeof data.image === "string" ? data.image : data.image?.href || null;
   const hasContent = data.title || data.description || data.image;
@@ -130,7 +136,11 @@ function LinkPreview({ body, preview }) {
     const text = String(value || "").replace(/&#x([\da-f]+);/gi, (_match, code) => String.fromCodePoint(parseInt(code, 16))).replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code))).replace(/&(quot|apos|amp|lt|gt);/gi, (_match, entity) => ({quot:'"',apos:"'",amp:'&',lt:'<',gt:'>'})[entity.toLowerCase()]).replace(/\s+/g, " ").trim();
     return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text;
   };
-  const image = /^data:image\//i.test(String(imageUrl || "")) ? imageUrl : imageUrl ? `${instagram ? "/api/app/instagram-image" : "/api/app/link-image"}?url=${encodeURIComponent(imageUrl)}` : null;
+  // Instagram's own og:image links carry a short-lived signed expiry, unlike
+  // the page URL — so route through the page URL and let the server resolve
+  // (and, if needed, re-scrape) a currently-valid image link server-side,
+  // rather than handing it a CDN link that may already be stale.
+  const image = /^data:image\//i.test(String(imageUrl || "")) ? imageUrl : imageUrl ? (instagram ? `/api/app/instagram-image?url=${encodeURIComponent(url)}` : `/api/app/link-image?url=${encodeURIComponent(imageUrl)}`) : null;
   const previewImage = image && <img src={image} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(event) => {
     const imageNode=event.currentTarget;
     if (!instagram && !imageNode.dataset.directFallback && imageUrl) { imageNode.dataset.directFallback="true"; imageNode.src=imageUrl; return; }
