@@ -447,7 +447,8 @@ function App(){
       return next;
     });
     setChat(current=>current?.id===chatId?undefined:current);
-  },[account]);
+    fail("Conversation deleted");
+  },[account,fail]);
 
   if(!auth)return <main className="pairing">Loading Gakai…</main>;
   if(!auth.authenticated)return <Login setup={!!auth.setup} done={()=>location.reload()} fail={fail}/>;
@@ -485,12 +486,12 @@ function App(){
               {accounts.map(a=><option key={a.id} value={a.id}>{a.label} {a.status==="WORKING"?"✓":""}</option>)}
             </select>}
           </div>
-          <button type="button" className="logout" onClick={logout}>Log off</button>
+          <button type="button" className="logout subtle-btn" onClick={logout}>Log off admin account</button>
         </aside>
         <main className="main">
           <header>
             <div><h2>Inbox</h2><small>{account?.label} · {status(account?.status)}</small></div>
-            <button className="primary" onClick={beginPairing}>+ Connect account</button>
+            <button type="button" className="subtle-btn" onClick={beginPairing}>+ Add new WhatsApp account</button>
           </header>
           {account?.status!=="WORKING"?<div className="empty"><div><h1>Account needs attention</h1><p>Reconnect this account to continue.</p><button className="primary" onClick={()=>{setPairCreated(false);setPair(account)}}>Reconnect with QR code</button></div></div>:<div className="inbox">
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>

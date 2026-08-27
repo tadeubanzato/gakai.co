@@ -530,7 +530,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     <header className="conversation-head">
       {onBack && <button type="button" className="back" onClick={onBack} aria-label="Back to conversations">‹</button>}
       <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small>Chat ID: {chatId || "Unavailable"}</small></span>
-      <button type="button" className="conversation-delete" onClick={deleteConversation} disabled={deleting}>{deleting ? "Deleting…" : "Delete"}</button>
+      <button type="button" className="conversation-delete" onClick={deleteConversation} disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</button>
     </header>
     <div className="messages" ref={paneRef} onScroll={maybeLoadOlder}>
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
