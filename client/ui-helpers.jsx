@@ -18,7 +18,7 @@ function avatarSrc(value) {
 export function IconSend({ className = "btn-icon" }) {
   return (
     <svg className={className} viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
-      <path fill="currentColor" d="M3.3 20.6l18-8a1 1 0 0 0 0-1.83l-18-8A1 1 0 0 0 2 3.9l1.6 6.7a1 1 0 0 0 .82.76L13 12.6l-8.58 1.24a1 1 0 0 0-.82.76L2 20.3a1 1 0 0 0 1.3 1.3z"/>
+      <path fill="currentColor" d="M2.5 4.5 L21.5 12 L2.5 19.5 L5.7 12 Z" />
     </svg>
   );
 }
