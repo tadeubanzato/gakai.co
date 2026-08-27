@@ -305,6 +305,14 @@ textarea {
   color:var(--ink);
   padding:10px;
 }
+.composer textarea {
+  /* Auto-grows with content (JS sets the height) up to ~5 lines, then holds
+     that height and scrolls internally. */
+  line-height:1.4;
+  min-height:42px;
+  max-height:124px;
+  overflow-y:auto;
+}
 
 /* Empty / blank states */
 .blank,.empty {
