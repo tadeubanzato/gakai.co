@@ -1375,4 +1375,28 @@ readdir(sessionsDir,{withFileTypes:true}).then(entries=>Promise.all(
   entries.filter(entry=>entry.isDirectory()).map(entry=>provider.startAccount(entry.name,{label:store.accountLabels[entry.name]}).catch(error=>console.error(`Failed to reconnect account ${entry.name}:`,error.message)))
 )).catch(error=>console.error('Failed to read sessions directory:',error.message));
 
+// Baileys persists each account's credentials with a plain, non-atomic
+// fs.writeFile (no write-then-rename — see @whiskeysockets/baileys'
+// useMultiFileAuthState) and its read path silently discards anything that
+// fails to parse, falling back to a brand-new *unregistered* identity with
+// no warning logged. With no signal handler at all, Node's default SIGTERM
+// behavior is to terminate immediately — so a container restart landing
+// mid-write can truncate creds.json, and the next boot silently overwrites
+// the real credentials with a blank identity, unlinking WhatsApp. Merely
+// registering a handler already replaces that immediate-terminate default;
+// the delay below then gives a write already in flight when the signal
+// arrived room to actually finish before the process exits.
+let shuttingDown=false;
+async function shutdown(signal){
+  if(shuttingDown)return;shuttingDown=true;
+  console.log(`${signal} received, shutting down gracefully…`);
+  const forceExit=setTimeout(()=>{console.error('Graceful shutdown timed out; forcing exit');process.exit(1);},8000);
+  forceExit.unref();
+  try{await provider.shutdown();}catch(error){console.error('Provider shutdown failed:',error.message);}
+  await new Promise(resolve=>setTimeout(resolve,500));
+  server.close(()=>{clearTimeout(forceExit);process.exit(0);});
+}
+process.on('SIGTERM',()=>{shutdown('SIGTERM')});
+process.on('SIGINT',()=>{shutdown('SIGINT')});
+
 export { server, readBody, store, sessions, buildN8nWorkflowGraph, sendAutomationReply, describeWebhookFailure, provider, dispatchAutomationEvent };

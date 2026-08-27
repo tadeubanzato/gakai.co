@@ -181,7 +181,13 @@ function App(){
       const d=await api("/api/app/accounts"),a=d.accounts||[];
       if(accountsRequestRef.current!==version)return;
       const requestedDetails=detailsSlug(),requestedAccount=requestedDetails?a.find(item=>slug(item.label)===requestedDetails||slug(item.id)===requestedDetails):null;setAccounts(a);if(requestedAccount){setAccount(requestedAccount);if(requestedAccount.status!=="WORKING"){history.replaceState({},"","/");setSettings(false);setPairCreated(false);setPair(requestedAccount)}else setSettings(true)}else setAccount(old=>a.find(x=>x.id===old?.id)||a.find(x=>x.status==="WORKING")||a[0])
-    }catch(x){if(accountsRequestRef.current===version)fail(x.message)}finally{if(accountsRequestRef.current===version)setAccountsReady(true)}
+      // Only a genuinely successful read may mark accounts "ready" — the
+      // auto-pair effect below treats accountsReady+zero accounts as "this
+      // is a brand-new workspace" and auto-creates one. A failed fetch (the
+      // server briefly unreachable during a restart, say) must never be
+      // read as proof the workspace has zero accounts.
+      setAccountsReady(true);
+    }catch(x){if(accountsRequestRef.current===version)fail(x.message)}
   },[fail]);
 
   const load=useCallback(async id=>{
