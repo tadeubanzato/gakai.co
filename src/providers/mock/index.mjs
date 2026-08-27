@@ -15,12 +15,14 @@ export function createMockProvider({ onEvent } = {}) {
   const messages = new Map(); // accountId -> Map(chatId -> message[] sorted by timestamp asc)
   const contacts = new Map(); // accountId -> Map(contactId -> contact)
   const reactions = new Map(); // accountId -> Map(messageId -> reaction)
-  const sent = []; // {accountId, chatId, text, quotedMessageId}
+  const groupParticipants = new Map(); // accountId -> Map(chatId -> participant[])
+  const sent = []; // {accountId, chatId, text, quotedMessageId, mentions}
 
   const chatsFor = accountId => { if (!chats.has(accountId)) chats.set(accountId, new Map()); return chats.get(accountId); };
   const messagesFor = accountId => { if (!messages.has(accountId)) messages.set(accountId, new Map()); return messages.get(accountId); };
   const contactsFor = accountId => { if (!contacts.has(accountId)) contacts.set(accountId, new Map()); return contacts.get(accountId); };
   const reactionsFor = accountId => { if (!reactions.has(accountId)) reactions.set(accountId, new Map()); return reactions.get(accountId); };
+  const groupParticipantsFor = accountId => { if (!groupParticipants.has(accountId)) groupParticipants.set(accountId, new Map()); return groupParticipants.get(accountId); };
 
   async function startAccount(id, { label } = {}) {
     if (!accounts.has(id)) accounts.set(id, { id, status: 'WORKING', phone: null, profile: label || null, ownJid: `${id}@s.whatsapp.net` });
@@ -34,9 +36,9 @@ export function createMockProvider({ onEvent } = {}) {
   function getAccount(id) { return accounts.get(id) || null; }
   async function getQr() { return null; }
 
-  async function sendText(accountId, chatId, text, { quotedMessageId } = {}) {
-    sent.push({ accountId, chatId, text, quotedMessageId: quotedMessageId || null });
-    const message = { id: `mock-sent-${sent.length}`, timestamp: Math.floor(Date.now() / 1000), fromMe: true, body: text, text, hasMedia: false, media: null, mediaUrl: null, system: null, replyTo: null, sender: null, mentionedJids: [] };
+  async function sendText(accountId, chatId, text, { quotedMessageId, mentions } = {}) {
+    sent.push({ accountId, chatId, text, quotedMessageId: quotedMessageId || null, mentions: Array.isArray(mentions) ? mentions : [] });
+    const message = { id: `mock-sent-${sent.length}`, timestamp: Math.floor(Date.now() / 1000), fromMe: true, body: text, text, hasMedia: false, media: null, mediaUrl: null, system: null, replyTo: null, sender: null, mentionedJids: Array.isArray(mentions) ? mentions : [] };
     seedMessage(accountId, chatId, message);
     return message;
   }
@@ -60,11 +62,12 @@ export function createMockProvider({ onEvent } = {}) {
   async function subscribePresence() {}
   async function publishPresence() {}
 
-  async function getContact(accountId, contactId) {
+  async function getContact(accountId, contactId, _opts) {
     return contactsFor(accountId).get(contactId) || { id: contactId, phone: null, name: null, picture: null };
   }
   function getContacts(accountId) { return [...contactsFor(accountId).values()]; }
   function resolveLid(accountId, lid) { return lid; }
+  async function getGroupParticipants(accountId, chatId) { return [...(groupParticipantsFor(accountId).get(chatId) || [])]; }
 
   // Mirrors the real Baileys manager's contract: getChatsOverview always
   // returns the final, already-normalized Gakai view model, never a raw
@@ -108,6 +111,7 @@ export function createMockProvider({ onEvent } = {}) {
     }
   }
   function seedContact(accountId, contact) { contactsFor(accountId).set(contact.id, contact); }
+  function seedGroupParticipants(accountId, chatId, participants) { groupParticipantsFor(accountId).set(chatId, participants); }
   // Simulates a live inbound WhatsApp message the same way a real
   // messages.upsert('notify') event would — stores it and, unless it's a
   // fromMe echo, fires the same onEvent('message', ...) callback server.mjs
@@ -126,9 +130,9 @@ export function createMockProvider({ onEvent } = {}) {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
     sendText, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
-    getContact, getContacts, resolveLid,
+    getContact, getContacts, resolveLid, getGroupParticipants,
     getChatsOverview, getMessages, getMessage, downloadMedia,
     shutdown,
-    __test: { seedAccount, seedChat, seedMessage, seedContact, simulateIncomingMessage, getSentMessages, getReaction },
+    __test: { seedAccount, seedChat, seedMessage, seedContact, seedGroupParticipants, simulateIncomingMessage, getSentMessages, getReaction },
   };
 }

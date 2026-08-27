@@ -266,17 +266,19 @@ async function accountView(s){
 }
 // The inbox list's "last message" preview can contain an unresolved
 // @<number> mention — resolve it the same way a full message body does.
-async function enrichChatOverview(session,view){
+async function enrichChatOverview(session,view,{pictures=true}={}){
   // Baileys never delivers a picture on a chat-sync event (unlike the old
   // provider, which resolved and attached one itself) — the only way to get
   // one is a live per-jid profilePictureUrl() lookup, same call whether the
   // chat is a 1:1 contact or a group. resolveContact() already does that
-  // fetch-and-cache for message-sender avatars; reuse it here.
-  if(!view.picture&&view.id){const contact=await resolveContact(session,view.id);if(contact.picture)view={...view,picture:contact.picture}}
+  // fetch-and-cache for message-sender avatars; reuse it here. `pictures:false`
+  // is the inbox's first paint: use a cached picture if the store already has
+  // one, but never make the live call — the list text must not wait on it.
+  if(!view.picture&&view.id){const contact=await resolveContact(session,view.id,pictures?undefined:{namesOnly:true});if(contact.picture)view={...view,picture:contact.picture}}
   if(view.lastMessage){
     const mentionIds=extractMentionIds(view.lastMessage.body,view.lastMessage.text);
     if(mentionIds.length){
-      const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id)]));
+      const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id,[],{namesOnly:true})]));
       const labels=new Map(contacts.map(([id,contact])=>[id,contact?.name]).filter(([,label])=>label));
       view={...view,lastMessage:{...view.lastMessage,body:resolveMentionLabels(view.lastMessage.body,labels),text:resolveMentionLabels(view.lastMessage.text,labels)}};
     }
@@ -287,14 +289,14 @@ async function enrichChatOverview(session,view){
 // but Baileys keys contacts/pictures by full JID — resolve by matching the
 // digits against the message's own contextInfo.mentionedJid list where
 // possible; falling back to a bare-number WhatsApp jid otherwise.
-async function resolveContactByNumber(session,number,mentionedJids=[]){
+async function resolveContactByNumber(session,number,mentionedJids=[],opts){
   const jid=mentionedJids.find(candidate=>bareJidUser(candidate).replace(/^0+/,'')===number.replace(/^0+/,''))||`${number}@s.whatsapp.net`;
-  return resolveContact(session,jid);
+  return resolveContact(session,jid,opts);
 }
-async function resolveContact(session,rawId){
+async function resolveContact(session,rawId,opts){
   let contactId=String(rawId||'');
   if(isLidJid(contactId))contactId=provider.resolveLid(session,contactId);
-  return provider.getContact(session,contactId);
+  return provider.getContact(session,contactId,opts);
 }
 // A chat/contact picture that isn't already cached costs a live WhatsApp
 // request (see enrichChatOverview) — cap how many of those run at once so a
@@ -375,15 +377,18 @@ async function dispatchAutomationEvent(payload){
   if(!message.body&&!message.text&&!message.hasMedia)return;
   const chat={id:chatId,kind,name:null};
   if(message.sender?.id){const contact=await resolveContact(accountId,message.sender.id);message.sender={...message.sender,phone:contact.phone||null,name:message.sender.name||contact.name||null};if(kind==="direct")chat.phone=contact.phone||null;}
-  const event={id:`evt_${message.id}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
+  // Whether this account was explicitly @-tagged in a group. A direct message
+  // is not a "mention" (the whole message is already for you) — the browser
+  // uses this flag to raise a mention toast, so it must mean the narrow thing.
+  const mentionsYou=kind==="group"&&Array.isArray(message.mentionedJids)&&message.mentionedJids.length
+    ?mentionsIdentity(message.mentionedJids,provider.getAccount(accountId)?.ownJid)
+    :false;
+  const event={id:`evt_${message.id}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,mentionsYou,source:"whatsapp"};
   // Persist before notifying the browser or downstream automation. This gives
   // reconnecting clients a small durable replay window and avoids exposing raw
   // provider payloads outside the adapter boundary.
   if (!recordAppEvent(event)) return;
-  let ownMentioned=kind==="direct";
-  if(!ownMentioned&&Array.isArray(message.mentionedJids)&&message.mentionedJids.length){
-    ownMentioned=mentionsIdentity(message.mentionedJids,provider.getAccount(accountId)?.ownJid);
-  }
+  const ownMentioned=kind==="direct"||mentionsYou;
   const nativeEnabled=Boolean(llmConfig(accountId)?.nativeEnabled);
   // Native mode is intentionally a hard boundary for Gakai-managed n8n
   // reply templates. This also protects an account that has stale persisted
@@ -875,15 +880,19 @@ function normalizedPreviewImage(value){
   // provider process whose reachability readiness needs to confirm.
   if (req.method === 'GET' && url.pathname === '/readyz') return send(res, 200, {ok:true, service:'gakai', provider:true});
 async function enrichMessage(session,view){
+  // namesOnly: never make a live profilePictureUrl() call while shaping a
+  // message page — a group page has a sender (and often mentions) on every
+  // row, and blocking each on a WhatsApp round-trip is what made opening a
+  // chat slow. Sender avatars are hydrated afterwards (client -> /chats/pictures).
   if(view.sender?.id){
-    const resolved=await resolveContact(session,view.sender.id);
+    const resolved=await resolveContact(session,view.sender.id,{namesOnly:true});
     view={...view,sender:{...view.sender,id:resolved.id||view.sender.id,name:resolved.name||view.sender.name||bareJidUser(resolved.id||view.sender.id),picture:resolved.picture||view.sender.picture||null}};
   }
   if(view.linkPreview)view={...view,linkPreview:{...view.linkPreview,image:normalizedPreviewImage(view.linkPreview.image)}};
   const rawMentionIds=Array.isArray(view.mentionedJids)?view.mentionedJids:[];
   if(rawMentionIds.length){
     const ownJid=provider.getAccount(session)?.ownJid||'';
-    view={...view,mentions:(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId));const id=contact.id||String(rawId);return {id,name:contact.name||bareJidUser(id),isMe:isSameIdentity(id,ownJid)}}))).filter(mention=>mention.name)};
+    view={...view,mentions:(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId),{namesOnly:true});const id=contact.id||String(rawId);return {id,name:contact.name||bareJidUser(id),isMe:isSameIdentity(id,ownJid)}}))).filter(mention=>mention.name)};
   }
   const body=String(view.body||view.text||'');
   // A mention inside the *quoted* text (replyTo.body) was never resolved —
@@ -892,7 +901,7 @@ async function enrichMessage(session,view){
   const replyBody=String(view.replyTo?.body||'');
   const mentionIds=extractMentionIds(body,replyBody);
   if(mentionIds.length){
-    const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id,rawMentionIds)]));
+    const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id,rawMentionIds,{namesOnly:true})]));
     const labels=new Map(contacts.map(([id,contact])=>[id,contact?.name||bareJidUser(contact?.id||'')]).filter(([,label])=>label));
     view={...view,body:resolveMentionLabels(body,labels),text:resolveMentionLabels(body,labels),replyTo:view.replyTo?{...view.replyTo,body:resolveMentionLabels(replyBody,labels)}:view.replyTo};
   }
@@ -1069,11 +1078,25 @@ async function enrichMessage(session,view){
       return send(res,200,{ok:true});
     }
   }
+  if (req.method==='GET' && parts[4]==='chats' && parts[5] && parts[6]==='participants') {
+    const chatId=decodeURIComponent(parts[5]);
+    return send(res,200,{participants:await provider.getGroupParticipants(id,chatId)});
+  }
+  // The inbox avatars, fetched lazily after the list text has already painted.
+  // Each miss is a live WhatsApp profilePictureUrl() call, so this is
+  // concurrency-capped and the client asks for them in small batches.
+  if (req.method==='GET' && parts[4]==='chats' && parts[5]==='pictures') {
+    const ids=String(url.searchParams.get('ids')||'').split(',').map(value=>value.trim()).filter(Boolean).slice(0,80);
+    const entries=await mapWithConcurrency(ids,4,async jid=>{try{const contact=await resolveContact(id,jid);return [jid,contact.picture||null]}catch{return [jid,null]}});
+    return send(res,200,{pictures:Object.fromEntries(entries.filter(([,pictureUrl])=>pictureUrl))});
+  }
   if (req.method==='GET' && parts[4]==='chats') {
     const chats=await provider.getChatsOverview(id);
     const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
     const recent=chats.filter(chat=>hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
-    return send(res,200,(await mapWithConcurrency(recent,3,chat=>enrichChatOverview(id,chat))).sort((a,b) => b.timestamp - a.timestamp));
+    // pictures:false — the list must not block on a burst of avatar lookups;
+    // the client hydrates them separately via /chats/pictures.
+    return send(res,200,(await mapWithConcurrency(recent,8,chat=>enrichChatOverview(id,chat,{pictures:false}))).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
   if (req.method==='GET' && parts[4]==='messages') {
@@ -1106,7 +1129,8 @@ async function enrichMessage(session,view){
   }
   if (req.method==='POST' && parts[4]==='messages') {
     const input=await readBody(req),replyTo=input.replyTo?String(input.replyTo):null; if (!input.chatId || !input.text?.trim()) return send(res,400,{message:'Recipient and message are required'});
-    const sent=await provider.sendText(id,input.chatId,input.text.trim(),{quotedMessageId:replyTo});
+    const mentions=Array.isArray(input.mentions)?input.mentions.filter(jid=>typeof jid==='string'&&jid.length<=128).slice(0,32):[];
+    const sent=await provider.sendText(id,input.chatId,input.text.trim(),{quotedMessageId:replyTo,mentions});
     return send(res,200,{message:await enrichMessage(id,sent)});
   }
   if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req),label=String(input.label||'').trim().slice(0,80);if(!label)return send(res,400,{message:'Account name is required'});store.accountLabels[id]=label;await persist();return send(res,200,{ok:true,label});}

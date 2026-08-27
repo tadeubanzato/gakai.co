@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
-import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, bareJidUser } from '../../domain/message.mjs';
+import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
 
@@ -35,6 +35,11 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   // ever persists a truthy result. This remembers a negative result for a
   // while so a photo-less chat doesn't cost a live request on every poll.
   const noPictureCache = createBoundedCache({ limit: 2000, ttlMs: 30 * 60 * 1000 });
+  // Group participant lists back the composer's @-mention menu. groupMetadata
+  // is a live WhatsApp request, so a short TTL cache keeps typing "@" in a
+  // busy group from fanning out one request per keystroke while still picking
+  // up membership changes within a few minutes.
+  const groupParticipantsCache = createBoundedCache({ limit: 500, ttlMs: 5 * 60 * 1000 });
 
   const accountDir = accountId => join(sessionsDir, accountId);
 
@@ -200,10 +205,11 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return entry;
   }
 
-  async function sendText(accountId, chatId, text, { quotedMessageId } = {}) {
+  async function sendText(accountId, chatId, text, { quotedMessageId, mentions } = {}) {
     const { sock } = requireSocket(accountId);
     const quoted = quotedMessageId ? store.getMessageById(accountId, chatId, quotedMessageId) : null;
-    const sent = await sock.sendMessage(chatId, { text }, quoted ? { quoted } : undefined);
+    const content = Array.isArray(mentions) && mentions.length ? { text, mentions } : { text };
+    const sent = await sock.sendMessage(chatId, content, quoted ? { quoted } : undefined);
     const normalized = messageView(sent, { accountId, chatId });
     store.upsertMessages(accountId, [{ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: sent, overviewMessage: overviewFromMessage(normalized) }]);
     return normalized;
@@ -260,12 +266,16 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     await sock.sendPresenceUpdate(PRESENCE_TO_WA[presence] || 'paused', chatId).catch(() => {});
   }
 
-  async function getContact(accountId, contactId) {
+  // `namesOnly` skips the live profilePictureUrl() lookup and returns just
+  // whatever name/phone/picture is already in the local store — the inbox
+  // list's first paint uses this so it never blocks on ~40 WhatsApp
+  // round-trips; the picture is then filled in lazily (getChatPictures).
+  async function getContact(accountId, contactId, { namesOnly = false } = {}) {
     const cached = store.getContact(accountId, contactId);
     const entry = accounts.get(accountId);
     const cacheKey = `${accountId}:${contactId}`;
     let picture = cached?.picture || null;
-    if (!picture && entry && !noPictureCache.get(cacheKey)) {
+    if (!namesOnly && !picture && entry && !noPictureCache.get(cacheKey)) {
       picture = (await entry.sock.profilePictureUrl(contactId, 'preview').catch(() => null)) || null;
       if (picture) store.setContactPicture(accountId, contactId, picture);
       else noPictureCache.set(cacheKey, true);
@@ -279,6 +289,40 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   }
 
   function getContacts(accountId) { return store.getContacts(accountId); }
+
+  // The @-mention menu's data source. Returns the other members of a group
+  // chat as { id (jid), name, number }, where `number` is the bare digits the
+  // composer writes into the message text as "@<number>" and `id` is the jid
+  // Baileys expects in the outbound `mentions` array. The account's own entry
+  // is filtered out — you don't mention yourself. Non-groups and any failure
+  // return [] so the composer simply shows no menu.
+  async function getGroupParticipants(accountId, chatId) {
+    if (!isGroupChatId(chatId)) return [];
+    const cacheKey = `${accountId}:${chatId}`;
+    const cached = groupParticipantsCache.get(cacheKey);
+    if (cached) return cached;
+    const entry = accounts.get(accountId);
+    if (!entry) return [];
+    let metadata;
+    try { metadata = await entry.sock.groupMetadata(chatId); }
+    catch (error) { logger.warn({ error: error.message, accountId, chatId }, 'Group metadata fetch failed'); return []; }
+    const ownJid = entry.me?.id || null;
+    const participants = (metadata?.participants || []).map(participant => {
+      const rawId = participant.id || participant.jid;
+      if (!rawId) return null;
+      // A LID-only participant is resolved to its phone jid where Gakai has
+      // already observed the mapping; otherwise the lid is carried through as
+      // both id and number, the same safe fallback used elsewhere.
+      const resolvedId = isLidJid(rawId) ? resolveLid(accountId, rawId) : rawId;
+      const contact = store.getContact(accountId, resolvedId) || store.getContact(accountId, rawId);
+      const number = jidDecode(resolvedId)?.server === 's.whatsapp.net' ? bareJidUser(resolvedId) : bareJidUser(rawId);
+      const isMe = ownJid && (isSameIdentity(rawId, ownJid) || isSameIdentity(resolvedId, ownJid));
+      return { id: resolvedId, number, name: contact?.name || participant.name || participant.notify || (number ? `+${number}` : bareJidUser(rawId)), isMe: Boolean(isMe) };
+    }).filter(participant => participant && !participant.isMe && participant.number)
+      .map(({ isMe, ...participant }) => participant);
+    groupParticipantsCache.set(cacheKey, participants);
+    return participants;
+  }
 
   // Best-effort: WhatsApp's LID (linked-device anonymous id) → phone-number
   // jid mapping is only available once Gakai has actually observed it
@@ -351,7 +395,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
     sendText, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
-    getContact, getContacts, resolveLid,
+    getContact, getContacts, resolveLid, getGroupParticipants,
     getChatsOverview, getMessages, getMessage, downloadMedia,
     shutdown,
   };

@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage } from "./chat-helpers.mjs";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
 import { Avatar } from "./ui-helpers.jsx";
+import { confirmDialog } from "./confirm.jsx";
 
 function mediaSrc(message) {
   const raw = message?.mediaUrl || message?.media?.url;
@@ -220,6 +221,12 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
   const [newMessageCount, setNewMessageCount] = useState(0);
+  const [participants, setParticipants] = useState([]);
+  const [mentionMenu, setMentionMenu] = useState(null); // { query, index } while the reader is typing "@…"
+  const mentionPicksRef = useRef([]); // { jid, name, number } the reader chose from the menu this compose
+  const composerRef = useRef(null);
+  const participantsLoadedRef = useRef(null); // chatId whose participant list is already fetched
+  const hydratedSendersRef = useRef(new Set()); // sender jids already asked /chats/pictures for, this chat
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const typingSocketRef = useRef(null);
@@ -272,25 +279,46 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     return row ? { key: row.dataset.messageKey, offset: row.getBoundingClientRect().top - paneTop } : null;
   }, []);
 
+  // Sender avatars for a group page are fetched after the messages have
+  // painted (the server shapes the page without any picture lookup), so
+  // opening a chat isn't gated on ~15 WhatsApp profile-picture round-trips.
+  // Reuses the inbox's /chats/pictures batch resolver — it takes any jids.
+  const hydrateSenderPictures = useCallback(async (version, page) => {
+    const ids = [...new Set(page.filter(m => !m.fromMe && m.sender?.id && !m.sender.picture && !hydratedSendersRef.current.has(m.sender.id)).map(m => m.sender.id))];
+    if (!ids.length) return;
+    ids.forEach(id => hydratedSendersRef.current.add(id));
+    for (let i = 0; i < ids.length; i += 12) {
+      const batch = ids.slice(i, i + 12);
+      let pictures;
+      try { pictures = (await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/pictures?ids=${encodeURIComponent(batch.join(","))}`)).pictures || {}; }
+      catch { return; }
+      if (requestRef.current !== version) return;
+      if (!Object.keys(pictures).length) continue;
+      setMessages(current => current.map(m => (m.sender?.id && pictures[m.sender.id] && !m.sender.picture) ? { ...m, sender: { ...m.sender, picture: pictures[m.sender.id] } } : m));
+    }
+  }, [accountId]);
+
   useEffect(() => {
     const version = ++requestRef.current;
     initialChatRef.current = null;
     restoreAnchorRef.current = null;
     historyRestoreRef.current = null;
     olderRequestRef.current = false;
+    hydratedSendersRef.current = new Set();
     setMessages([]); setExhausted(false); setError(""); setReplyingTo(null); setReactionOverrides({}); setNewMessageCount(0); setLoading(Boolean(chatId));
     if (!accountId || !chatId) return undefined;
     api(endpoint(accountId, chatId)).then(result => {
       if (requestRef.current !== version) return;
       const page = pageOf(result).sort((a, b) => stamp(a) - stamp(b));
       setMessages(page); setExhausted(page.length < PAGE_SIZE);
+      hydrateSenderPictures(version, page);
     }).catch(cause => {
       if (requestRef.current === version) setError(cause.message || "Could not load messages.");
     }).finally(() => {
       if (requestRef.current === version) setLoading(false);
     });
     return () => { if (requestRef.current === version) requestRef.current += 1; };
-  }, [accountId, chatId]);
+  }, [accountId, chatId, hydrateSenderPictures]);
 
   // Keep the active conversation live without fanning requests out across the
   // inbox. A reader already at the bottom should see new messages appear
@@ -301,6 +329,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     if (!accountId || !chatId) return undefined;
     let active = true;
     const refreshLatest = async () => {
+      const version = requestRef.current;
       try {
         const page = pageOf(await api(endpoint(accountId, chatId)));
         if (!active || !page.length) return;
@@ -313,6 +342,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
         if (isNearBottom()) followLatestRef.current = true;
         else setNewMessageCount(count => count + newCount);
         setMessages(current => merge(current, page));
+        hydrateSenderPictures(version, page);
       } catch {
         // A transient provider failure should not replace the open chat with an
         // error state; the next active-chat refresh can recover naturally.
@@ -320,7 +350,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     };
     const timer = window.setInterval(refreshLatest, 5000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [accountId, chatId]);
+  }, [accountId, chatId, hydrateSenderPictures]);
 
   useLayoutEffect(() => {
     if (!messages.length || initialChatRef.current === chatId) return undefined;
@@ -386,13 +416,14 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
       if (requestRef.current !== version) return;
       setMessages(current => merge(current, page));
       setExhausted(page.length < PAGE_SIZE);
+      hydrateSenderPictures(version, page);
     } catch (cause) {
       if (requestRef.current === version) { historyRestoreRef.current = null; setError(cause.message || "Could not load earlier messages."); }
     } finally {
       olderRequestRef.current = false;
       if (requestRef.current === version) setOlderLoading(false);
     }
-  }, [accountId, chatId, exhausted, olderLoading]);
+  }, [accountId, chatId, exhausted, olderLoading, hydrateSenderPictures]);
 
   const maybeLoadOlder = useCallback(event => {
     if (event.currentTarget.scrollTop <= 120) loadOlder();
@@ -405,19 +436,64 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     if (pane) pane.scrollTop = pane.scrollHeight;
   }, []);
 
+  // Group @-mentions: the participant list backs the suggestion menu, fetched
+  // once per group and only when the reader actually types "@" (a live
+  // provider call — never eager per chat open).
+  const isGroup = /@g\.us$/i.test(chatId || "");
+  useEffect(() => { setParticipants([]); setMentionMenu(null); mentionPicksRef.current = []; participantsLoadedRef.current = null; }, [chatId]);
+  const loadParticipants = useCallback(async () => {
+    if (!isGroup || !chatId || participantsLoadedRef.current === chatId) return;
+    participantsLoadedRef.current = chatId;
+    try {
+      const data = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/participants`);
+      setParticipants(Array.isArray(data.participants) ? data.participants : []);
+    } catch { participantsLoadedRef.current = null; }
+  }, [accountId, chatId, isGroup]);
+
+  const syncMentionMenu = useCallback(field => {
+    if (!isGroup || !field) { setMentionMenu(null); return; }
+    const query = mentionQueryAt(field.value, field.selectionStart);
+    if (query === null) { setMentionMenu(null); return; }
+    loadParticipants();
+    setMentionMenu(menu => ({ query, index: menu && menu.query === query ? menu.index : 0 }));
+  }, [isGroup, loadParticipants]);
+
+  const mentionMatches = useMemo(() => {
+    if (!mentionMenu) return [];
+    const q = mentionMenu.query.toLowerCase();
+    return participants.filter(p => !q || p.name.toLowerCase().includes(q) || String(p.number).includes(q)).slice(0, 6);
+  }, [mentionMenu, participants]);
+
+  const pickMention = useCallback(participant => {
+    const field = composerRef.current;
+    if (!field || !participant) return;
+    const result = applyMentionPick(field.value, field.selectionStart, participant.name);
+    if (!result) return;
+    field.value = result.text;
+    field.setSelectionRange(result.caret, result.caret);
+    field.focus();
+    if (!mentionPicksRef.current.some(p => p.jid === participant.id)) {
+      mentionPicksRef.current = [...mentionPicksRef.current, { jid: participant.id, name: participant.name, number: participant.number }];
+    }
+    setMentionMenu(null);
+  }, []);
+
   const send = useCallback(async event => {
     event.preventDefault();
     const field = event.currentTarget.elements.text;
     const text = field?.value?.trim();
     if (!text || !chatId) return;
     if(typingTimerRef.current)clearTimeout(typingTimerRef.current); sendPresence("paused");
+    const { text: wireText, mentions } = buildMentionPayload(text, mentionPicksRef.current);
     field.value = "";
+    mentionPicksRef.current = [];
+    setMentionMenu(null);
     const pending = { id: `pending-${Date.now()}`, body: text, fromMe: true, timestamp: Math.floor(Date.now() / 1000), pending: true, replyTo:replyingTo };
     followLatestRef.current = true;
     setNewMessageCount(0);
     setMessages(current => [...current, pending]);
     try {
-      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages`, { method: "POST", body: JSON.stringify({ chatId, text, replyTo:replyingTo?.id }) });
+      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages`, { method: "POST", body: JSON.stringify({ chatId, text: wireText, replyTo:replyingTo?.id, mentions }) });
       const confirmed = confirmSentMessage(pending, result.message);
       setMessages(current => merge(current.filter(message => message.id !== pending.id), confirmed ? [confirmed] : []));
       setReplyingTo(null);
@@ -436,7 +512,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     try{await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(messageId)}/reaction`,{method:"POST",body:JSON.stringify({reaction:next})});}
     catch(cause){setReactionOverrides(current=>({...current,[messageId]:previous}));setError(cause.message||"Could not update reaction.");}
   },[accountId,reactionOverrides]);
-  const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800)},[sendPresence]);
+  const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800);syncMentionMenu(event.currentTarget)},[sendPresence,syncMentionMenu]);
 
   // "Delete for me": removes the message from this account's own view. Does
   // not remove it from the other participant's WhatsApp — WhatsApp's real
@@ -450,10 +526,10 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     // Gakai has no control over either way. So for a message the account
     // itself sent, this confirmation must say what will actually happen: it
     // disappears from the whole chat, not just this view.
-    const prompt = message?.fromMe
-      ? "Delete this message for everyone in the chat? This can't be undone."
-      : "Delete this message for you? It won't be removed from the other person's WhatsApp.";
-    if (!window.confirm(prompt)) return;
+    const confirmed = await confirmDialog(message?.fromMe
+      ? { title: "Delete for everyone?", message: "This message will be removed for everyone in the chat. This can't be undone.", confirmLabel: "Delete", danger: true }
+      : { title: "Delete this message?", message: "This removes the message from your view only. It won't be removed from the other person's WhatsApp.", confirmLabel: "Delete", danger: true });
+    if (!confirmed) return;
     try {
       await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
       setMessages(current => current.filter(item => serializedId(item?.id) !== messageId));
@@ -463,7 +539,9 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
   }, [accountId, chatId]);
 
   const deleteConversation = useCallback(async () => {
-    if (!chatId || deleting || !window.confirm(`Delete the conversation with ${chat?.name || chatId}? This removes it from WhatsApp and cannot be undone.`)) return;
+    if (!chatId || deleting) return;
+    const confirmed = await confirmDialog({ title: "Delete conversation?", message: `The conversation with ${chat?.name || chatId} will be removed from WhatsApp. This can't be undone.`, confirmLabel: "Delete conversation", danger: true });
+    if (!confirmed) return;
     setDeleting(true); setError("");
     try {
       await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" });
@@ -480,7 +558,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     <header className="conversation-head">
       {onBack && <button type="button" className="back" onClick={onBack} aria-label="Back to conversations">‹</button>}
       <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small>Chat ID: {chatId || "Unavailable"}</small></span>
-      <button type="button" className="conversation-delete" onClick={deleteConversation} disabled={deleting}>{deleting ? "Deleting…" : "Delete"}</button>
+      <button type="button" className="conversation-delete" onClick={deleteConversation} disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</button>
     </header>
     <div className="messages" ref={paneRef} onScroll={maybeLoadOlder}>
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
@@ -493,14 +571,30 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
     <form className="composer" onSubmit={send}>
       {replyingTo&&<div className="composer-reply"><span><b>Replying to</b>{String(replyingTo.body||replyingTo.text||"Message").slice(0,100)}</span><button type="button" onClick={()=>setReplyingTo(null)} aria-label="Cancel reply">×</button></div>}
+      {mentionMenu&&mentionMatches.length>0&&<ul className="mention-suggest" role="listbox" aria-label="Mention someone">
+        {mentionMatches.map((participant,i)=><li key={participant.id} role="option" aria-selected={i===mentionMenu.index}>
+          <button type="button" className={i===mentionMenu.index?"active":""} onMouseDown={e=>{e.preventDefault();pickMention(participant)}}>
+            <b>{participant.name}</b>{participant.number?<small>+{participant.number}</small>:null}
+          </button>
+        </li>)}
+      </ul>}
       <textarea
+        ref={composerRef}
         name="text"
         rows="1"
         placeholder="Type a message"
         aria-label="Message"
         onInput={handleComposerInput}
-        onBlur={()=>{if(typingTimerRef.current)clearTimeout(typingTimerRef.current);sendPresence("paused")}}
+        onKeyUp={e=>syncMentionMenu(e.currentTarget)}
+        onClick={e=>syncMentionMenu(e.currentTarget)}
+        onBlur={()=>{if(typingTimerRef.current)clearTimeout(typingTimerRef.current);sendPresence("paused");setMentionMenu(null)}}
         onKeyDown={e => {
+          if (mentionMenu && mentionMatches.length) {
+            if (e.key === "ArrowDown") { e.preventDefault(); setMentionMenu(m => ({ ...m, index: (m.index + 1) % mentionMatches.length })); return; }
+            if (e.key === "ArrowUp") { e.preventDefault(); setMentionMenu(m => ({ ...m, index: (m.index - 1 + mentionMatches.length) % mentionMatches.length })); return; }
+            if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickMention(mentionMatches[mentionMenu.index] || mentionMatches[0]); return; }
+            if (e.key === "Escape") { e.preventDefault(); setMentionMenu(null); return; }
+          }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             e.currentTarget.form.requestSubmit();

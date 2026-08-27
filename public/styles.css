@@ -169,6 +169,29 @@ h2 {
   padding:11px;
   color:var(--ink);
 }
+.chat-filters {
+  display:flex;
+  gap:6px;
+  margin:-2px 14px 10px;
+}
+.chat-filter {
+  padding:3px 10px;
+  border:1px solid var(--line);
+  border-radius:999px;
+  background:transparent;
+  color:var(--muted);
+  font-size:11px;
+  font-weight:600;
+}
+.chat-filter:hover {
+  color:var(--ink);
+  border-color:#3a4c56;
+}
+.chat-filter.on {
+  background:var(--soft);
+  color:var(--ink);
+  border-color:#3a4c56;
+}
 .chat {
   width:100%;
   background:none;
@@ -383,6 +406,18 @@ textarea {
   padding:20px;
   text-align:center;
 }
+.mention-toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:40;max-width:min(360px,calc(100vw - 36px))}
+.mention-toast{display:flex;align-items:stretch;background:#263b44;border:1px solid #415661;border-radius:9px;overflow:hidden;box-shadow:0 6px 20px #0006}
+.mention-toast>button:first-child{flex:1;min-width:0;text-align:left;padding:11px 13px;background:none;color:#e9edef;font:inherit;font-size:13px;line-height:1.35}
+.mention-toast>button:first-child b{color:#8ce6cf;font-weight:700}
+.mention-toast-dismiss{flex:none;padding:0 12px;background:none;color:#9fb4ae;font-size:18px;border-left:1px solid #3a4c56}
+.mention-toast-dismiss:hover{color:#e9edef}
+.mention-suggest{flex:0 0 100%;list-style:none;margin:0 0 6px;padding:4px;background:#1f2c33;border:1px solid #3a4c56;border-radius:9px;max-height:210px;overflow-y:auto;box-shadow:0 -4px 18px #0005}
+.mention-suggest li{margin:0}
+.mention-suggest button{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;padding:8px 10px;background:none;color:#e9edef;font:inherit;font-size:13px;border-radius:6px}
+.mention-suggest button.active,.mention-suggest button:hover{background:#2a3942}
+.mention-suggest button b{font-weight:600}
+.mention-suggest button small{color:#8aa0a8;font-size:11px}
 
 /* Responsive breakpoint */
 @media(max-width:720px) {
@@ -487,7 +522,9 @@ video.media{background:#000}
 .conversation-react-root{min-height:0;flex:1;display:flex;flex-direction:column}.conversation-react-root>.messages{flex:1}.conversation-react-root>form{flex:none;display:flex;gap:10px;padding:12px 18px;background:var(--panel)}
 /* Account entry keeps its settings action visible without stealing account selection. */
 .account-row{position:relative;display:flex;align-items:center;gap:2px}.account-row .account{min-width:0;flex:1}.account-row .account-cog{position:absolute;right:8px;top:50%;transform:translateY(-50%);z-index:2;opacity:.82}.account-row:hover .account-cog,.account-row .account-cog:focus-visible{opacity:1}.integration-form{display:grid;gap:10px}.integration-form label:not(.checkbox-field){display:grid;gap:5px;font-size:13px;color:var(--muted)}.integration-form input,.integration-form textarea{width:100%;box-sizing:border-box;background:#202c33;color:#e9edef;border:1px solid #3a4c56;border-radius:8px;padding:10px;font:inherit}.integration-form textarea{resize:vertical}.integration-form .check-row{display:flex;align-items:center;gap:8px}.integration-form .check-row input{width:auto}
-.logout{margin:auto auto 0;width:min(210px,100%);padding:10px 12px;border:0;background:#c84f58;color:#fff;text-align:center;font-weight:750;border-radius:9px;cursor:pointer}.logout:hover{background:#df5d66;color:#fff}.logout:focus-visible{outline:2px solid #ffb4b8;outline-offset:3px}
+.btn-icon{width:14px;height:14px;flex:none;vertical-align:-2px;margin-right:6px}
+.subtle-btn{padding:6px 11px;border:1px solid var(--line);background:var(--panel);color:var(--muted);font-weight:600;font-size:12px;border-radius:8px;cursor:pointer}.subtle-btn:hover{background:var(--soft);color:var(--ink);border-color:#3a4c56}.subtle-btn:focus-visible{outline:2px solid #3a4c56;outline-offset:2px}
+.logout{margin:auto auto 0;width:min(210px,100%);text-align:center}
 .details .danger{margin-top:28px;max-width:220px}
 .details-main>.details-card{width:100%}.details-main>.details-card h3{font-size:16px}
 
@@ -508,9 +545,9 @@ video.media{background:#000}
 /* The generic header rule distributes children across the full row. Chat
    identity needs to stay together: avatar, name/group name, then chat ID. */
 .conversation-head { justify-content: flex-start; }
-.conversation-delete{margin-left:auto;padding:8px 11px;border-radius:8px;background:#7d3036;color:#fff;font-weight:700}.conversation-delete:hover{background:#a43b3b}.conversation-delete:disabled{opacity:.65;cursor:wait}
+.conversation-delete{margin-left:auto;flex:none;white-space:nowrap;padding:5px 9px;border-radius:7px;background:#7d3036;color:#fff;font-weight:600;font-size:11px}.conversation-delete:hover{background:#a43b3b}.conversation-delete:disabled{opacity:.65;cursor:wait}
 .system-message{color:#cbd8d3;font-style:italic}.system-message.call{font-style:normal;color:#c6e9de}
-.reply-context{display:grid;gap:2px;margin:-2px -2px 7px;padding:6px 8px;border-left:3px solid #25d366;border-radius:4px;background:#0002;font-size:11px}.reply-context b{color:#8ce6cf}.reply-context span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c6d5d0}.message-group{display:flex;align-items:flex-end;gap:6px;min-width:0;max-width:min(68%,620px)}.message-actions{position:relative;display:flex;flex-direction:column;gap:4px}.message-actions>button{padding:2px 5px;border-radius:5px;background:#ffffff14;color:#c6d5d0;font-size:10px}.message-actions>button:hover{background:#ffffff24;color:#fff}.reaction-picker{position:absolute;left:50%;bottom:100%;transform:translateX(-50%);margin-bottom:4px;z-index:2;display:flex;padding:4px;border:1px solid #49606a;border-radius:18px;background:#182a31;box-shadow:0 4px 16px #0008}.reaction-picker button{padding:3px;border:0;background:transparent;font-size:16px}.reaction-pill{position:absolute;bottom:-10px;left:-2px;margin:0;padding:1px 5px;border-radius:10px;background:#2a3942;border:2px solid #0c171c;box-shadow:0 1px 3px #0006;font-size:12px;line-height:1.4;z-index:1}
+.reply-context{display:grid;gap:2px;margin:-2px -2px 7px;padding:6px 8px;border-left:3px solid #25d366;border-radius:4px;background:#0002;font-size:11px}.reply-context b{color:#8ce6cf}.reply-context span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c6d5d0}.message-group{display:flex;align-items:flex-end;gap:6px;min-width:0;max-width:min(68%,620px)}.message-actions{position:relative;display:flex;flex-direction:column;gap:4px}.message-actions>button{padding:2px 5px;border-radius:5px;background:#ffffff14;color:#c6d5d0;font-size:10px}.message-actions>button:hover{background:#ffffff24;color:#fff}.reaction-picker{position:absolute;left:50%;bottom:100%;transform:translateX(-50%);margin-bottom:4px;z-index:2;display:flex;padding:4px;border:1px solid #49606a;border-radius:18px;background:#182a31;box-shadow:0 4px 16px #0008}.reaction-picker button{padding:3px;border:0;background:transparent;font-size:18px}.reaction-pill{position:absolute;bottom:-10px;left:-2px;margin:0;padding:1px 5px;border-radius:10px;background:#2a3942;border:2px solid #0c171c;box-shadow:0 1px 3px #0006;font-size:14px;line-height:1.4;z-index:1}
 .message.mine .reaction-pill{left:auto;right:-2px}.message-actions>button.message-delete:hover{background:#a43b3b44;color:#ffb4b4}@media(hover:hover) and (pointer:fine){.message-actions{opacity:0;pointer-events:none;transition:opacity .12s ease}.message-group:hover .message-actions,.message-group:focus-within .message-actions{opacity:1;pointer-events:auto}}.conversation-react-root>form{flex-wrap:wrap}.composer-reply{flex:0 0 100%;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:3px 4px 8px;border-bottom:1px solid #31424b;color:#c6d5d0;font-size:12px}.composer-reply span{display:grid;gap:2px;min-width:0;overflow:hidden}.composer-reply b{color:#8ce6cf}.composer-reply button{padding:0 6px;background:none;color:#b8cbc4;font-size:20px}
 .instagram-native-preview{overflow:hidden;background:#10252c}.instagram-native-preview span{display:grid;gap:5px}.instagram-native-preview em{color:#e5a9c5;font-size:11px;font-style:normal;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.instagram-native-preview .instagram-open{margin-top:3px;color:#8ce6cf;font-weight:700}.instagram-mark{background:linear-gradient(135deg,#833ab4,#fd1d1d 56%,#fcb045);color:#fff}
 
@@ -569,6 +606,8 @@ video.media{background:#000}
 .modal-card h3 { margin:0 0 6px; }
 .modal-card > p { margin:0 0 16px; font-size:13px; }
 .modal-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:4px; }
+.modal-actions .danger, .modal-actions .primary { width:auto; min-width:110px; margin:0; padding:8px 16px; border-radius:9px; }
+.modal-actions .subtle-btn { padding:8px 14px; }
 .modal-error { margin:14px 0 0; padding:10px 12px; border-radius:8px; background:#3a1e22; color:#ffb4b4; font-size:13px; }
 .saved-key-mask { display:block; margin-top:2px; color:#8ce6cf; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; letter-spacing:.04em; }
 .service-detail .integration-delete { display:block; width:100%; max-width:none; margin:24px 0 0; }

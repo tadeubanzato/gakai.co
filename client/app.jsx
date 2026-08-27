@@ -1,8 +1,9 @@
 import React,{useCallback,useEffect,useMemo,useRef,useState}from"react";
 import{runExclusive,api}from"./app-helpers.mjs";
-import{Avatar}from"./ui-helpers.jsx";
+import{Avatar,IconLogout}from"./ui-helpers.jsx";
 import{createRoot}from"react-dom/client";
 import{ChatPanel}from"./chat.jsx";
+import{ConfirmHost,confirmDialog}from"./confirm.jsx";
 
 const slug=x=>String(x||"").trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
 const status=x=>({WORKING:"Connected",SCAN_QR_CODE:"Ready to scan",STARTING:"Starting WhatsApp",STOPPED:"Offline",FAILED:"Needs attention"})[x]||x||"Connecting";
@@ -62,7 +63,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
   const connectN8n=async e=>{e.preventDefault();const f=e.currentTarget;const n8nUrl=f.n8nUrl.value.trim().replace(/\/+$/,"");const enteredKey=f.n8nApiKey.value.trim();setBusy(true);try{const result=await api(base+"/n8n/connect",{method:"POST",body:JSON.stringify({n8nUrl,n8nApiKey:enteredKey||"__keep__"})});setN8n(current=>({...current,connected:true,n8nUrl,n8nApiKeyLength:enteredKey.length||current?.n8nApiKeyLength||0,n8nApiKeyLast4:enteredKey?enteredKey.slice(-4):current?.n8nApiKeyLast4||"",workflows:result.workflowId?[...(current?.workflows||[]).filter(workflow=>workflow.kind!=="standard"),{kind:"standard",workflowId:result.workflowId,workflowName:result.workflowName,workflowUrl:result.workflowUrl}]:current?.workflows||[]}));await refresh();onNotice(result.reused?"n8n connection verified.":"n8n workflow created and connected.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const saveName=async e=>{e.preventDefault();const label=e.currentTarget.label.value.trim();if(!label)return;setBusy(true);try{await api(base+"/label",{method:"PATCH",body:JSON.stringify({label})});onRenamed?.(account.id,label);onNotice("Account name saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const saveProfile=async e=>{e.preventDefault();const f=e.currentTarget;setBusy(true);try{const result=await api("/api/app/auth/profile",{method:"PATCH",body:JSON.stringify({username:f.username.value,currentPassword:f.currentPassword.value,newPassword:f.newPassword.value})});setProfile(current=>({...current,username:result.username}));f.currentPassword.value="";f.newPassword.value="";onNotice("Sign-in details saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
-  const del=async()=>{if(!confirm(`Delete ${account.label} from Gakai? Its linked WhatsApp session will be removed. You can add and scan it again later.`))return;setBusy(true);try{await api(base,{method:"DELETE"});onDeleted()}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  const del=async()=>{if(!await confirmDialog({title:"Delete this account?",message:`${account.label} will be removed from Gakai and its linked WhatsApp session cleared. You can add and scan it again later.`,confirmLabel:"Delete account",danger:true}))return;setBusy(true);try{await api(base,{method:"DELETE"});onDeleted()}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   // "Enable n8n AI Agent replies": one action for both first-time setup
   // (creates the n8n workflow) and re-enabling an existing one — the server
   // route is idempotent either way and also turns native replies off,
@@ -107,7 +108,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
       setBusy(false);
     }
   };
-  const deleteIntegration=async kind=>{const label=kind==="n8n"?"n8n automation":"LLM Proxy";if(!confirm(`Delete the ${label} integration for ${account.label}?`))return;setBusy(true);try{await api(base+(kind==="n8n"?"/n8n/connect":"/llm"),{method:"DELETE"});await refresh();onNotice(`${label} integration deleted.`)}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  const deleteIntegration=async kind=>{const label=kind==="n8n"?"n8n automation":"LLM Proxy";if(!await confirmDialog({title:`Delete ${label} integration?`,message:`The ${label} integration for ${account.label} will be removed.`,confirmLabel:"Delete integration",danger:true}))return;setBusy(true);try{await api(base+(kind==="n8n"?"/n8n/connect":"/llm"),{method:"DELETE"});await refresh();onNotice(`${label} integration deleted.`)}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const toggleAutomation=async(subscriptionId,enabled,label)=>{if(!subscriptionId)return;setBusy(true);try{const result=await api(base+"/automations/"+encodeURIComponent(subscriptionId),{method:"PATCH",body:JSON.stringify({enabled})});await refresh();onNotice(enabled&&result.aiWorkflowUnpublished?"n8n replies are on. The AI Agent workflow is now inactive.":enabled&&result.aiWorkflowMissing?"n8n replies are on. The old AI Agent workflow no longer exists in n8n.":enabled&&result.standardWorkflowRecreated?"n8n replies are on. A new standard workflow was created and activated.":enabled?"n8n replies are on and the workflow is active.":result.n8nWorkflowsDeactivated?"n8n replies are off. Both n8n workflows are inactive.":"n8n replies are off.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
 
   const services={
@@ -153,6 +154,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
 
 function App(){
   const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState("");
+  const[chatFilter,setChatFilter]=useState("all");
   const settingsRef=useRef(null);
   const chatListRef=useRef(null);
   const suppressAutoSelectRef=useRef(false);
@@ -170,6 +172,19 @@ function App(){
   const chatsCacheRef=useRef(new Map());
 
   const fail=useCallback(x=>{setNote(x);setTimeout(()=>setNote(""),4500)},[]);
+
+  // Mention toasts: raised from the account's live SSE stream when a group
+  // message @-tags this account and that chat isn't already open. Kept in a
+  // ref-mirrored open-chat id and a seen-event set so the stream handler
+  // (which must not re-subscribe on every chat switch) can read current state
+  // and never double-toast a replayed/reconnected event.
+  const[mentionToasts,setMentionToasts]=useState([]);
+  const openChatIdRef=useRef(null);
+  const chatsRef=useRef(chats);
+  const seenEventIdsRef=useRef(new Set());
+  useEffect(()=>{chatsRef.current=chats},[chats]);
+  useEffect(()=>{openChatIdRef.current=chat?.id||null},[chat?.id]);
+  const dismissMentionToast=useCallback(toastId=>setMentionToasts(current=>current.filter(item=>item.id!==toastId)),[]);
 
   const refresh=useCallback(async()=>{
     // Several call sites (mount, pairing, account delete, SSE-driven polling)
@@ -190,6 +205,29 @@ function App(){
     }catch(x){if(accountsRequestRef.current===version)fail(x.message)}
   },[fail]);
 
+  // Avatars are fetched after the list text has painted — in small sequential
+  // batches so they fill in progressively rather than the whole list waiting
+  // on ~40 WhatsApp profile-picture lookups up front. Guarded by the same
+  // request version as load() so a stale account's avatars never land on the
+  // current list.
+  const hydratePictures=useCallback(async(id,version,list)=>{
+    const missing=list.filter(chat=>!chat.picture&&chat.id).map(chat=>chat.id);
+    for(let i=0;i<missing.length;i+=10){
+      const batch=missing.slice(i,i+10);
+      let pictures;
+      try{pictures=(await api("/api/app/accounts/"+encodeURIComponent(id)+"/chats/pictures?ids="+encodeURIComponent(batch.join(",")))).pictures||{}}
+      catch{return}
+      if(chatsRequestRef.current!==version)return;
+      if(!Object.keys(pictures).length)continue;
+      setChats(current=>{
+        const merged=current.map(chat=>pictures[chat.id]?{...chat,picture:pictures[chat.id]}:chat);
+        chatsCacheRef.current.set(id,merged);
+        return merged;
+      });
+      setChat(current=>current&&pictures[current.id]?{...current,picture:pictures[current.id]}:current);
+    }
+  },[]);
+
   const load=useCallback(async id=>{
     // load() is called from account switches, the SSE change handler, a
     // background poll timer, and after sending a message — any of which can
@@ -205,15 +243,22 @@ function App(){
     try{
       const d=await api("/api/app/accounts/"+encodeURIComponent(id)+"/chats");
       if(chatsRequestRef.current!==version)return;
-      const next=(Array.isArray(d)?d:d.chats||[]).sort((left,right)=>Number(right.timestamp||right.lastMessage?.timestamp||0)-Number(left.timestamp||left.lastMessage?.timestamp||0));
+      // Carry over an avatar we already resolved this session for any row the
+      // fresh (picture-less first-paint) response doesn't include one for, so
+      // a background refresh never blanks avatars that are already on screen.
+      const knownPictures=new Map((chatsCacheRef.current.get(id)||[]).filter(chat=>chat.picture).map(chat=>[chat.id,chat.picture]));
+      const next=(Array.isArray(d)?d:d.chats||[])
+        .map(chat=>!chat.picture&&knownPictures.get(chat.id)?{...chat,picture:knownPictures.get(chat.id)}:chat)
+        .sort((left,right)=>Number(right.timestamp||right.lastMessage?.timestamp||0)-Number(left.timestamp||left.lastMessage?.timestamp||0));
       chatsCacheRef.current.set(id,next);
       setChats(next);
       // A working inbox should open on a useful conversation, not a blank
       // "Select a conversation" placeholder. Keep the reader's existing chat
       // selected during refreshes, otherwise open the newest one.
       setChat(current=>current?next.find(item=>item.id===current.id):suppressAutoSelectRef.current?undefined:next[0]);
+      hydratePictures(id,version,next);
     }catch(x){if(chatsRequestRef.current===version)fail(x.message)}finally{if(chatsRequestRef.current===version)setChatsLoading(false)}
-  },[fail]);
+  },[fail,hydratePictures]);
 
   const handleAccountRenamed=useCallback((id,label)=>{
     setAccounts(current=>current.map(item=>item.id===id?{...item,label}:item));
@@ -235,7 +280,27 @@ function App(){
     if(!account || account.status!=="WORKING") return;
     const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(account.id));
     const update=event=>{
-      try{const change=JSON.parse(event.data);if(change.account?.id===account.id)loadRef.current(account.id)}catch{}
+      try{
+        const change=JSON.parse(event.data);
+        if(change.account?.id!==account.id)return;
+        loadRef.current(account.id);
+        const eventId=change.id||event.lastEventId;
+        // Toast a group @-mention of this account — but only a genuinely new
+        // one: skip the burst of recent events every fresh SSE connection
+        // replays (deduped by id, backstopped by a freshness window) and skip
+        // the chat the reader already has open.
+        if(change.type==="message.received"&&change.mentionsYou&&eventId&&!seenEventIdsRef.current.has(eventId)){
+          if(seenEventIdsRef.current.size>500)seenEventIdsRef.current.clear();
+          seenEventIdsRef.current.add(eventId);
+          const fresh=Date.now()-Date.parse(change.occurredAt||0)<60000;
+          if(fresh&&change.chat?.id&&change.chat.id!==openChatIdRef.current){
+            const known=chatsRef.current.find(item=>item.id===change.chat.id);
+            const toast={id:eventId,chatId:change.chat.id,from:change.message?.sender?.name||"Someone",group:known?.name||change.chat?.name||"a group"};
+            setMentionToasts(current=>[...current.filter(item=>item.id!==toast.id),toast]);
+            window.setTimeout(()=>setMentionToasts(current=>current.filter(item=>item.id!==toast.id)),6000);
+          }
+        }
+      }catch{}
     };
     stream.addEventListener("gakai",update);
     let timer;
@@ -295,9 +360,13 @@ function App(){
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);
   useEffect(()=>{suppressAutoSelectRef.current=false;setChat();setChats(chatsCacheRef.current.get(account?.id)||[]);if(account?.status==="WORKING")load(account.id)},[account?.id,account?.status,load]);
 
-  const logout=async()=>{await api("/api/app/auth/logout",{method:"POST"}).catch(()=>{});window.location.assign("/")};
+  const logout=async()=>{if(!await confirmDialog({title:"Log off?",message:"You'll need your administrator username and password to sign back in.",confirmLabel:"Log off"}))return;await api("/api/app/auth/logout",{method:"POST"}).catch(()=>{});window.location.assign("/")};
   
-  const visible=useMemo(()=>chats.filter(x=>(String(x.name||x.id)+" "+String(x.lastMessage?.body||x.lastMessage?.text||"")).toLowerCase().includes(q.toLowerCase())),[chats,q]);
+  const visible=useMemo(()=>chats.filter(x=>{
+    if(chatFilter==="unread"&&!x.unreadCount)return false;
+    if(chatFilter==="groups"&&!/@g\.us$/i.test(x.id||""))return false;
+    return (String(x.name||x.id)+" "+String(x.lastMessage?.body||x.lastMessage?.text||"")).toLowerCase().includes(q.toLowerCase());
+  }),[chats,q,chatFilter]);
 
   // Keep unread state server-authoritative. The badge clears only after the
   // provider has accepted the read receipt; no arbitrary client timer.
@@ -384,16 +453,25 @@ function App(){
       return next;
     });
     setChat(current=>current?.id===chatId?undefined:current);
-  },[account]);
+    fail("Conversation deleted");
+  },[account,fail]);
 
   if(!auth)return <main className="pairing">Loading Gakai…</main>;
   if(!auth.authenticated)return <Login setup={!!auth.setup} done={()=>location.reload()} fail={fail}/>;
   if(!accountsReady)return <main className="pairing">Loading your workspace…</main>;
   if(pair)return <Pairing account={pair} onCancel={cancelPairing} onLinked={x=>{setPair();setPairCreated(false);setAccount(x);refresh()}}/>;
   if((add||!accounts.length)&&!pair)return <main className="pairing"><section className="pair-card"><span className="eyebrow">CONNECT WHATSAPP</span><h1>Preparing your QR code…</h1><p>Gakai is creating a secure WhatsApp connection. The QR code will appear here automatically.</p><div className="qr loading" role="status">Starting WhatsApp…</div>{accounts.length?<button className="nav wide" onClick={()=>setAdd(false)}>Cancel</button>:null}</section></main>;
+  const mentionToastStack=mentionToasts.length>0&&<div className="mention-toasts">
+    {mentionToasts.map(toast=><div key={toast.id} className="mention-toast" role="status">
+      <button type="button" onClick={()=>{const target=chats.find(item=>item.id===toast.chatId);if(target)handleChatClick(target);dismissMentionToast(toast.id)}}>
+        <b>{toast.from}</b> mentioned you in <b>{toast.group}</b>
+      </button>
+      <button type="button" className="mention-toast-dismiss" aria-label="Dismiss" onClick={()=>dismissMentionToast(toast.id)}>×</button>
+    </div>)}
+  </div>;
   const closeSettings=()=>{history.pushState({},"","/");setSettings(false)};
   const accountDeleted=async()=>{history.replaceState({},"","/");setSettings(false);setChat();await refresh()};
-  if(settings&&account)return <><Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>{note?<div className="toast" role="status">{note}</div>:null}</>;
+  if(settings&&account)return <><Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>{note?<div className="toast" role="status">{note}</div>:null}{mentionToastStack}</>;
 
   return (
     <>
@@ -414,18 +492,23 @@ function App(){
               {accounts.map(a=><option key={a.id} value={a.id}>{a.label} {a.status==="WORKING"?"✓":""}</option>)}
             </select>}
           </div>
-          <button type="button" className="logout" onClick={logout}>Log off</button>
+          <button type="button" className="logout subtle-btn" onClick={logout}><IconLogout/> Log off</button>
         </aside>
         <main className="main">
           <header>
             <div><h2>Inbox</h2><small>{account?.label} · {status(account?.status)}</small></div>
-            <button className="primary" onClick={beginPairing}>+ Connect account</button>
+            <button type="button" className="subtle-btn" onClick={beginPairing}>+ Add account</button>
           </header>
           {account?.status!=="WORKING"?<div className="empty"><div><h1>Account needs attention</h1><p>Reconnect this account to continue.</p><button className="primary" onClick={()=>{setPairCreated(false);setPair(account)}}>Reconnect with QR code</button></div></div>:<div className="inbox">
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>
               <input placeholder="Search conversations" value={q} onChange={e=>setQ(e.target.value)} aria-label="Search conversations"/>
+              <div className="chat-filters" role="tablist" aria-label="Filter conversations">
+                {[["all","All"],["unread","Unread"],["groups","Groups"]].map(([key,label])=>
+                  <button key={key} type="button" role="tab" aria-selected={chatFilter===key} className={"chat-filter"+(chatFilter===key?" on":"")} onClick={()=>setChatFilter(key)}>{label}</button>
+                )}
+              </div>
               {visible.map(x=><button key={x.id} className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}><Avatar item={x}/><span><b>{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||x.lastMessage?.system?.label||"Photo or message"}</small></span>{x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}</button>)}
-              {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">No conversations yet. Gakai is waiting for WhatsApp to finish syncing.</p>:null}
+              {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">{chats.length?"No conversations match this filter.":"No conversations yet. Gakai is waiting for WhatsApp to finish syncing."}</p>:null}
             </section>
             <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} onBack={()=>setChat()} onSent={handleSent} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
@@ -433,7 +516,8 @@ function App(){
       </div>
       {settings&&account?<Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>:null}
       {note?<div className="toast" role="status">{note}</div>:null}
+      {mentionToastStack}
     </>
   )
 }
-createRoot(document.querySelector("#app")).render(<App/>);
+createRoot(document.querySelector("#app")).render(<><App/><ConfirmHost/></>);
