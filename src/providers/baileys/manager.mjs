@@ -6,7 +6,7 @@
  * everything server.mjs used to reach over HTTP now happens here, in-process.
  */
 import {
-  makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, jidDecode,
+  makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, jidDecode, jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -74,6 +74,9 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
         entry.qr = null;
         entry.status = 'WORKING';
         entry.me = sock.user ? { id: sock.user.id, name: sock.user.name || sock.user.notify || null } : null;
+        // Fold any conversation that a previous session split across a
+        // phone-JID chat and a LID chat back into one. Best-effort.
+        reconcileLidChats(accountId).catch(error => logger.warn({ error: error.message, accountId }, 'LID chat reconciliation failed'));
       }
       if (update.connection === 'connecting' && !entry.qr) entry.status = 'STARTING';
       if (update.connection === 'close') {
@@ -95,16 +98,22 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
       }
     }));
 
-    sock.ev.on('messaging-history.set', safe('messaging-history.set', ({ chats, contacts, messages }) => {
-      store.upsertChats(accountId, chats || []);
+    sock.ev.on('messaging-history.set', safe('messaging-history.set', ({ chats, contacts, messages, lidPnMappings }) => {
+      ingestLidMappings(accountId, lidPnMappings);
+      learnFromContacts(accountId, contacts);
+      store.upsertChats(accountId, (chats || []).map(chat => ({ ...chat, id: canonicalChatId(accountId, chat.id) })));
       store.upsertContacts(accountId, (contacts || []).map(mapContact));
       ingestMessages(accountId, messages || [], { live: false });
     }));
 
-    sock.ev.on('chats.upsert', safe('chats.upsert', chats => store.upsertChats(accountId, chats)));
-    sock.ev.on('chats.update', safe('chats.update', updates => store.upsertChats(accountId, updates.filter(u => u.id))));
-    sock.ev.on('contacts.upsert', safe('contacts.upsert', contacts => store.upsertContacts(accountId, contacts.map(mapContact))));
-    sock.ev.on('contacts.update', safe('contacts.update', updates => store.upsertContacts(accountId, updates.filter(u => u.id).map(mapContact))));
+    sock.ev.on('lid-mapping.update', safe('lid-mapping.update', mapping => {
+      ingestLidMappings(accountId, Array.isArray(mapping) ? mapping : [mapping]);
+    }));
+
+    sock.ev.on('chats.upsert', safe('chats.upsert', chats => store.upsertChats(accountId, chats.map(chat => ({ ...chat, id: canonicalChatId(accountId, chat.id) })))));
+    sock.ev.on('chats.update', safe('chats.update', updates => store.upsertChats(accountId, updates.filter(u => u.id).map(chat => ({ ...chat, id: canonicalChatId(accountId, chat.id) })))));
+    sock.ev.on('contacts.upsert', safe('contacts.upsert', contacts => { learnFromContacts(accountId, contacts); store.upsertContacts(accountId, contacts.map(mapContact)); }));
+    sock.ev.on('contacts.update', safe('contacts.update', updates => { learnFromContacts(accountId, updates); store.upsertContacts(accountId, updates.filter(u => u.id).map(mapContact)); }));
 
     sock.ev.on('messages.upsert', safe('messages.upsert', ({ messages, type }) => {
       ingestMessages(accountId, messages, { live: type === 'notify' });
@@ -119,6 +128,77 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return { id: contact.id, name: contact.name || contact.notify || contact.verifiedName || null, picture: null, phone: contact.id?.endsWith('@s.whatsapp.net') ? contact.id.slice(0, -'@s.whatsapp.net'.length) : null };
   }
 
+  // A contact can carry both its phone-number JID and its LID — record the
+  // pairing so conversations stay unified (see learnLidPn).
+  function learnFromContacts(accountId, contacts) {
+    for (const contact of contacts || []) {
+      if (contact?.id && contact?.lid) learnLidPn(accountId, contact.id, contact.lid, { silent: true });
+    }
+  }
+
+  function normJid(jid) {
+    try { return jidNormalizedUser(String(jid || '')); } catch { return String(jid || ''); }
+  }
+
+  // WhatsApp now addresses a 1:1 conversation by either the contact's
+  // phone-number JID (<n>@s.whatsapp.net) or its LID (<n>@lid) depending on
+  // context, which made the same person show up as two chats. Everything Gakai
+  // stores keys a DM by the phone JID; this resolves any incoming id to that
+  // canonical form when the mapping is known (falling back to the id as-is).
+  function canonicalChatId(accountId, jid) {
+    const raw = String(jid || '');
+    if (!raw || isGroupChatId(raw) || !isLidJid(raw)) return raw;
+    return store.resolveLid(accountId, normJid(raw)) || raw;
+  }
+
+  // Record a lid<->phone-number pairing (order-agnostic) and immediately fold
+  // any chat that was created under the LID into the canonical phone-JID chat.
+  function learnLidPn(accountId, a, b, { silent = false } = {}) {
+    const na = normJid(a), nb = normJid(b);
+    if (!na || !nb || na === nb) return;
+    let lid, pn;
+    if (isLidJid(na) && !isLidJid(nb)) { lid = na; pn = nb; }
+    else if (isLidJid(nb) && !isLidJid(na)) { lid = nb; pn = na; }
+    else return;
+    if (store.resolveLid(accountId, lid) === pn) return;
+    store.setLidMapping(accountId, lid, pn);
+    if (store.chatExists(accountId, lid)) {
+      store.mergeChat(accountId, lid, pn);
+      if (!silent) logger.info({ accountId, lid, pn }, 'Merged a LID chat into its phone-number chat');
+    }
+  }
+
+  function ingestLidMappings(accountId, pairs) {
+    for (const pair of pairs || []) {
+      if (pair?.lid && pair?.pn) learnLidPn(accountId, pair.pn, pair.lid, { silent: true });
+    }
+  }
+
+  // A message key carries the "other" addressing form in remoteJidAlt (and, for
+  // group participants, participantAlt) — the cheapest place to learn a mapping.
+  function learnFromKey(accountId, key) {
+    if (!key) return;
+    if (key.remoteJid && key.remoteJidAlt) learnLidPn(accountId, key.remoteJid, key.remoteJidAlt, { silent: true });
+    if (key.participant && key.participantAlt) learnLidPn(accountId, key.participant, key.participantAlt, { silent: true });
+  }
+
+  // Startup sweep: for any chat still keyed by a LID, ask Baileys for the
+  // phone-number JID and merge. Covers conversations split before Gakai
+  // learned to keep them unified.
+  async function reconcileLidChats(accountId) {
+    const entry = accounts.get(accountId);
+    if (!entry) return;
+    for (const chatId of store.listChatIds(accountId)) {
+      if (!isLidJid(chatId)) continue;
+      let pn = store.resolveLid(accountId, normJid(chatId));
+      if (!pn) {
+        pn = await entry.sock.signalRepository?.lidMapping?.getPNForLID?.(chatId).catch(() => null);
+        if (pn && !isLidJid(pn)) store.setLidMapping(accountId, normJid(chatId), normJid(pn));
+      }
+      if (pn && !isLidJid(pn)) store.mergeChat(accountId, chatId, normJid(pn));
+    }
+  }
+
   function ingestMessages(accountId, messages, { live }) {
     const toStore = [];
     for (const raw of messages) {
@@ -126,8 +206,11 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
       // changed) must not drop every other message in the same batch — skip
       // and log just that one.
       try {
-        const chatId = raw.key?.remoteJid;
-        if (!chatId) continue;
+        if (!raw.key?.remoteJid) continue;
+        // Learn any lid<->phone pairing this message reveals, then key it by
+        // the canonical (phone-JID) chat so one person is always one thread.
+        learnFromKey(accountId, raw.key);
+        const chatId = canonicalChatId(accountId, raw.key.remoteJid);
 
         const reaction = reactionView(raw);
         if (reaction) { store.applyReaction(accountId, reaction); continue; }
@@ -207,16 +290,21 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   async function sendText(accountId, chatId, text, { quotedMessageId, mentions } = {}) {
     const { sock } = requireSocket(accountId);
-    const quoted = quotedMessageId ? store.getMessageById(accountId, chatId, quotedMessageId) : null;
+    // Send to (and store under) the canonical phone-JID chat, even if the
+    // caller still holds a LID id for this conversation.
+    const target = canonicalChatId(accountId, chatId);
+    const quoted = quotedMessageId ? store.getMessageById(accountId, target, quotedMessageId) : null;
     const content = Array.isArray(mentions) && mentions.length ? { text, mentions } : { text };
-    const sent = await sock.sendMessage(chatId, content, quoted ? { quoted } : undefined);
-    const normalized = messageView(sent, { accountId, chatId });
-    store.upsertMessages(accountId, [{ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: sent, overviewMessage: overviewFromMessage(normalized) }]);
+    const sent = await sock.sendMessage(target, content, quoted ? { quoted } : undefined);
+    learnFromKey(accountId, sent?.key);
+    const normalized = messageView(sent, { accountId, chatId: target });
+    store.upsertMessages(accountId, [{ chatId: target, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: sent, overviewMessage: overviewFromMessage(normalized) }]);
     return normalized;
   }
 
   async function setReaction(accountId, chatId, messageId, reaction) {
     const { sock, me } = requireSocket(accountId);
+    chatId = canonicalChatId(accountId, chatId);
     const target = store.getMessageById(accountId, chatId, messageId);
     const key = target?.key || { remoteJid: chatId, id: messageId, fromMe: false };
     const targetChatId = chatId || key.remoteJid;
@@ -228,6 +316,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   async function deleteMessage(accountId, chatId, messageId) {
     const { sock } = requireSocket(accountId);
+    chatId = canonicalChatId(accountId, chatId);
     const target = store.getMessageById(accountId, chatId, messageId);
     const key = target?.key || { remoteJid: chatId, id: messageId, fromMe: true };
     await sock.sendMessage(chatId, { delete: key });
@@ -235,6 +324,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   }
 
   async function deleteChat(accountId, chatId) {
+    chatId = canonicalChatId(accountId, chatId);
     const entry = accounts.get(accountId);
     if (entry) {
       try {
@@ -248,6 +338,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   }
 
   async function markChatRead(accountId, chatId) {
+    chatId = canonicalChatId(accountId, chatId);
     const entry = accounts.get(accountId);
     if (entry) {
       const recent = store.getMessagesPage(accountId, chatId, { limit: 10 }).filter(m => !m.key?.fromMe && m.key);
@@ -258,12 +349,12 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   async function subscribePresence(accountId, chatId) {
     const { sock } = requireSocket(accountId);
-    await sock.presenceSubscribe(chatId).catch(() => {});
+    await sock.presenceSubscribe(canonicalChatId(accountId, chatId)).catch(() => {});
   }
 
   async function publishPresence(accountId, chatId, presence) {
     const { sock } = requireSocket(accountId);
-    await sock.sendPresenceUpdate(PRESENCE_TO_WA[presence] || 'paused', chatId).catch(() => {});
+    await sock.sendPresenceUpdate(PRESENCE_TO_WA[presence] || 'paused', canonicalChatId(accountId, chatId)).catch(() => {});
   }
 
   // `namesOnly` skips the live profilePictureUrl() lookup and returns just
@@ -346,6 +437,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   }
 
   async function getMessages(accountId, chatId, { limit = 20, before, downloadMedia = false } = {}) {
+    chatId = canonicalChatId(accountId, chatId);
     const rows = store.getMessagesPage(accountId, chatId, { limit, before });
     const views = rows.map(raw => messageView(raw, { accountId, chatId }));
     if (downloadMedia) await hydrateMedia(accountId, chatId, rows, views);
@@ -353,6 +445,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   }
 
   async function getMessage(accountId, chatId, messageId) {
+    chatId = canonicalChatId(accountId, chatId);
     const raw = store.getMessageById(accountId, chatId, messageId);
     if (!raw) return null;
     const view = messageView(raw, { accountId, chatId });
@@ -379,6 +472,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   }
 
   async function downloadMedia(accountId, chatId, messageId) {
+    chatId = canonicalChatId(accountId, chatId);
     const raw = store.getMessageById(accountId, chatId, messageId);
     if (!raw) return null;
     const view = messageView(raw, { accountId, chatId });

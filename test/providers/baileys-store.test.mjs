@@ -129,3 +129,59 @@ test('deleteAccountData clears chats, messages, contacts, lids, and reactions fo
   assert.equal(store.getReaction('acct-1', 'm1'), null);
   assert.equal(store.resolveLid('acct-1', 'abc@lid'), null);
 });
+
+test('mergeChat folds a LID chat into the canonical phone-JID chat', () => {
+  const store = freshStore();
+  const lid = '137928596533386@lid';
+  const pn = '14252836897@s.whatsapp.net';
+
+  // An old thread under the phone JID, then a stray one created under the LID.
+  store.upsertMessages('acct-1', [{
+    chatId: pn, messageId: 'old', timestamp: 100, fromMe: false,
+    waMessage: { key: { id: 'old', remoteJid: pn } },
+    overviewMessage: { body: 'old hello', text: 'old hello', timestamp: 100, hasMedia: false, system: null },
+  }]);
+  store.upsertMessages('acct-1', [{
+    chatId: lid, messageId: 'new', timestamp: 200, fromMe: true,
+    waMessage: { key: { id: 'new', remoteJid: lid } },
+    overviewMessage: { body: 'new reply', text: 'new reply', timestamp: 200, hasMedia: false, system: null },
+  }]);
+  store.setChatUnread('acct-1', lid, 3);
+
+  store.mergeChat('acct-1', lid, pn);
+
+  const chats = store.getChatsOverview('acct-1');
+  assert.equal(chats.length, 1, 'the LID chat row is gone');
+  assert.equal(chats[0].id, pn);
+  assert.equal(chats[0].lastMessage.body, 'new reply', 'the newer message wins the preview');
+  assert.equal(chats[0].unreadCount, 3, 'the LID chat\'s unread count carries over');
+
+  const messages = store.getMessagesPage('acct-1', pn, { limit: 10 });
+  assert.deepEqual(messages.map(m => m.key.id).sort(), ['new', 'old']);
+  assert.deepEqual(store.getMessagesPage('acct-1', lid, { limit: 10 }), []);
+});
+
+test('mergeChat is a no-op when the source and target are the same or the source is empty', () => {
+  const store = freshStore();
+  const pn = '14252836897@s.whatsapp.net';
+  store.upsertMessages('acct-1', [{
+    chatId: pn, messageId: 'm1', timestamp: 100, fromMe: false,
+    waMessage: { key: { id: 'm1' } },
+    overviewMessage: { body: 'hi', text: 'hi', timestamp: 100, hasMedia: false, system: null },
+  }]);
+
+  store.mergeChat('acct-1', pn, pn);
+  store.mergeChat('acct-1', 'never@lid', pn);
+
+  const chats = store.getChatsOverview('acct-1');
+  assert.equal(chats.length, 1);
+  assert.equal(chats[0].lastMessage.body, 'hi');
+});
+
+test('listChatIds and chatExists reflect the stored chats', () => {
+  const store = freshStore();
+  store.upsertMessages('acct-1', [{ chatId: 'a@s.whatsapp.net', messageId: 'm1', timestamp: 1, fromMe: false, waMessage: {}, overviewMessage: { body: 'x', text: 'x', timestamp: 1, hasMedia: false, system: null } }]);
+  assert.deepEqual(store.listChatIds('acct-1'), ['a@s.whatsapp.net']);
+  assert.equal(store.chatExists('acct-1', 'a@s.whatsapp.net'), true);
+  assert.equal(store.chatExists('acct-1', 'b@lid'), false);
+});
