@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
-import { Avatar, IconSend } from "./ui-helpers.jsx";
+import { Avatar } from "./ui-helpers.jsx";
 import { confirmDialog } from "./confirm.jsx";
 
 function mediaSrc(message) {
@@ -576,7 +576,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
           }
         }}
       />
-      <button className="primary composer-send" type="submit" aria-label="Send message"><IconSend/></button>
+      <button className="primary" type="submit">Send</button>
     </form>
   </div>;
 }

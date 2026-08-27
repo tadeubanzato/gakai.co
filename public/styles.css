@@ -523,8 +523,6 @@ video.media{background:#000}
 /* Account entry keeps its settings action visible without stealing account selection. */
 .account-row{position:relative;display:flex;align-items:center;gap:2px}.account-row .account{min-width:0;flex:1}.account-row .account-cog{position:absolute;right:8px;top:50%;transform:translateY(-50%);z-index:2;opacity:.82}.account-row:hover .account-cog,.account-row .account-cog:focus-visible{opacity:1}.integration-form{display:grid;gap:10px}.integration-form label:not(.checkbox-field){display:grid;gap:5px;font-size:13px;color:var(--muted)}.integration-form input,.integration-form textarea{width:100%;box-sizing:border-box;background:#202c33;color:#e9edef;border:1px solid #3a4c56;border-radius:8px;padding:10px;font:inherit}.integration-form textarea{resize:vertical}.integration-form .check-row{display:flex;align-items:center;gap:8px}.integration-form .check-row input{width:auto}
 .btn-icon{width:14px;height:14px;flex:none;vertical-align:-2px;margin-right:6px}
-.composer-send{flex:none;align-self:center;width:44px;height:44px;padding:0;border-radius:50%;display:flex;align-items:center;justify-content:center}
-.composer-send .btn-icon{width:20px;height:20px;margin:0;vertical-align:0}
 .subtle-btn{padding:6px 11px;border:1px solid var(--line);background:var(--panel);color:var(--muted);font-weight:600;font-size:12px;border-radius:8px;cursor:pointer}.subtle-btn:hover{background:var(--soft);color:var(--ink);border-color:#3a4c56}.subtle-btn:focus-visible{outline:2px solid #3a4c56;outline-offset:2px}
 .logout{margin:auto auto 0;width:min(210px,100%);text-align:center}
 .details .danger{margin-top:28px;max-width:220px}
