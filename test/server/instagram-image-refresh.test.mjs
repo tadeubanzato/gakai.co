@@ -94,3 +94,13 @@ test('instagram-image rejects a non-Instagram page URL', async () => {
   const response = await realFetch(`${base}/api/app/instagram-image?url=${encodeURIComponent('https://example.com/not-instagram')}`, { headers: { cookie } });
   assert.equal(response.status, 400);
 });
+
+test('instagram-image rejects a raw CDN image URL passed where the page URL belongs', async () => {
+  // A stale client (old cached bundle, or any other caller) might still send
+  // the raw signed cdninstagram.com image link this endpoint used to accept
+  // directly. "cdninstagram.com" ends with the substring "instagram.com", so
+  // a naive suffix check would wrongly accept it as a page URL and try to
+  // fetch it as HTML — assert that doesn't happen.
+  const response = await realFetch(`${base}/api/app/instagram-image?url=${encodeURIComponent('https://scontent-sea1-1.cdninstagram.com/some-image.jpg')}`, { headers: { cookie } });
+  assert.equal(response.status, 400);
+});

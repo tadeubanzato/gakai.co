@@ -137,7 +137,12 @@ function handleProviderEvent(kind,payload){
   }
 }
 const instagramPreviewCache=createBoundedCache({limit:40});
-const safeInstagramPage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/instagram\.com$/i.test(url.hostname)?url:null}catch{return null}};
+// A bare `/instagram\.com$/` suffix match also accepts a CDN image host
+// like cdninstagram.com (it ends with "instagram.com" too) — require a real
+// hostname boundary, same as safeInstagramImage below, so a raw CDN image
+// URL sent to this endpoint by mistake (e.g. a stale cached client bundle)
+// is rejected outright instead of being fetched-and-misread as an HTML page.
+const safeInstagramPage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/(^|\.)instagram\.com$/i.test(url.hostname)?url:null}catch{return null}};
 const safeInstagramImage=value=>{try{const url=new URL(value);return url.protocol==='https:'&&/(^|\.)(cdninstagram\.com|fbcdn\.net)$/i.test(url.hostname)?url:null}catch{return null}};
 const htmlMeta=(html,key)=>{
   const patterns=[
