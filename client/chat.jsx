@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
 import { Avatar } from "./ui-helpers.jsx";
+import { confirmDialog } from "./confirm.jsx";
 
 function mediaSrc(message) {
   const raw = message?.mediaUrl || message?.media?.url;
@@ -500,10 +501,10 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     // Gakai has no control over either way. So for a message the account
     // itself sent, this confirmation must say what will actually happen: it
     // disappears from the whole chat, not just this view.
-    const prompt = message?.fromMe
-      ? "Delete this message for everyone in the chat? This can't be undone."
-      : "Delete this message for you? It won't be removed from the other person's WhatsApp.";
-    if (!window.confirm(prompt)) return;
+    const confirmed = await confirmDialog(message?.fromMe
+      ? { title: "Delete for everyone?", message: "This message will be removed for everyone in the chat. This can't be undone.", confirmLabel: "Delete", danger: true }
+      : { title: "Delete this message?", message: "This removes the message from your view only. It won't be removed from the other person's WhatsApp.", confirmLabel: "Delete", danger: true });
+    if (!confirmed) return;
     try {
       await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
       setMessages(current => current.filter(item => serializedId(item?.id) !== messageId));
@@ -513,7 +514,9 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
   }, [accountId, chatId]);
 
   const deleteConversation = useCallback(async () => {
-    if (!chatId || deleting || !window.confirm(`Delete the conversation with ${chat?.name || chatId}? This removes it from WhatsApp and cannot be undone.`)) return;
+    if (!chatId || deleting) return;
+    const confirmed = await confirmDialog({ title: "Delete conversation?", message: `The conversation with ${chat?.name || chatId} will be removed from WhatsApp. This can't be undone.`, confirmLabel: "Delete conversation", danger: true });
+    if (!confirmed) return;
     setDeleting(true); setError("");
     try {
       await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" });
