@@ -130,7 +130,11 @@ function LinkPreview({ body, preview }) {
     const text = String(value || "").replace(/&#x([\da-f]+);/gi, (_match, code) => String.fromCodePoint(parseInt(code, 16))).replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code))).replace(/&(quot|apos|amp|lt|gt);/gi, (_match, entity) => ({quot:'"',apos:"'",amp:'&',lt:'<',gt:'>'})[entity.toLowerCase()]).replace(/\s+/g, " ").trim();
     return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text;
   };
-  const image = /^data:image\//i.test(String(imageUrl || "")) ? imageUrl : imageUrl ? `${instagram ? "/api/app/instagram-image" : "/api/app/link-image"}?url=${encodeURIComponent(imageUrl)}` : null;
+  // Instagram's own og:image links carry a short-lived signed expiry, unlike
+  // the page URL — so route through the page URL and let the server resolve
+  // (and, if needed, re-scrape) a currently-valid image link server-side,
+  // rather than handing it a CDN link that may already be stale.
+  const image = /^data:image\//i.test(String(imageUrl || "")) ? imageUrl : imageUrl ? (instagram ? `/api/app/instagram-image?url=${encodeURIComponent(url)}` : `/api/app/link-image?url=${encodeURIComponent(imageUrl)}`) : null;
   const previewImage = image && <img src={image} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(event) => {
     const imageNode=event.currentTarget;
     if (!instagram && !imageNode.dataset.directFallback && imageUrl) { imageNode.dataset.directFallback="true"; imageNode.src=imageUrl; return; }

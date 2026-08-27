@@ -155,9 +155,9 @@ function extractJSONLD(html){
   try{return JSON.parse(m[1])}catch{return null}
 }
 
-async function instagramPreview(value){
+async function instagramPreview(value,{force=false}={}){
   const url=safeInstagramPage(value);if(!url)throw Object.assign(new Error('Invalid Instagram URL'),{status:400});
-  const cached=instagramPreviewCache.get(url.href);if(cached)return cached;
+  if(!force){const cached=instagramPreviewCache.get(url.href);if(cached)return cached;}
   const ua='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
   let html='',fetchFailed=false;
   try{
@@ -990,17 +990,37 @@ async function enrichMessage(session,view){
   if (req.method==='GET' && url.pathname==='/api/app/accounts') {return send(res,200,{accounts:await Promise.all(provider.listAccounts().map(accountView))});}
   if(req.method==='GET'&&url.pathname==='/api/app/instagram-preview'){return send(res,200,await instagramPreview(url.searchParams.get('url')||''));}
   if(req.method==='GET'&&url.pathname==='/api/app/instagram-image'){
-  const image=safeInstagramImage(url.searchParams.get('url')||'');
-  if(!image)return send(res,400,{message:'Invalid Instagram image URL'});
+  // Takes the Instagram *page* URL, not a raw CDN image URL: Instagram signs
+  // og:image links with a short-lived expiry (days, not permanent), while
+  // instagramPreview()'s cache of title/description is intentionally
+  // long-lived — so a cached image link can go stale long before the rest
+  // of the preview does. Resolving through instagramPreview() here (and
+  // forcing one re-scrape on failure) lets a stale link self-heal instead
+  // of just going blank forever.
+  const pageUrl=safeInstagramPage(url.searchParams.get('url')||'');
+  if(!pageUrl)return send(res,400,{message:'Invalid Instagram URL'});
   const ua='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
-  const response=await fetch(image,{headers:{'user-agent':ua,'accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'},signal:AbortSignal.timeout(10000),redirect:'follow'});
-  if(!response.ok)return send(res,502,{message:'Instagram image unavailable'});
-  const type=response.headers.get('content-type')||'image/jpeg';
-  if(!type.startsWith('image/'))return send(res,502,{message:'Invalid Instagram image'});
-  const body=Buffer.from(await response.arrayBuffer());
-  if(body.length>5*1024*1024)return send(res,413,{message:'Instagram image is too large'});
-  res.writeHead(200,{'content-type':type,'cache-control':'private, max-age=3600','content-length':String(body.length)});
-  return res.end(body);
+  const fetchImage=async imageHref=>{
+    const image=safeInstagramImage(imageHref);if(!image)return null;
+    try{
+      const response=await fetch(image,{headers:{'user-agent':ua,'accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'},signal:AbortSignal.timeout(10000),redirect:'follow'});
+      if(!response.ok)return null;
+      const type=response.headers.get('content-type')||'image/jpeg';
+      if(!type.startsWith('image/'))return null;
+      const body=Buffer.from(await response.arrayBuffer());
+      if(body.length>5*1024*1024)return null;
+      return {type,body};
+    }catch{return null;}
+  };
+  let preview=await instagramPreview(pageUrl.href);
+  let fetched=preview.image?await fetchImage(preview.image):null;
+  if(!fetched){
+    preview=await instagramPreview(pageUrl.href,{force:true});
+    fetched=preview.image?await fetchImage(preview.image):null;
+  }
+  if(!fetched)return send(res,502,{message:'Instagram image unavailable'});
+  res.writeHead(200,{'content-type':fetched.type,'cache-control':'private, max-age=3600','content-length':String(fetched.body.length)});
+  return res.end(fetched.body);
 }
   if (req.method==='POST' && url.pathname==='/api/app/accounts') {
     const input=await readBody(req), id=`account-${Date.now().toString(36)}`;
