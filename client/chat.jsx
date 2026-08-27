@@ -576,7 +576,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
           }
         }}
       />
-      <button className="primary composer-send" type="submit"><IconSend/> Send</button>
+      <button className="primary composer-send" type="submit" aria-label="Send message"><IconSend/></button>
     </form>
   </div>;
 }
