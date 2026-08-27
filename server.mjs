@@ -266,17 +266,19 @@ async function accountView(s){
 }
 // The inbox list's "last message" preview can contain an unresolved
 // @<number> mention — resolve it the same way a full message body does.
-async function enrichChatOverview(session,view){
+async function enrichChatOverview(session,view,{pictures=true}={}){
   // Baileys never delivers a picture on a chat-sync event (unlike the old
   // provider, which resolved and attached one itself) — the only way to get
   // one is a live per-jid profilePictureUrl() lookup, same call whether the
   // chat is a 1:1 contact or a group. resolveContact() already does that
-  // fetch-and-cache for message-sender avatars; reuse it here.
-  if(!view.picture&&view.id){const contact=await resolveContact(session,view.id);if(contact.picture)view={...view,picture:contact.picture}}
+  // fetch-and-cache for message-sender avatars; reuse it here. `pictures:false`
+  // is the inbox's first paint: use a cached picture if the store already has
+  // one, but never make the live call — the list text must not wait on it.
+  if(!view.picture&&view.id){const contact=await resolveContact(session,view.id,pictures?undefined:{namesOnly:true});if(contact.picture)view={...view,picture:contact.picture}}
   if(view.lastMessage){
     const mentionIds=extractMentionIds(view.lastMessage.body,view.lastMessage.text);
     if(mentionIds.length){
-      const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id)]));
+      const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id,[],{namesOnly:true})]));
       const labels=new Map(contacts.map(([id,contact])=>[id,contact?.name]).filter(([,label])=>label));
       view={...view,lastMessage:{...view.lastMessage,body:resolveMentionLabels(view.lastMessage.body,labels),text:resolveMentionLabels(view.lastMessage.text,labels)}};
     }
@@ -287,14 +289,14 @@ async function enrichChatOverview(session,view){
 // but Baileys keys contacts/pictures by full JID — resolve by matching the
 // digits against the message's own contextInfo.mentionedJid list where
 // possible; falling back to a bare-number WhatsApp jid otherwise.
-async function resolveContactByNumber(session,number,mentionedJids=[]){
+async function resolveContactByNumber(session,number,mentionedJids=[],opts){
   const jid=mentionedJids.find(candidate=>bareJidUser(candidate).replace(/^0+/,'')===number.replace(/^0+/,''))||`${number}@s.whatsapp.net`;
-  return resolveContact(session,jid);
+  return resolveContact(session,jid,opts);
 }
-async function resolveContact(session,rawId){
+async function resolveContact(session,rawId,opts){
   let contactId=String(rawId||'');
   if(isLidJid(contactId))contactId=provider.resolveLid(session,contactId);
-  return provider.getContact(session,contactId);
+  return provider.getContact(session,contactId,opts);
 }
 // A chat/contact picture that isn't already cached costs a live WhatsApp
 // request (see enrichChatOverview) — cap how many of those run at once so a
@@ -1076,11 +1078,21 @@ async function enrichMessage(session,view){
     const chatId=decodeURIComponent(parts[5]);
     return send(res,200,{participants:await provider.getGroupParticipants(id,chatId)});
   }
+  // The inbox avatars, fetched lazily after the list text has already painted.
+  // Each miss is a live WhatsApp profilePictureUrl() call, so this is
+  // concurrency-capped and the client asks for them in small batches.
+  if (req.method==='GET' && parts[4]==='chats' && parts[5]==='pictures') {
+    const ids=String(url.searchParams.get('ids')||'').split(',').map(value=>value.trim()).filter(Boolean).slice(0,80);
+    const entries=await mapWithConcurrency(ids,4,async jid=>{try{const contact=await resolveContact(id,jid);return [jid,contact.picture||null]}catch{return [jid,null]}});
+    return send(res,200,{pictures:Object.fromEntries(entries.filter(([,pictureUrl])=>pictureUrl))});
+  }
   if (req.method==='GET' && parts[4]==='chats') {
     const chats=await provider.getChatsOverview(id);
     const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
     const recent=chats.filter(chat=>hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
-    return send(res,200,(await mapWithConcurrency(recent,3,chat=>enrichChatOverview(id,chat))).sort((a,b) => b.timestamp - a.timestamp));
+    // pictures:false — the list must not block on a burst of avatar lookups;
+    // the client hydrates them separately via /chats/pictures.
+    return send(res,200,(await mapWithConcurrency(recent,8,chat=>enrichChatOverview(id,chat,{pictures:false}))).sort((a,b) => b.timestamp - a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
   if (req.method==='GET' && parts[4]==='messages') {

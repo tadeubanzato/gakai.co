@@ -266,12 +266,16 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     await sock.sendPresenceUpdate(PRESENCE_TO_WA[presence] || 'paused', chatId).catch(() => {});
   }
 
-  async function getContact(accountId, contactId) {
+  // `namesOnly` skips the live profilePictureUrl() lookup and returns just
+  // whatever name/phone/picture is already in the local store — the inbox
+  // list's first paint uses this so it never blocks on ~40 WhatsApp
+  // round-trips; the picture is then filled in lazily (getChatPictures).
+  async function getContact(accountId, contactId, { namesOnly = false } = {}) {
     const cached = store.getContact(accountId, contactId);
     const entry = accounts.get(accountId);
     const cacheKey = `${accountId}:${contactId}`;
     let picture = cached?.picture || null;
-    if (!picture && entry && !noPictureCache.get(cacheKey)) {
+    if (!namesOnly && !picture && entry && !noPictureCache.get(cacheKey)) {
       picture = (await entry.sock.profilePictureUrl(contactId, 'preview').catch(() => null)) || null;
       if (picture) store.setContactPicture(accountId, contactId, picture);
       else noPictureCache.set(cacheKey, true);

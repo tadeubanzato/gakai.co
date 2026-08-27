@@ -62,7 +62,7 @@ export function createMockProvider({ onEvent } = {}) {
   async function subscribePresence() {}
   async function publishPresence() {}
 
-  async function getContact(accountId, contactId) {
+  async function getContact(accountId, contactId, _opts) {
     return contactsFor(accountId).get(contactId) || { id: contactId, phone: null, name: null, picture: null };
   }
   function getContacts(accountId) { return [...contactsFor(accountId).values()]; }

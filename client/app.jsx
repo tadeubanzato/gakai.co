@@ -203,6 +203,29 @@ function App(){
     }catch(x){if(accountsRequestRef.current===version)fail(x.message)}
   },[fail]);
 
+  // Avatars are fetched after the list text has painted — in small sequential
+  // batches so they fill in progressively rather than the whole list waiting
+  // on ~40 WhatsApp profile-picture lookups up front. Guarded by the same
+  // request version as load() so a stale account's avatars never land on the
+  // current list.
+  const hydratePictures=useCallback(async(id,version,list)=>{
+    const missing=list.filter(chat=>!chat.picture&&chat.id).map(chat=>chat.id);
+    for(let i=0;i<missing.length;i+=10){
+      const batch=missing.slice(i,i+10);
+      let pictures;
+      try{pictures=(await api("/api/app/accounts/"+encodeURIComponent(id)+"/chats/pictures?ids="+encodeURIComponent(batch.join(",")))).pictures||{}}
+      catch{return}
+      if(chatsRequestRef.current!==version)return;
+      if(!Object.keys(pictures).length)continue;
+      setChats(current=>{
+        const merged=current.map(chat=>pictures[chat.id]?{...chat,picture:pictures[chat.id]}:chat);
+        chatsCacheRef.current.set(id,merged);
+        return merged;
+      });
+      setChat(current=>current&&pictures[current.id]?{...current,picture:pictures[current.id]}:current);
+    }
+  },[]);
+
   const load=useCallback(async id=>{
     // load() is called from account switches, the SSE change handler, a
     // background poll timer, and after sending a message — any of which can
@@ -218,15 +241,22 @@ function App(){
     try{
       const d=await api("/api/app/accounts/"+encodeURIComponent(id)+"/chats");
       if(chatsRequestRef.current!==version)return;
-      const next=(Array.isArray(d)?d:d.chats||[]).sort((left,right)=>Number(right.timestamp||right.lastMessage?.timestamp||0)-Number(left.timestamp||left.lastMessage?.timestamp||0));
+      // Carry over an avatar we already resolved this session for any row the
+      // fresh (picture-less first-paint) response doesn't include one for, so
+      // a background refresh never blanks avatars that are already on screen.
+      const knownPictures=new Map((chatsCacheRef.current.get(id)||[]).filter(chat=>chat.picture).map(chat=>[chat.id,chat.picture]));
+      const next=(Array.isArray(d)?d:d.chats||[])
+        .map(chat=>!chat.picture&&knownPictures.get(chat.id)?{...chat,picture:knownPictures.get(chat.id)}:chat)
+        .sort((left,right)=>Number(right.timestamp||right.lastMessage?.timestamp||0)-Number(left.timestamp||left.lastMessage?.timestamp||0));
       chatsCacheRef.current.set(id,next);
       setChats(next);
       // A working inbox should open on a useful conversation, not a blank
       // "Select a conversation" placeholder. Keep the reader's existing chat
       // selected during refreshes, otherwise open the newest one.
       setChat(current=>current?next.find(item=>item.id===current.id):suppressAutoSelectRef.current?undefined:next[0]);
+      hydratePictures(id,version,next);
     }catch(x){if(chatsRequestRef.current===version)fail(x.message)}finally{if(chatsRequestRef.current===version)setChatsLoading(false)}
-  },[fail]);
+  },[fail,hydratePictures]);
 
   const handleAccountRenamed=useCallback((id,label)=>{
     setAccounts(current=>current.map(item=>item.id===id?{...item,label}:item));
