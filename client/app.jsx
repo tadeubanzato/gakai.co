@@ -154,6 +154,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
 
 function App(){
   const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState("");
+  const[chatFilter,setChatFilter]=useState("all");
   const settingsRef=useRef(null);
   const chatListRef=useRef(null);
   const suppressAutoSelectRef=useRef(false);
@@ -361,7 +362,11 @@ function App(){
 
   const logout=async()=>{if(!await confirmDialog({title:"Log off?",message:"You'll need your administrator username and password to sign back in.",confirmLabel:"Log off"}))return;await api("/api/app/auth/logout",{method:"POST"}).catch(()=>{});window.location.assign("/")};
   
-  const visible=useMemo(()=>chats.filter(x=>(String(x.name||x.id)+" "+String(x.lastMessage?.body||x.lastMessage?.text||"")).toLowerCase().includes(q.toLowerCase())),[chats,q]);
+  const visible=useMemo(()=>chats.filter(x=>{
+    if(chatFilter==="unread"&&!x.unreadCount)return false;
+    if(chatFilter==="groups"&&!/@g\.us$/i.test(x.id||""))return false;
+    return (String(x.name||x.id)+" "+String(x.lastMessage?.body||x.lastMessage?.text||"")).toLowerCase().includes(q.toLowerCase());
+  }),[chats,q,chatFilter]);
 
   // Keep unread state server-authoritative. The badge clears only after the
   // provider has accepted the read receipt; no arbitrary client timer.
@@ -497,8 +502,13 @@ function App(){
           {account?.status!=="WORKING"?<div className="empty"><div><h1>Account needs attention</h1><p>Reconnect this account to continue.</p><button className="primary" onClick={()=>{setPairCreated(false);setPair(account)}}>Reconnect with QR code</button></div></div>:<div className="inbox">
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>
               <input placeholder="Search conversations" value={q} onChange={e=>setQ(e.target.value)} aria-label="Search conversations"/>
+              <div className="chat-filters" role="tablist" aria-label="Filter conversations">
+                {[["all","All"],["unread","Unread"],["groups","Groups"]].map(([key,label])=>
+                  <button key={key} type="button" role="tab" aria-selected={chatFilter===key} className={"chat-filter"+(chatFilter===key?" on":"")} onClick={()=>setChatFilter(key)}>{label}</button>
+                )}
+              </div>
               {visible.map(x=><button key={x.id} className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}><Avatar item={x}/><span><b>{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||x.lastMessage?.system?.label||"Photo or message"}</small></span>{x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}</button>)}
-              {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">No conversations yet. Gakai is waiting for WhatsApp to finish syncing.</p>:null}
+              {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">{chats.length?"No conversations match this filter.":"No conversations yet. Gakai is waiting for WhatsApp to finish syncing."}</p>:null}
             </section>
             <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} onBack={()=>setChat()} onSent={handleSent} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
