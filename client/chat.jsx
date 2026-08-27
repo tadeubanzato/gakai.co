@@ -464,6 +464,14 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     return participants.filter(p => !q || p.name.toLowerCase().includes(q) || String(p.number).includes(q)).slice(0, 6);
   }, [mentionMenu, participants]);
 
+  // Grow the composer to fit its content; CSS max-height caps it at ~5 lines
+  // and takes over with an internal scrollbar past that.
+  const autoGrowComposer = useCallback(field => {
+    if (!field) return;
+    field.style.height = "auto";
+    field.style.height = `${field.scrollHeight}px`;
+  }, []);
+
   const pickMention = useCallback(participant => {
     const field = composerRef.current;
     if (!field || !participant) return;
@@ -472,11 +480,12 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     field.value = result.text;
     field.setSelectionRange(result.caret, result.caret);
     field.focus();
+    autoGrowComposer(field);
     if (!mentionPicksRef.current.some(p => p.jid === participant.id)) {
       mentionPicksRef.current = [...mentionPicksRef.current, { jid: participant.id, name: participant.name, number: participant.number }];
     }
     setMentionMenu(null);
-  }, []);
+  }, [autoGrowComposer]);
 
   const send = useCallback(async event => {
     event.preventDefault();
@@ -486,6 +495,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     if(typingTimerRef.current)clearTimeout(typingTimerRef.current); sendPresence("paused");
     const { text: wireText, mentions } = buildMentionPayload(text, mentionPicksRef.current);
     field.value = "";
+    autoGrowComposer(field);
     mentionPicksRef.current = [];
     setMentionMenu(null);
     const pending = { id: `pending-${Date.now()}`, body: text, fromMe: true, timestamp: Math.floor(Date.now() / 1000), pending: true, replyTo:replyingTo };
@@ -500,10 +510,10 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
       onSent?.(result.message, chat);
     } catch (cause) {
       setMessages(current => current.filter(message => message.id !== pending.id));
-      if (field) field.value = nextComposerValue(field.value, text);
+      if (field) { field.value = nextComposerValue(field.value, text); autoGrowComposer(field); }
       setError(cause.message || "Could not send message.");
     }
-  }, [accountId, chat, chatId, onSent, replyingTo, sendPresence]);
+  }, [accountId, chat, chatId, onSent, replyingTo, sendPresence, autoGrowComposer]);
 
   const reactToMessage = useCallback(async (message, emoji) => {
     const messageId=serializedId(message?.id);if(!messageId)return;
@@ -512,7 +522,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     try{await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(messageId)}/reaction`,{method:"POST",body:JSON.stringify({reaction:next})});}
     catch(cause){setReactionOverrides(current=>({...current,[messageId]:previous}));setError(cause.message||"Could not update reaction.");}
   },[accountId,reactionOverrides]);
-  const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800);syncMentionMenu(event.currentTarget)},[sendPresence,syncMentionMenu]);
+  const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800);autoGrowComposer(event.currentTarget);syncMentionMenu(event.currentTarget)},[sendPresence,syncMentionMenu,autoGrowComposer]);
 
   // "Delete for me": removes the message from this account's own view. Does
   // not remove it from the other participant's WhatsApp — WhatsApp's real

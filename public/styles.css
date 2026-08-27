@@ -305,6 +305,14 @@ textarea {
   color:var(--ink);
   padding:10px;
 }
+.composer textarea {
+  /* Auto-grows with content (JS sets the height) up to ~5 lines, then holds
+     that height and scrolls internally. */
+  line-height:1.4;
+  min-height:42px;
+  max-height:124px;
+  overflow-y:auto;
+}
 
 /* Empty / blank states */
 .blank,.empty {
@@ -644,7 +652,7 @@ video.media{background:#000}
   }
 }
 /* Live presence status from the authenticated WebSocket channel. */
-.typing-indicator{padding:0 18px 6px;color:#8ce6cf;font-size:12px;background:var(--panel)}
+.typing-indicator{align-self:center;margin:2px auto 8px;display:flex;align-items:center;gap:6px;background:var(--soft);color:var(--muted);font-weight:600;font-size:12px;border-radius:999px;padding:7px 15px;box-shadow:0 4px 14px #0006}
 .jump-to-latest{position:sticky;bottom:0;align-self:center;margin-top:auto;display:flex;align-items:center;gap:6px;background:var(--green);color:#063b29;font-weight:750;font-size:13px;border-radius:999px;padding:9px 16px;box-shadow:0 4px 14px #0007;z-index:4}
 .media-unavailable{margin:0;padding:8px 0;display:flex;align-items:center;gap:8px}.media-failed{color:#e8a33d}.media-failed button,.media-failed a{background:var(--soft);color:var(--ink);border-radius:6px;padding:4px 9px;font-size:12px;text-decoration:none}.media-failed a:hover{background:#2a3941}
 .hint[role="status"]{color:var(--green)}
