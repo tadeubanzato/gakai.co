@@ -19,13 +19,14 @@
 - [Installation](#installation)
 - [Accessing Gakai](#accessing-gakai)
 - [Adding WhatsApp Accounts](#adding-whatsapp-accounts)
-- [Automation & n8n Integration](#automation--n8n-integration)
+- [Automation & AI](#automation--ai)
 - [Reverse Proxy & HTTPS](#reverse-proxy--https)
 - [Environment Variables](#environment-variables)
 - [Operations](#operations)
 - [Architecture](#architecture)
 - [Security](#security)
 - [Development](#development)
+- [Tech Stack](#tech-stack)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -54,10 +55,16 @@ There is no separate WhatsApp provider process to run, configure, or pull. Gakai
 | QR-code pairing flow in browser | ✅ Live |
 | Text, image, audio, video, document messages | ✅ Live |
 | Group chats with sender identity | ✅ Live |
+| Group @-mentions — participant autocomplete in the composer | ✅ Live |
+| Mention alerts — toast when you're @-tagged in a group | ✅ Live |
+| Message reactions | ✅ Live |
+| Reply / quote, delete for everyone | ✅ Live |
 | Unread counts and bold unread state | ✅ Live |
+| Inbox filters — all / unread / groups | ✅ Live |
 | Media relay (images, documents, voice notes) | ✅ Live |
 | Open Graph and Instagram link previews | ✅ Live |
 | n8n one-click automation connect | ✅ Live |
+| Native AI auto-replies — OpenAI-compatible proxy or n8n AI Agent | ✅ Live |
 | Webhook automation subscriptions | ✅ Live |
 | scrypt password hashing (salted) | ✅ Live |
 | Direct, in-process Baileys WhatsApp integration — no provider process | ✅ Live |
@@ -168,7 +175,7 @@ Gakai does not terminate TLS. For internet-facing deployments, put it behind a r
 ## Adding WhatsApp Accounts
 
 1. Sign in to the Gakai dashboard
-2. Click **Add Account** in the sidebar
+2. Click **+ Add account** at the top of the inbox
 3. Scan the QR code with WhatsApp on your phone:
    - WhatsApp → **Settings** → **Linked Devices** → **Link a Device**
 4. The account appears in the inbox once pairing completes
@@ -178,24 +185,44 @@ Sessions persist across restarts. If a session expires, the dashboard prompts yo
 
 ---
 
-## Automation & n8n Integration
+## Automation & AI
 
-Gakai includes a built-in automation gateway. Incoming WhatsApp messages are forwarded in real time to any webhook URL you register — including n8n.
+Gakai includes a built-in automation gateway. Each WhatsApp account has its own
+account-scoped integration settings, reached from the **⚙ icon next to the
+account** → **Services**.
+
+The n8n reply paths (the n8n reply template and the n8n AI Agent) only fire for
+messages you would need to act on personally — direct messages, and group
+messages where the account is explicitly **@-tagged** — not every message in
+every group.
 
 ### Connect n8n in one click
 
-1. In Gakai, open an account and go to **Automations → Connect n8n**
-2. Paste your n8n instance URL and API key
-3. Gakai automatically creates the credentials and a starter workflow in n8n
+1. Open the account's settings (⚙) → **Services → n8n Automation**
+2. Paste your n8n instance URL and API key, then **Save and verify**
+3. Gakai creates the credentials and a starter workflow in n8n automatically
 4. Incoming messages start flowing to your n8n workflow immediately
+5. Optionally toggle **Enable n8n replies** to have that workflow reply back through WhatsApp
 
-Works with both self-hosted n8n and n8n Cloud.
+Works with both self-hosted n8n and n8n Cloud. Use **Send test message** to fire a
+simulated event at the workflow without messaging a real contact.
 
-### Manual webhook
+### Native AI replies
 
-1. Go to **Settings → Automations**
-2. Enter any HTTPS webhook URL
-3. Save — Gakai POSTs normalized events to that URL in real time
+1. Open the account's settings (⚙) → **Services → LLM Proxy**
+2. Enter an OpenAI-compatible proxy URL (e.g. LiteLLM, OmniRoute), an API key, and a model
+3. Choose how replies are generated:
+   - **Enable native AI replies** — Gakai sends the incoming message straight to the proxy and returns its response through WhatsApp, no n8n involved
+   - **Enable n8n AI Agent replies** — Gakai builds/updates an AI Agent workflow in n8n and replies through that (requires n8n connected)
+
+The three reply paths (n8n replies, n8n AI Agent, native AI) are mutually
+exclusive — turning one on turns the others off.
+
+### Custom webhook subscriptions
+
+Additional webhook subscriptions can be registered per account through the
+`POST /api/app/accounts/:id/automations` endpoint. Gakai POSTs the normalized
+event (same shape as below) with an `x-gakai-secret` header for authentication.
 
 ### Example payload
 
@@ -412,9 +439,10 @@ gakai.co/
 ├── client/
 │   ├── app.jsx             # React browser application — accounts, pairing/QR
 │   ├── chat.jsx            # Conversation view — composer, message list, presence
-│   ├── chat-helpers.mjs    # Pure helpers: pagination, optimistic send, message merge
+│   ├── chat-helpers.mjs    # Pure helpers: pagination, optimistic send, message merge, @-mention parsing
 │   ├── app-helpers.mjs     # Shared fetch wrapper and async-mutex helper
-│   └── ui-helpers.jsx      # Shared UI bits (avatar, etc.)
+│   ├── confirm.jsx         # App-wide confirmation dialog (replaces window.confirm)
+│   └── ui-helpers.jsx      # Shared UI bits (avatar, icons)
 ├── public/
 │   ├── assets/app.js       # esbuild output of client/ (generated, gitignored)
 │   ├── styles.css          # Dashboard styles
@@ -425,6 +453,7 @@ gakai.co/
 │   │   ├── baileys/        # The WhatsApp adapter: socket lifecycle, local SQLite store, media cache
 │   │   ├── mock/            # In-memory test double with the same method surface, used by the test suite
 │   │   └── index.mjs        # Single provider-selection point
+│   ├── lib/                # Small shared utilities (SSRF-guarded fetch, LRU cache, HTML helpers)
 │   ├── api/                # Planned provider-neutral API layer
 │   ├── storage/            # Planned storage abstraction
 │   ├── realtime/           # Realtime extraction target; current endpoints live in server.mjs
@@ -454,7 +483,7 @@ gakai.co/
 
 ## Roadmap
 
-1. **Provider-neutral message model** — ✅ stable domain types (`src/domain/message.mjs`), fixture-based rendering tests, and a clean adapter boundary (`src/providers/`) are live; hardening continues (see the open PRs on identity handling, group metadata, and message receipts)
+1. **Provider-neutral message model** — ✅ stable domain types (`src/domain/message.mjs`), fixture-based rendering tests, and a clean adapter boundary (`src/providers/`) are live; hardening of identity/JID handling, group metadata, and receipts is ongoing
 2. **Durable event storage** — ✅ idempotent event persistence and SSE replay are live (`app_events`, `/api/app/events`)
 3. **Real-time browser push** — ✅ authenticated SSE and WebSocket typing/presence are live
 4. **Production topology** — Postgres, object storage, multi-instance health monitoring
