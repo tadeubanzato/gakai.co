@@ -171,6 +171,19 @@ function App(){
 
   const fail=useCallback(x=>{setNote(x);setTimeout(()=>setNote(""),4500)},[]);
 
+  // Mention toasts: raised from the account's live SSE stream when a group
+  // message @-tags this account and that chat isn't already open. Kept in a
+  // ref-mirrored open-chat id and a seen-event set so the stream handler
+  // (which must not re-subscribe on every chat switch) can read current state
+  // and never double-toast a replayed/reconnected event.
+  const[mentionToasts,setMentionToasts]=useState([]);
+  const openChatIdRef=useRef(null);
+  const chatsRef=useRef(chats);
+  const seenEventIdsRef=useRef(new Set());
+  useEffect(()=>{chatsRef.current=chats},[chats]);
+  useEffect(()=>{openChatIdRef.current=chat?.id||null},[chat?.id]);
+  const dismissMentionToast=useCallback(toastId=>setMentionToasts(current=>current.filter(item=>item.id!==toastId)),[]);
+
   const refresh=useCallback(async()=>{
     // Several call sites (mount, pairing, account delete, SSE-driven polling)
     // can each kick off a /accounts fetch. Only the most recently started one
@@ -235,7 +248,27 @@ function App(){
     if(!account || account.status!=="WORKING") return;
     const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(account.id));
     const update=event=>{
-      try{const change=JSON.parse(event.data);if(change.account?.id===account.id)loadRef.current(account.id)}catch{}
+      try{
+        const change=JSON.parse(event.data);
+        if(change.account?.id!==account.id)return;
+        loadRef.current(account.id);
+        const eventId=change.id||event.lastEventId;
+        // Toast a group @-mention of this account — but only a genuinely new
+        // one: skip the burst of recent events every fresh SSE connection
+        // replays (deduped by id, backstopped by a freshness window) and skip
+        // the chat the reader already has open.
+        if(change.type==="message.received"&&change.mentionsYou&&eventId&&!seenEventIdsRef.current.has(eventId)){
+          if(seenEventIdsRef.current.size>500)seenEventIdsRef.current.clear();
+          seenEventIdsRef.current.add(eventId);
+          const fresh=Date.now()-Date.parse(change.occurredAt||0)<60000;
+          if(fresh&&change.chat?.id&&change.chat.id!==openChatIdRef.current){
+            const known=chatsRef.current.find(item=>item.id===change.chat.id);
+            const toast={id:eventId,chatId:change.chat.id,from:change.message?.sender?.name||"Someone",group:known?.name||change.chat?.name||"a group"};
+            setMentionToasts(current=>[...current.filter(item=>item.id!==toast.id),toast]);
+            window.setTimeout(()=>setMentionToasts(current=>current.filter(item=>item.id!==toast.id)),6000);
+          }
+        }
+      }catch{}
     };
     stream.addEventListener("gakai",update);
     let timer;
@@ -391,9 +424,17 @@ function App(){
   if(!accountsReady)return <main className="pairing">Loading your workspace…</main>;
   if(pair)return <Pairing account={pair} onCancel={cancelPairing} onLinked={x=>{setPair();setPairCreated(false);setAccount(x);refresh()}}/>;
   if((add||!accounts.length)&&!pair)return <main className="pairing"><section className="pair-card"><span className="eyebrow">CONNECT WHATSAPP</span><h1>Preparing your QR code…</h1><p>Gakai is creating a secure WhatsApp connection. The QR code will appear here automatically.</p><div className="qr loading" role="status">Starting WhatsApp…</div>{accounts.length?<button className="nav wide" onClick={()=>setAdd(false)}>Cancel</button>:null}</section></main>;
+  const mentionToastStack=mentionToasts.length>0&&<div className="mention-toasts">
+    {mentionToasts.map(toast=><div key={toast.id} className="mention-toast" role="status">
+      <button type="button" onClick={()=>{const target=chats.find(item=>item.id===toast.chatId);if(target)handleChatClick(target);dismissMentionToast(toast.id)}}>
+        <b>{toast.from}</b> mentioned you in <b>{toast.group}</b>
+      </button>
+      <button type="button" className="mention-toast-dismiss" aria-label="Dismiss" onClick={()=>dismissMentionToast(toast.id)}>×</button>
+    </div>)}
+  </div>;
   const closeSettings=()=>{history.pushState({},"","/");setSettings(false)};
   const accountDeleted=async()=>{history.replaceState({},"","/");setSettings(false);setChat();await refresh()};
-  if(settings&&account)return <><Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>{note?<div className="toast" role="status">{note}</div>:null}</>;
+  if(settings&&account)return <><Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>{note?<div className="toast" role="status">{note}</div>:null}{mentionToastStack}</>;
 
   return (
     <>
@@ -433,6 +474,7 @@ function App(){
       </div>
       {settings&&account?<Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>:null}
       {note?<div className="toast" role="status">{note}</div>:null}
+      {mentionToastStack}
     </>
   )
 }

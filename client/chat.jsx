@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage } from "./chat-helpers.mjs";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
 import { Avatar } from "./ui-helpers.jsx";
 
@@ -220,6 +220,11 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
   const [newMessageCount, setNewMessageCount] = useState(0);
+  const [participants, setParticipants] = useState([]);
+  const [mentionMenu, setMentionMenu] = useState(null); // { query, index } while the reader is typing "@…"
+  const mentionPicksRef = useRef([]); // { jid, name, number } the reader chose from the menu this compose
+  const composerRef = useRef(null);
+  const participantsLoadedRef = useRef(null); // chatId whose participant list is already fetched
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const typingSocketRef = useRef(null);
@@ -405,19 +410,64 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     if (pane) pane.scrollTop = pane.scrollHeight;
   }, []);
 
+  // Group @-mentions: the participant list backs the suggestion menu, fetched
+  // once per group and only when the reader actually types "@" (a live
+  // provider call — never eager per chat open).
+  const isGroup = /@g\.us$/i.test(chatId || "");
+  useEffect(() => { setParticipants([]); setMentionMenu(null); mentionPicksRef.current = []; participantsLoadedRef.current = null; }, [chatId]);
+  const loadParticipants = useCallback(async () => {
+    if (!isGroup || !chatId || participantsLoadedRef.current === chatId) return;
+    participantsLoadedRef.current = chatId;
+    try {
+      const data = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/participants`);
+      setParticipants(Array.isArray(data.participants) ? data.participants : []);
+    } catch { participantsLoadedRef.current = null; }
+  }, [accountId, chatId, isGroup]);
+
+  const syncMentionMenu = useCallback(field => {
+    if (!isGroup || !field) { setMentionMenu(null); return; }
+    const query = mentionQueryAt(field.value, field.selectionStart);
+    if (query === null) { setMentionMenu(null); return; }
+    loadParticipants();
+    setMentionMenu(menu => ({ query, index: menu && menu.query === query ? menu.index : 0 }));
+  }, [isGroup, loadParticipants]);
+
+  const mentionMatches = useMemo(() => {
+    if (!mentionMenu) return [];
+    const q = mentionMenu.query.toLowerCase();
+    return participants.filter(p => !q || p.name.toLowerCase().includes(q) || String(p.number).includes(q)).slice(0, 6);
+  }, [mentionMenu, participants]);
+
+  const pickMention = useCallback(participant => {
+    const field = composerRef.current;
+    if (!field || !participant) return;
+    const result = applyMentionPick(field.value, field.selectionStart, participant.name);
+    if (!result) return;
+    field.value = result.text;
+    field.setSelectionRange(result.caret, result.caret);
+    field.focus();
+    if (!mentionPicksRef.current.some(p => p.jid === participant.id)) {
+      mentionPicksRef.current = [...mentionPicksRef.current, { jid: participant.id, name: participant.name, number: participant.number }];
+    }
+    setMentionMenu(null);
+  }, []);
+
   const send = useCallback(async event => {
     event.preventDefault();
     const field = event.currentTarget.elements.text;
     const text = field?.value?.trim();
     if (!text || !chatId) return;
     if(typingTimerRef.current)clearTimeout(typingTimerRef.current); sendPresence("paused");
+    const { text: wireText, mentions } = buildMentionPayload(text, mentionPicksRef.current);
     field.value = "";
+    mentionPicksRef.current = [];
+    setMentionMenu(null);
     const pending = { id: `pending-${Date.now()}`, body: text, fromMe: true, timestamp: Math.floor(Date.now() / 1000), pending: true, replyTo:replyingTo };
     followLatestRef.current = true;
     setNewMessageCount(0);
     setMessages(current => [...current, pending]);
     try {
-      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages`, { method: "POST", body: JSON.stringify({ chatId, text, replyTo:replyingTo?.id }) });
+      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages`, { method: "POST", body: JSON.stringify({ chatId, text: wireText, replyTo:replyingTo?.id, mentions }) });
       const confirmed = confirmSentMessage(pending, result.message);
       setMessages(current => merge(current.filter(message => message.id !== pending.id), confirmed ? [confirmed] : []));
       setReplyingTo(null);
@@ -436,7 +486,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     try{await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(messageId)}/reaction`,{method:"POST",body:JSON.stringify({reaction:next})});}
     catch(cause){setReactionOverrides(current=>({...current,[messageId]:previous}));setError(cause.message||"Could not update reaction.");}
   },[accountId,reactionOverrides]);
-  const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800)},[sendPresence]);
+  const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800);syncMentionMenu(event.currentTarget)},[sendPresence,syncMentionMenu]);
 
   // "Delete for me": removes the message from this account's own view. Does
   // not remove it from the other participant's WhatsApp — WhatsApp's real
@@ -493,14 +543,30 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
     <form className="composer" onSubmit={send}>
       {replyingTo&&<div className="composer-reply"><span><b>Replying to</b>{String(replyingTo.body||replyingTo.text||"Message").slice(0,100)}</span><button type="button" onClick={()=>setReplyingTo(null)} aria-label="Cancel reply">×</button></div>}
+      {mentionMenu&&mentionMatches.length>0&&<ul className="mention-suggest" role="listbox" aria-label="Mention someone">
+        {mentionMatches.map((participant,i)=><li key={participant.id} role="option" aria-selected={i===mentionMenu.index}>
+          <button type="button" className={i===mentionMenu.index?"active":""} onMouseDown={e=>{e.preventDefault();pickMention(participant)}}>
+            <b>{participant.name}</b>{participant.number?<small>+{participant.number}</small>:null}
+          </button>
+        </li>)}
+      </ul>}
       <textarea
+        ref={composerRef}
         name="text"
         rows="1"
         placeholder="Type a message"
         aria-label="Message"
         onInput={handleComposerInput}
-        onBlur={()=>{if(typingTimerRef.current)clearTimeout(typingTimerRef.current);sendPresence("paused")}}
+        onKeyUp={e=>syncMentionMenu(e.currentTarget)}
+        onClick={e=>syncMentionMenu(e.currentTarget)}
+        onBlur={()=>{if(typingTimerRef.current)clearTimeout(typingTimerRef.current);sendPresence("paused");setMentionMenu(null)}}
         onKeyDown={e => {
+          if (mentionMenu && mentionMatches.length) {
+            if (e.key === "ArrowDown") { e.preventDefault(); setMentionMenu(m => ({ ...m, index: (m.index + 1) % mentionMatches.length })); return; }
+            if (e.key === "ArrowUp") { e.preventDefault(); setMentionMenu(m => ({ ...m, index: (m.index - 1 + mentionMatches.length) % mentionMatches.length })); return; }
+            if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickMention(mentionMatches[mentionMenu.index] || mentionMatches[0]); return; }
+            if (e.key === "Escape") { e.preventDefault(); setMentionMenu(null); return; }
+          }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             e.currentTarget.form.requestSubmit();

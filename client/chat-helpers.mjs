@@ -50,6 +50,50 @@ export function confirmSentMessage(pending, resultMessage) {
   };
 }
 
+// The reader is "in a mention" when the text immediately before the caret is
+// an unbroken "@…" run — no whitespace and no second "@" since the "@". Returns
+// the partial name typed so far (may be ""), or null when the caret isn't in a
+// mention. Drives the participant suggestion menu in the composer.
+export function mentionQueryAt(text, caret) {
+  const before = String(text || "").slice(0, Math.max(0, caret ?? 0));
+  const match = before.match(/(?:^|\s)@([^\s@]*)$/);
+  return match ? match[1] : null;
+}
+
+// Replace the active "@query" fragment before the caret with "@Name " and
+// report where the caret should land afterward. Returns null if the caret
+// isn't in a mention fragment (so the caller leaves the field untouched).
+export function applyMentionPick(text, caret, name) {
+  const value = String(text || "");
+  const at = Math.max(0, caret ?? 0);
+  const before = value.slice(0, at);
+  const after = value.slice(at);
+  const match = before.match(/(?:^|\s)@([^\s@]*)$/);
+  if (!match) return null;
+  const atSign = before.length - match[1].length - 1; // index of the "@"
+  const insert = `@${name} `;
+  return { text: before.slice(0, atSign) + insert + after.replace(/^\s/, ""), caret: atSign + insert.length };
+}
+
+// Turn the composer's human-readable text (which carries "@Display Name" for
+// each participant the reader picked from the mention menu) into the wire form
+// WhatsApp expects: each picked participant's bare number as "@<number>" in the
+// text, plus the matching JIDs collected into a `mentions` array Baileys puts
+// on contextInfo.mentionedJid. A pick whose "@Name" the reader has since edited
+// out of the text is dropped — never sent as a silent, invisible mention.
+export function buildMentionPayload(text, picks) {
+  let wire = String(text || "");
+  const mentions = [];
+  for (const pick of picks || []) {
+    if (!pick?.jid || !pick?.name || !pick?.number) continue;
+    const token = `@${pick.name}`;
+    if (!wire.includes(token)) continue;
+    wire = wire.split(token).join(`@${pick.number}`);
+    if (!mentions.includes(pick.jid)) mentions.push(pick.jid);
+  }
+  return { text: wire, mentions };
+}
+
 export function merge(current, extra) {
   const keyed = new Map();
   [...current, ...extra].forEach((message, index) => keyed.set(idFor(message, index), message));

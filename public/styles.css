@@ -383,6 +383,18 @@ textarea {
   padding:20px;
   text-align:center;
 }
+.mention-toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:40;max-width:min(360px,calc(100vw - 36px))}
+.mention-toast{display:flex;align-items:stretch;background:#263b44;border:1px solid #415661;border-radius:9px;overflow:hidden;box-shadow:0 6px 20px #0006}
+.mention-toast>button:first-child{flex:1;min-width:0;text-align:left;padding:11px 13px;background:none;color:#e9edef;font:inherit;font-size:13px;line-height:1.35}
+.mention-toast>button:first-child b{color:#8ce6cf;font-weight:700}
+.mention-toast-dismiss{flex:none;padding:0 12px;background:none;color:#9fb4ae;font-size:18px;border-left:1px solid #3a4c56}
+.mention-toast-dismiss:hover{color:#e9edef}
+.mention-suggest{flex:0 0 100%;list-style:none;margin:0 0 6px;padding:4px;background:#1f2c33;border:1px solid #3a4c56;border-radius:9px;max-height:210px;overflow-y:auto;box-shadow:0 -4px 18px #0005}
+.mention-suggest li{margin:0}
+.mention-suggest button{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;padding:8px 10px;background:none;color:#e9edef;font:inherit;font-size:13px;border-radius:6px}
+.mention-suggest button.active,.mention-suggest button:hover{background:#2a3942}
+.mention-suggest button b{font-weight:600}
+.mention-suggest button small{color:#8aa0a8;font-size:11px}
 
 /* Responsive breakpoint */
 @media(max-width:720px) {

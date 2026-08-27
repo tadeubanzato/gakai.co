@@ -375,15 +375,18 @@ async function dispatchAutomationEvent(payload){
   if(!message.body&&!message.text&&!message.hasMedia)return;
   const chat={id:chatId,kind,name:null};
   if(message.sender?.id){const contact=await resolveContact(accountId,message.sender.id);message.sender={...message.sender,phone:contact.phone||null,name:message.sender.name||contact.name||null};if(kind==="direct")chat.phone=contact.phone||null;}
-  const event={id:`evt_${message.id}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,source:"whatsapp"};
+  // Whether this account was explicitly @-tagged in a group. A direct message
+  // is not a "mention" (the whole message is already for you) — the browser
+  // uses this flag to raise a mention toast, so it must mean the narrow thing.
+  const mentionsYou=kind==="group"&&Array.isArray(message.mentionedJids)&&message.mentionedJids.length
+    ?mentionsIdentity(message.mentionedJids,provider.getAccount(accountId)?.ownJid)
+    :false;
+  const event={id:`evt_${message.id}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,mentionsYou,source:"whatsapp"};
   // Persist before notifying the browser or downstream automation. This gives
   // reconnecting clients a small durable replay window and avoids exposing raw
   // provider payloads outside the adapter boundary.
   if (!recordAppEvent(event)) return;
-  let ownMentioned=kind==="direct";
-  if(!ownMentioned&&Array.isArray(message.mentionedJids)&&message.mentionedJids.length){
-    ownMentioned=mentionsIdentity(message.mentionedJids,provider.getAccount(accountId)?.ownJid);
-  }
+  const ownMentioned=kind==="direct"||mentionsYou;
   const nativeEnabled=Boolean(llmConfig(accountId)?.nativeEnabled);
   // Native mode is intentionally a hard boundary for Gakai-managed n8n
   // reply templates. This also protects an account that has stale persisted
@@ -1069,6 +1072,10 @@ async function enrichMessage(session,view){
       return send(res,200,{ok:true});
     }
   }
+  if (req.method==='GET' && parts[4]==='chats' && parts[5] && parts[6]==='participants') {
+    const chatId=decodeURIComponent(parts[5]);
+    return send(res,200,{participants:await provider.getGroupParticipants(id,chatId)});
+  }
   if (req.method==='GET' && parts[4]==='chats') {
     const chats=await provider.getChatsOverview(id);
     const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
@@ -1106,7 +1113,8 @@ async function enrichMessage(session,view){
   }
   if (req.method==='POST' && parts[4]==='messages') {
     const input=await readBody(req),replyTo=input.replyTo?String(input.replyTo):null; if (!input.chatId || !input.text?.trim()) return send(res,400,{message:'Recipient and message are required'});
-    const sent=await provider.sendText(id,input.chatId,input.text.trim(),{quotedMessageId:replyTo});
+    const mentions=Array.isArray(input.mentions)?input.mentions.filter(jid=>typeof jid==='string'&&jid.length<=128).slice(0,32):[];
+    const sent=await provider.sendText(id,input.chatId,input.text.trim(),{quotedMessageId:replyTo,mentions});
     return send(res,200,{message:await enrichMessage(id,sent)});
   }
   if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req),label=String(input.label||'').trim().slice(0,80);if(!label)return send(res,400,{message:'Account name is required'});store.accountLabels[id]=label;await persist();return send(res,200,{ok:true,label});}
