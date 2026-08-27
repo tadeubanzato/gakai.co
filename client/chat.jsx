@@ -122,7 +122,13 @@ function LinkPreview({ body, preview }) {
     url: preview?.url || url,
     title: preview?.title || fetched?.title || null,
     description: preview?.description || fetched?.description || null,
-    image: preview?.image || fetched?.image || null
+    // WhatsApp's own embedded preview.image is a tiny (often ~90x90px)
+    // thumbnail meant to keep the message payload light — Instagram's own
+    // og:image (what instagram-preview fetches) is far higher resolution.
+    // Prefer that fetched scrape for Instagram; fall back to WhatsApp's
+    // thumbnail only if the scrape hasn't landed yet or failed. Every other
+    // site keeps preview.image first, same as before.
+    image: (instagram ? fetched?.image : null) || preview?.image || fetched?.image || null
   };
   const imageUrl = typeof data.image === "string" ? data.image : data.image?.href || null;
   const hasContent = data.title || data.description || data.image;
