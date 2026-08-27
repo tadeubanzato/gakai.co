@@ -16,9 +16,11 @@ function avatarSrc(value) {
 // currentColor). Kept as inline SVG rather than an icon font/library so they
 // stay self-contained and render identically everywhere.
 export function IconSend({ className = "btn-icon" }) {
+  // Feather "send" — the standard paper-plane send glyph.
   return (
-    <svg className={className} viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
-      <path fill="currentColor" d="M2.5 4.5 L21.5 12 L2.5 19.5 L5.7 12 Z" />
+    <svg className={className} viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
     </svg>
   );
 }
