@@ -44,6 +44,25 @@ test('messageView shapes a link-preview message from Baileys\' own extendedTextM
   assert.equal(view.linkPreview.image, null);
 });
 
+test('messageView wraps an already-base64 jpegThumbnail string without re-encoding it', async () => {
+  // Baileys delivers extendedTextMessage.jpegThumbnail as a plain base64
+  // string here (confirmed against real stored message payloads), not a
+  // Buffer/Uint8Array. Treating it as raw bytes (Buffer.from(string)
+  // defaults to utf8) re-encodes the base64 text itself into a second
+  // layer of base64 — a data URI the browser can never decode. The fixed
+  // image field must be exactly the fixture's base64 wrapped in the data
+  // URI prefix, not a re-encoded version of it.
+  const message = await fixture('message-linkpreview-thumbnail.json');
+  const view = messageView(message, ctx);
+  const thumbnailBase64 = message.message.extendedTextMessage.jpegThumbnail;
+
+  assert.equal(view.linkPreview.image, `data:image/jpeg;base64,${thumbnailBase64}`);
+  // And that base64 payload must decode to real JPEG bytes on the first
+  // pass — not to more base64 text (the double-encoding failure mode).
+  const decoded = Buffer.from(thumbnailBase64, 'base64');
+  assert.deepEqual(decoded.subarray(0, 3), Buffer.from([0xff, 0xd8, 0xff]));
+});
+
 test('normalizedTimestamp treats large numbers as milliseconds and small numbers as seconds', () => {
   assert.equal(normalizedTimestamp(1735689600000), 1735689600);
   assert.equal(normalizedTimestamp(1735689600), 1735689600);

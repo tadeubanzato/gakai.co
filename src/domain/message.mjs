@@ -150,6 +150,12 @@ export function mentionsIdentity(mentionedJids, ownJid) {
 
 function base64Thumbnail(bytes) {
   if (!bytes || !bytes.length) return null;
+  // Baileys delivers this protobuf `bytes` field as a plain base64 string
+  // here, not a Buffer/Uint8Array — Buffer.from(string) defaults to utf8,
+  // which would treat that base64 text as literal characters and encode
+  // it again, producing a data URI the browser can never decode. Wrap a
+  // string input directly instead of re-encoding it.
+  if (typeof bytes === 'string') return `data:image/jpeg;base64,${bytes}`;
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
   return `data:image/jpeg;base64,${buffer.toString('base64')}`;
 }

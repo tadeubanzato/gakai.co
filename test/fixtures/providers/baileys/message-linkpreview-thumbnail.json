@@ -1,0 +1,14 @@
+{
+  "key": { "remoteJid": "551199999999@s.whatsapp.net", "fromMe": false, "id": "3EB0FIXTURE4" },
+  "messageTimestamp": 1735689701,
+  "message": {
+    "extendedTextMessage": {
+      "text": "https://example.com/article-with-thumbnail",
+      "canonicalUrl": "https://example.com/article-with-thumbnail",
+      "matchedText": "https://example.com/article-with-thumbnail",
+      "title": "Example Article With Thumbnail",
+      "description": "A sanitized example description.",
+      "jpegThumbnail": "/9j/4AAQSkZJRgABAQAAAQABAAD/2Q=="
+    }
+  }
+}
