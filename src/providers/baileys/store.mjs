@@ -195,6 +195,47 @@ export function openStore(db) {
     stmt.deleteChat.run(accountId, chatId);
   }
 
+  function listChatIds(accountId) {
+    return db.prepare(`SELECT chat_id FROM wa_chats WHERE account_id=?`).all(accountId).map(row => row.chat_id);
+  }
+
+  function chatExists(accountId, chatId) {
+    return Boolean(stmt.getChat.get(accountId, chatId));
+  }
+
+  // Fold one chat's history into another and drop the source row. Used to
+  // reunite a conversation that WhatsApp split across a contact's phone-number
+  // JID and its LID (privacy) identifier: `from` (the LID chat) is merged into
+  // `to` (the canonical phone-JID chat). Idempotent — a re-run with nothing to
+  // move is a no-op.
+  function mergeChat(accountId, fromChatId, toChatId) {
+    if (!fromChatId || !toChatId || fromChatId === toChatId) return;
+    stmt.ensureChat.run(accountId, toChatId, now());
+    db.prepare(`
+      INSERT INTO wa_messages(account_id, chat_id, message_id, timestamp, from_me, payload_json, created_at)
+      SELECT account_id, ?, message_id, timestamp, from_me, payload_json, created_at
+      FROM wa_messages WHERE account_id=? AND chat_id=?
+      ON CONFLICT(account_id, chat_id, message_id) DO NOTHING
+    `).run(toChatId, accountId, fromChatId);
+    const from = stmt.getChat.get(accountId, fromChatId);
+    const to = stmt.getChat.get(accountId, toChatId);
+    if (from) {
+      db.prepare(`
+        UPDATE wa_chats SET
+          name=COALESCE(name, ?),
+          picture=COALESCE(picture, ?),
+          unread_count=MAX(unread_count, ?)
+        WHERE account_id=? AND chat_id=?
+      `).run(from.name ?? null, from.picture ?? null, from.unread_count ?? 0, accountId, toChatId);
+      if ((from.last_message_timestamp || 0) > (to?.last_message_timestamp || 0)) {
+        db.prepare(`UPDATE wa_chats SET last_message_timestamp=?, last_message_json=? WHERE account_id=? AND chat_id=?`)
+          .run(from.last_message_timestamp, from.last_message_json, accountId, toChatId);
+      }
+    }
+    stmt.deleteChatMessages.run(accountId, fromChatId);
+    stmt.deleteChat.run(accountId, fromChatId);
+  }
+
   function getChatsOverview(accountId, limit = 200) {
     return stmt.listChats.all(accountId, limit).map(row => ({
       id: row.chat_id,
@@ -278,6 +319,7 @@ export function openStore(db) {
 
   return {
     upsertChats, setChatUnread, setChatPicture, deleteChat, getChatsOverview,
+    listChatIds, chatExists, mergeChat,
     upsertMessages, deleteMessage, getMessagesPage, getMessageById,
     upsertContacts, setContactPicture, getContact, getContacts,
     setLidMapping, resolveLid,
