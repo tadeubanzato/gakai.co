@@ -226,6 +226,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
   const mentionPicksRef = useRef([]); // { jid, name, number } the reader chose from the menu this compose
   const composerRef = useRef(null);
   const participantsLoadedRef = useRef(null); // chatId whose participant list is already fetched
+  const hydratedSendersRef = useRef(new Set()); // sender jids already asked /chats/pictures for, this chat
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const typingSocketRef = useRef(null);
@@ -278,25 +279,46 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     return row ? { key: row.dataset.messageKey, offset: row.getBoundingClientRect().top - paneTop } : null;
   }, []);
 
+  // Sender avatars for a group page are fetched after the messages have
+  // painted (the server shapes the page without any picture lookup), so
+  // opening a chat isn't gated on ~15 WhatsApp profile-picture round-trips.
+  // Reuses the inbox's /chats/pictures batch resolver — it takes any jids.
+  const hydrateSenderPictures = useCallback(async (version, page) => {
+    const ids = [...new Set(page.filter(m => !m.fromMe && m.sender?.id && !m.sender.picture && !hydratedSendersRef.current.has(m.sender.id)).map(m => m.sender.id))];
+    if (!ids.length) return;
+    ids.forEach(id => hydratedSendersRef.current.add(id));
+    for (let i = 0; i < ids.length; i += 12) {
+      const batch = ids.slice(i, i + 12);
+      let pictures;
+      try { pictures = (await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/pictures?ids=${encodeURIComponent(batch.join(","))}`)).pictures || {}; }
+      catch { return; }
+      if (requestRef.current !== version) return;
+      if (!Object.keys(pictures).length) continue;
+      setMessages(current => current.map(m => (m.sender?.id && pictures[m.sender.id] && !m.sender.picture) ? { ...m, sender: { ...m.sender, picture: pictures[m.sender.id] } } : m));
+    }
+  }, [accountId]);
+
   useEffect(() => {
     const version = ++requestRef.current;
     initialChatRef.current = null;
     restoreAnchorRef.current = null;
     historyRestoreRef.current = null;
     olderRequestRef.current = false;
+    hydratedSendersRef.current = new Set();
     setMessages([]); setExhausted(false); setError(""); setReplyingTo(null); setReactionOverrides({}); setNewMessageCount(0); setLoading(Boolean(chatId));
     if (!accountId || !chatId) return undefined;
     api(endpoint(accountId, chatId)).then(result => {
       if (requestRef.current !== version) return;
       const page = pageOf(result).sort((a, b) => stamp(a) - stamp(b));
       setMessages(page); setExhausted(page.length < PAGE_SIZE);
+      hydrateSenderPictures(version, page);
     }).catch(cause => {
       if (requestRef.current === version) setError(cause.message || "Could not load messages.");
     }).finally(() => {
       if (requestRef.current === version) setLoading(false);
     });
     return () => { if (requestRef.current === version) requestRef.current += 1; };
-  }, [accountId, chatId]);
+  }, [accountId, chatId, hydrateSenderPictures]);
 
   // Keep the active conversation live without fanning requests out across the
   // inbox. A reader already at the bottom should see new messages appear
@@ -307,6 +329,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     if (!accountId || !chatId) return undefined;
     let active = true;
     const refreshLatest = async () => {
+      const version = requestRef.current;
       try {
         const page = pageOf(await api(endpoint(accountId, chatId)));
         if (!active || !page.length) return;
@@ -319,6 +342,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
         if (isNearBottom()) followLatestRef.current = true;
         else setNewMessageCount(count => count + newCount);
         setMessages(current => merge(current, page));
+        hydrateSenderPictures(version, page);
       } catch {
         // A transient provider failure should not replace the open chat with an
         // error state; the next active-chat refresh can recover naturally.
@@ -326,7 +350,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     };
     const timer = window.setInterval(refreshLatest, 5000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [accountId, chatId]);
+  }, [accountId, chatId, hydrateSenderPictures]);
 
   useLayoutEffect(() => {
     if (!messages.length || initialChatRef.current === chatId) return undefined;
@@ -392,13 +416,14 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
       if (requestRef.current !== version) return;
       setMessages(current => merge(current, page));
       setExhausted(page.length < PAGE_SIZE);
+      hydrateSenderPictures(version, page);
     } catch (cause) {
       if (requestRef.current === version) { historyRestoreRef.current = null; setError(cause.message || "Could not load earlier messages."); }
     } finally {
       olderRequestRef.current = false;
       if (requestRef.current === version) setOlderLoading(false);
     }
-  }, [accountId, chatId, exhausted, olderLoading]);
+  }, [accountId, chatId, exhausted, olderLoading, hydrateSenderPictures]);
 
   const maybeLoadOlder = useCallback(event => {
     if (event.currentTarget.scrollTop <= 120) loadOlder();

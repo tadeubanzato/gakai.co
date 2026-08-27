@@ -880,15 +880,19 @@ function normalizedPreviewImage(value){
   // provider process whose reachability readiness needs to confirm.
   if (req.method === 'GET' && url.pathname === '/readyz') return send(res, 200, {ok:true, service:'gakai', provider:true});
 async function enrichMessage(session,view){
+  // namesOnly: never make a live profilePictureUrl() call while shaping a
+  // message page — a group page has a sender (and often mentions) on every
+  // row, and blocking each on a WhatsApp round-trip is what made opening a
+  // chat slow. Sender avatars are hydrated afterwards (client -> /chats/pictures).
   if(view.sender?.id){
-    const resolved=await resolveContact(session,view.sender.id);
+    const resolved=await resolveContact(session,view.sender.id,{namesOnly:true});
     view={...view,sender:{...view.sender,id:resolved.id||view.sender.id,name:resolved.name||view.sender.name||bareJidUser(resolved.id||view.sender.id),picture:resolved.picture||view.sender.picture||null}};
   }
   if(view.linkPreview)view={...view,linkPreview:{...view.linkPreview,image:normalizedPreviewImage(view.linkPreview.image)}};
   const rawMentionIds=Array.isArray(view.mentionedJids)?view.mentionedJids:[];
   if(rawMentionIds.length){
     const ownJid=provider.getAccount(session)?.ownJid||'';
-    view={...view,mentions:(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId));const id=contact.id||String(rawId);return {id,name:contact.name||bareJidUser(id),isMe:isSameIdentity(id,ownJid)}}))).filter(mention=>mention.name)};
+    view={...view,mentions:(await Promise.all(rawMentionIds.slice(0,8).map(async rawId=>{const contact=await resolveContact(session,String(rawId),{namesOnly:true});const id=contact.id||String(rawId);return {id,name:contact.name||bareJidUser(id),isMe:isSameIdentity(id,ownJid)}}))).filter(mention=>mention.name)};
   }
   const body=String(view.body||view.text||'');
   // A mention inside the *quoted* text (replyTo.body) was never resolved —
@@ -897,7 +901,7 @@ async function enrichMessage(session,view){
   const replyBody=String(view.replyTo?.body||'');
   const mentionIds=extractMentionIds(body,replyBody);
   if(mentionIds.length){
-    const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id,rawMentionIds)]));
+    const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id,rawMentionIds,{namesOnly:true})]));
     const labels=new Map(contacts.map(([id,contact])=>[id,contact?.name||bareJidUser(contact?.id||'')]).filter(([,label])=>label));
     view={...view,body:resolveMentionLabels(body,labels),text:resolveMentionLabels(body,labels),replyTo:view.replyTo?{...view.replyTo,body:resolveMentionLabels(replyBody,labels)}:view.replyTo};
   }
