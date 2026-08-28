@@ -628,6 +628,12 @@ video.media{background:#000}
 .modal-actions .danger, .modal-actions .primary { width:auto; min-width:110px; margin:0; padding:8px 16px; border-radius:9px; }
 .modal-actions .subtle-btn { padding:8px 14px; }
 .modal-error { margin:14px 0 0; padding:10px 12px; border-radius:8px; background:#3a1e22; color:#ffb4b4; font-size:13px; }
+.header-actions { display:flex; gap:8px; flex:none; }
+.new-chat-suggest { list-style:none; margin:0; padding:4px; background:#202c33; border:1px solid #3a4c56; border-radius:9px; max-height:200px; overflow-y:auto; }
+.new-chat-suggest li { margin:0; }
+.new-chat-suggest button { display:flex; align-items:baseline; gap:8px; width:100%; text-align:left; padding:8px 10px; background:none; color:#e9edef; font:inherit; font-size:13px; border-radius:6px; }
+.new-chat-suggest button:hover { background:#2a3942; }
+.new-chat-suggest button small { color:#8aa0a8; font-size:11px; }
 .saved-key-mask { display:block; margin-top:2px; color:#8ce6cf; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; letter-spacing:.04em; }
 .service-detail .integration-delete { display:block; width:100%; max-width:none; margin:24px 0 0; }
 /* A check is rendered only for integrations confirmed by the account API. This

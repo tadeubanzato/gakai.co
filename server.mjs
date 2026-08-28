@@ -1051,6 +1051,23 @@ async function enrichMessage(session,view){
   if (req.method==='POST' && parts[4]==='start') {await provider.startAccount(id,{label:store.accountLabels[id]}); return send(res,200,{ok:true});}
   if (req.method==='POST' && parts[4]==='restart') {await provider.restartAccount(id); return send(res,200,{ok:true});}
   if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await provider.markChatRead(id,decodeURIComponent(parts[5]));return send(res,200,{ok:true});}
+  // Open a new 1:1 conversation from a phone number (checks it's on WhatsApp).
+  if(req.method==='POST'&&parts[4]==='chats'&&!parts[5]){
+    const input=await readBody(req),phone=String(input.phone||'').replace(/[^0-9]/g,'');
+    if(!phone)return send(res,400,{message:'Enter a phone number in international format'});
+    const chat=await provider.startConversation(id,phone);
+    const enriched=await enrichChatOverview(id,chat,{pictures:true});
+    return send(res,200,{chat:enriched.name?enriched:{...enriched,name:`+${phone}`}});
+  }
+  // Contact suggestions for the "new chat" number field.
+  if(req.method==='GET'&&parts[4]==='contacts'){
+    const q=String(url.searchParams.get('q')||'').trim().toLowerCase();
+    const rows=(provider.getContacts(id)||[])
+      .map(c=>({id:c.id||c.contact_id||null,name:c.name||null,phone:c.phone||null}))
+      .filter(c=>c.id&&c.phone&&(!q||String(c.name||'').toLowerCase().includes(q)||String(c.phone).includes(q)))
+      .slice(0,20);
+    return send(res,200,{contacts:rows});
+  }
   // Must be checked before the whole-chat DELETE below: both match
   // parts[4]==='chats'&&parts[5], only this one additionally has
   // parts[6]==='messages'&&parts[7] (a specific message under that chat).
