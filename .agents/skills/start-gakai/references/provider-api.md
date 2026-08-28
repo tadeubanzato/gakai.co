@@ -18,6 +18,26 @@ Use this reference when touching the WhatsApp provider adapter, its payloads, ev
 
 Superseded. The previous notes in this section described a REST/webhook provider (session-scoped HTTP endpoints, webhook signature verification, polling for updates). Baileys is event-driven, not REST: it delivers WhatsApp state and messages as in-process events over a socket connection rather than as HTTP endpoints to call. There are no verified endpoint-shaped payload notes to record here yet — do not assume the old REST shapes (`/api/{session}/...`, `/api/sendText`, webhook envelopes) still apply. Read the current adapter code and the official Baileys documentation above before relying on any specific event or payload shape, and add verified notes here once confirmed.
 
+### Verified against `@whiskeysockets/baileys@7.0.0-rc14` (checked in the runtime image)
+
+- **Outbound media** — `sock.sendMessage(jid, content, { quoted })` where `content` is one of:
+  - `{ image: Buffer, caption?, mimetype? }`
+  - `{ video: Buffer, caption?, mimetype?, ptv? }` (`ptv: true` = video note)
+  - `{ audio: Buffer, mimetype?, ptt?, seconds? }` (`ptt: true` = voice note)
+  - `{ document: Buffer, mimetype (required), fileName?, caption? }`
+  The returned value is a full `proto.IWebMessageInfo` with `key` + the media keys
+  needed to decrypt/re-serve it later — the same object `messages.upsert` delivers,
+  so `messageView` and `media.download` consume it unchanged.
+- **`sock.onWhatsApp(...numbers: string[])`** → `Promise<{ jid: string, exists: boolean }[] | undefined>`.
+  Accepts bare digits or a full jid. Used to check a number before opening a new chat.
+- **`messages.update` event** → `{ key: WAMessageKey, update: Partial<WAMessage> }[]`.
+  Delivery/read progress arrives as `update.status`, a `proto.WebMessageInfo.Status`
+  enum number: `ERROR 0, PENDING 1, SERVER_ACK 2, DELIVERY_ACK 3, READ 4, PLAYED 5`.
+- **Structured inbound types** — `normalizeMessageContent` already unwraps
+  `viewOnceMessage*`, `ephemeralMessage`, `documentWithCaptionMessage`,
+  `editedMessage`; `locationMessage`, `contactMessage`/`contactsArrayMessage`, and
+  `pollCreationMessage*` are leaf types it does not unwrap.
+
 ## Integration procedure
 
 1. Read the official Baileys documentation and, where useful, its source for the capability or event in question — do not assume a field or event name from memory.

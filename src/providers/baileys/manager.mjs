@@ -302,6 +302,36 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return normalized;
   }
 
+  // Pick the Baileys media content shape from the mimetype unless the caller
+  // forces `kind` (the composer forces 'audio' with ptt for a voice note).
+  function mediaKindFor(mimetype, forced) {
+    if (forced) return forced;
+    const type = String(mimetype || '').toLowerCase();
+    if (type.startsWith('image/')) return 'image';
+    if (type.startsWith('video/')) return 'video';
+    if (type.startsWith('audio/')) return 'audio';
+    return 'document';
+  }
+
+  async function sendMedia(accountId, chatId, { buffer, mimetype, filename, caption, kind, ptt } = {}, { quotedMessageId } = {}) {
+    const { sock } = requireSocket(accountId);
+    if (!buffer || !buffer.length) throw Object.assign(new Error('No file data received'), { status: 400 });
+    const target = canonicalChatId(accountId, chatId);
+    const quoted = quotedMessageId ? store.getMessageById(accountId, target, quotedMessageId) : null;
+    const resolvedKind = mediaKindFor(mimetype, kind);
+    const trimmedCaption = caption ? String(caption).slice(0, 1024) : '';
+    let content;
+    if (resolvedKind === 'image') content = { image: buffer, mimetype: mimetype || 'image/jpeg', ...(trimmedCaption ? { caption: trimmedCaption } : {}) };
+    else if (resolvedKind === 'video') content = { video: buffer, mimetype: mimetype || 'video/mp4', ...(trimmedCaption ? { caption: trimmedCaption } : {}) };
+    else if (resolvedKind === 'audio') content = { audio: buffer, mimetype: mimetype || 'audio/ogg; codecs=opus', ptt: Boolean(ptt) };
+    else content = { document: buffer, mimetype: mimetype || 'application/octet-stream', fileName: filename || 'file', ...(trimmedCaption ? { caption: trimmedCaption } : {}) };
+    const sent = await sock.sendMessage(target, content, quoted ? { quoted } : undefined);
+    learnFromKey(accountId, sent?.key);
+    const normalized = messageView(sent, { accountId, chatId: target });
+    store.upsertMessages(accountId, [{ chatId: target, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: sent, overviewMessage: overviewFromMessage(normalized) }]);
+    return normalized;
+  }
+
   async function setReaction(accountId, chatId, messageId, reaction) {
     const { sock, me } = requireSocket(accountId);
     chatId = canonicalChatId(accountId, chatId);
@@ -487,7 +517,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     getChatsOverview, getMessages, getMessage, downloadMedia,

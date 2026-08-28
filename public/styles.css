@@ -314,6 +314,17 @@ textarea {
   overflow-y:auto;
 }
 
+/* Attach control + pending-attachment preview row */
+.composer-attach{flex:none;display:grid;place-items:center;width:42px;height:42px;border-radius:8px;background:var(--soft);color:var(--ink);cursor:pointer;font-size:20px;line-height:1;align-self:flex-end}
+.composer-attach:hover{background:#2a3942}
+.composer-attachment{flex:0 0 100%;display:flex;align-items:center;gap:10px;padding:6px 4px 8px;border-bottom:1px solid #31424b}
+.composer-attachment-thumb{flex:none;width:44px;height:44px;object-fit:cover;border-radius:6px}
+.composer-attachment-icon{flex:none;display:grid;place-items:center;width:44px;height:44px;border-radius:6px;background:#0d2129;color:var(--green);font-size:18px}
+.composer-attachment-info{min-width:0;flex:1;display:grid;gap:1px}
+.composer-attachment-info b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600}
+.composer-attachment-info small{color:#9fb3ac;font-size:11px}
+.composer-attachment>button{flex:none;padding:0 6px;background:none;color:#b8cbc4;font-size:20px}
+
 /* Empty / blank states */
 .blank,.empty {
   display:grid;

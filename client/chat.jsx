@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload } from "./chat-helpers.mjs";
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
 import { Avatar } from "./ui-helpers.jsx";
 import { confirmDialog } from "./confirm.jsx";
@@ -218,6 +218,9 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
+  const [attachment, setAttachment] = useState(null); // { file, url } chosen but not yet sent
+  const [sendingMedia, setSendingMedia] = useState(false);
+  const fileInputRef = useRef(null);
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
   const [newMessageCount, setNewMessageCount] = useState(0);
@@ -515,6 +518,72 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     }
   }, [accountId, chat, chatId, onSent, replyingTo, sendPresence, autoGrowComposer]);
 
+  // Picked file lives as a local blob: URL until it's sent or cleared; always
+  // revoke it so a long chat session doesn't leak object URLs.
+  const clearAttachment = useCallback(() => {
+    setAttachment(current => { if (current?.url) URL.revokeObjectURL(current.url); return null; });
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, []);
+  useEffect(() => () => { setAttachment(current => { if (current?.url) URL.revokeObjectURL(current.url); return null; }); }, []);
+  useEffect(() => { clearAttachment(); }, [chatId, clearAttachment]);
+
+  const pickAttachment = useCallback(event => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    if (file.size > 64 * 1024 * 1024) { setError("That file is larger than the 64 MB limit."); event.currentTarget.value = ""; return; }
+    setError("");
+    setAttachment(current => { if (current?.url) URL.revokeObjectURL(current.url); return { file, url: URL.createObjectURL(file) }; });
+  }, []);
+
+  const sendMedia = useCallback(async (file, caption) => {
+    if (!file || !chatId || sendingMedia) return;
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    sendPresence("paused");
+    const objectUrl = URL.createObjectURL(file);
+    const pending = { ...buildMediaPending(file, caption, objectUrl), replyTo: replyingTo };
+    const field = composerRef.current;
+    if (field) { field.value = ""; autoGrowComposer(field); }
+    setSendingMedia(true);
+    setAttachment(current => { if (current?.url) URL.revokeObjectURL(current.url); return null; });
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    followLatestRef.current = true;
+    setNewMessageCount(0);
+    setMessages(current => [...current, pending]);
+    try {
+      const params = new URLSearchParams({ chatId });
+      if (caption) params.set("caption", caption);
+      if (replyingTo?.id) params.set("replyTo", replyingTo.id);
+      if ((file.type || "").startsWith("audio/")) params.set("voice", "1");
+      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/media?${params.toString()}`, {
+        method: "POST",
+        headers: { "content-type": file.type || "application/octet-stream", "x-gakai-filename": encodeURIComponent(file.name || "file") },
+        body: file,
+      });
+      const confirmed = confirmSentMessage(pending, result.message);
+      setMessages(current => merge(current.filter(message => message.id !== pending.id), confirmed ? [confirmed] : []));
+      setReplyingTo(null);
+      onSent?.(result.message, chat);
+    } catch (cause) {
+      setMessages(current => current.filter(message => message.id !== pending.id));
+      setError(cause.message || "Could not send this file.");
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+      setSendingMedia(false);
+    }
+  }, [accountId, chat, chatId, onSent, replyingTo, sendingMedia, sendPresence, autoGrowComposer]);
+
+  // The composer's single submit path: a chosen file sends as media (with the
+  // textarea text as its caption), otherwise it's a plain text message.
+  const submitComposer = useCallback(event => {
+    event.preventDefault();
+    if (attachment?.file) {
+      const caption = (composerRef.current?.value || "").trim();
+      sendMedia(attachment.file, caption);
+      return;
+    }
+    send(event);
+  }, [attachment, send, sendMedia]);
+
   const reactToMessage = useCallback(async (message, emoji) => {
     const messageId=serializedId(message?.id);if(!messageId)return;
     const previous=reactionOverrides[messageId]||"",next=previous===emoji?"":emoji;
@@ -579,8 +648,15 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
       {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
-    <form className="composer" onSubmit={send}>
+    <form className="composer" onSubmit={submitComposer}>
       {replyingTo&&<div className="composer-reply"><span><b>Replying to</b>{String(replyingTo.body||replyingTo.text||"Message").slice(0,100)}</span><button type="button" onClick={()=>setReplyingTo(null)} aria-label="Cancel reply">×</button></div>}
+      {attachment&&<div className="composer-attachment">
+        {mediaKindFromMime(attachment.file.type)==="image"
+          ? <img src={attachment.url} alt="" className="composer-attachment-thumb"/>
+          : <span className="composer-attachment-icon" aria-hidden="true">{mediaKindFromMime(attachment.file.type)==="video"?"▶":mediaKindFromMime(attachment.file.type)==="audio"?"♪":"▧"}</span>}
+        <span className="composer-attachment-info"><b>{attachment.file.name||"Attachment"}</b><small>{humanFileSize(attachment.file.size)} · caption optional</small></span>
+        <button type="button" onClick={clearAttachment} aria-label="Remove attachment">×</button>
+      </div>}
       {mentionMenu&&mentionMatches.length>0&&<ul className="mention-suggest" role="listbox" aria-label="Mention someone">
         {mentionMatches.map((participant,i)=><li key={participant.id} role="option" aria-selected={i===mentionMenu.index}>
           <button type="button" className={i===mentionMenu.index?"active":""} onMouseDown={e=>{e.preventDefault();pickMention(participant)}}>
@@ -611,7 +687,11 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
           }
         }}
       />
-      <button className="primary" type="submit">Send</button>
+      <label className="composer-attach" title="Attach a file" aria-label="Attach a file">
+        <input ref={fileInputRef} type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip" onChange={pickAttachment} hidden/>
+        <span aria-hidden="true">＋</span>
+      </label>
+      <button className="primary" type="submit" disabled={sendingMedia}>{sendingMedia?"Sending…":"Send"}</button>
     </form>
   </div>;
 }

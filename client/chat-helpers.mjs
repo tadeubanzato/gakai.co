@@ -94,6 +94,41 @@ export function buildMentionPayload(text, picks) {
   return { text: wire, mentions };
 }
 
+// Same mapping the server's adapter uses, kept here so the composer can show
+// the right preview and the optimistic bubble picks the right player.
+export function mediaKindFromMime(mimetype) {
+  const type = String(mimetype || "").toLowerCase();
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("video/")) return "video";
+  if (type.startsWith("audio/")) return "audio";
+  return "document";
+}
+
+export function humanFileSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(0)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// The optimistic bubble shown the instant a file is picked, before the send
+// round-trips. `objectUrl` is a local blob: URL — MediaCard's mediaSrc already
+// accepts blob:/data: as-is, so the attachment renders immediately.
+export function buildMediaPending(file, caption, objectUrl) {
+  const mimetype = file?.type || "application/octet-stream";
+  return {
+    id: `pending-${Date.now()}`,
+    body: caption || "",
+    text: caption || "",
+    fromMe: true,
+    timestamp: Math.floor(Date.now() / 1000),
+    pending: true,
+    hasMedia: true,
+    media: { url: objectUrl, mimetype, filename: file?.name || null },
+    mediaUrl: objectUrl,
+  };
+}
+
 export function merge(current, extra) {
   const keyed = new Map();
   [...current, ...extra].forEach((message, index) => keyed.set(idFor(message, index), message));

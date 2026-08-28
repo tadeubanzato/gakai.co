@@ -42,6 +42,13 @@ export function createMockProvider({ onEvent } = {}) {
     seedMessage(accountId, chatId, message);
     return message;
   }
+  async function sendMedia(accountId, chatId, { buffer, mimetype, filename, caption, kind, ptt } = {}, { quotedMessageId } = {}) {
+    const resolvedKind = kind || (String(mimetype || '').startsWith('image/') ? 'image' : String(mimetype || '').startsWith('video/') ? 'video' : String(mimetype || '').startsWith('audio/') ? 'audio' : 'document');
+    sent.push({ accountId, chatId, kind: resolvedKind, mimetype: mimetype || null, filename: filename || null, caption: caption || '', ptt: Boolean(ptt), bytes: buffer ? buffer.length : 0, quotedMessageId: quotedMessageId || null });
+    const message = { id: `mock-media-${sent.length}`, timestamp: Math.floor(Date.now() / 1000), fromMe: true, body: caption || '', text: caption || '', hasMedia: true, media: { url: null, mimetype: mimetype || null, filename: filename || null }, mediaUrl: null, system: null, replyTo: null, sender: null, mentionedJids: [] };
+    seedMessage(accountId, chatId, message);
+    return message;
+  }
   async function setReaction(accountId, chatId, messageId, reaction) {
     if (reaction) reactionsFor(accountId).set(messageId, reaction);
     else reactionsFor(accountId).delete(messageId);
@@ -128,7 +135,7 @@ export function createMockProvider({ onEvent } = {}) {
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     getChatsOverview, getMessages, getMessage, downloadMedia,

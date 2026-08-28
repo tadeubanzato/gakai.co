@@ -97,6 +97,9 @@ const admin=req=>{
 const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8' };
 const send = (res, status, data) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'}); res.end(JSON.stringify(data)); };
 async function readBody(req) { const chunks=[]; let size=0; for await (const chunk of req){size+=chunk.length;if(size>1024*1024)throw Object.assign(new Error('Request body too large'),{status:413});chunks.push(chunk);} req.rawBody=Buffer.concat(chunks).toString('utf8'); return req.rawBody ? JSON.parse(req.rawBody) : {}; }
+// Raw binary body (media upload). Same streaming guard as readBody but no
+// JSON.parse and a caller-set cap — media is far larger than a JSON payload.
+async function readRawBody(req, maxBytes) { const chunks=[]; let size=0; for await (const chunk of req){size+=chunk.length;if(size>maxBytes)throw Object.assign(new Error('File is too large'),{status:413});chunks.push(chunk);} return Buffer.concat(chunks); }
 const liveEventStreams = new Set();
 const writeSseEvent = (res, event, id) => {
   res.write(`id: ${id || event.id}\nevent: gakai\ndata: ${JSON.stringify(event)}\n\n`);
@@ -1126,6 +1129,22 @@ async function enrichMessage(session,view){
     const reaction=String(input.reaction||'');if(reaction.length>16)return send(res,400,{message:'Invalid reaction'});
     await provider.setReaction(id,url.searchParams.get('chatId')||null,messageId,reaction);
     return send(res,200,{ok:true,reaction});
+  }
+  if (req.method==='POST' && parts[4]==='media') {
+    const chatId=url.searchParams.get('chatId');
+    if(!chatId)return send(res,400,{message:'chatId is required'});
+    const mimetype=String(req.headers['content-type']||'').split(';')[0].trim().toLowerCase();
+    if(!/^(image|video|audio|application|text)\//.test(mimetype))return send(res,415,{message:'Unsupported file type'});
+    const filename=String(req.headers['x-gakai-filename']||'').replace(/[\r\n"\\]/g,'').replace(/[^\w.\- ()]+/g,'_').slice(0,200)||null;
+    const caption=String(url.searchParams.get('caption')||'').slice(0,1024);
+    const replyTo=url.searchParams.get('replyTo')?String(url.searchParams.get('replyTo')):null;
+    const voice=url.searchParams.get('voice')==='1';
+    let buffer;
+    try{buffer=await readRawBody(req,64*1024*1024);}
+    catch(error){return send(res,error.status||400,{message:error.message||'Could not read the file'});}
+    if(!buffer.length)return send(res,400,{message:'The file is empty'});
+    const sent=await provider.sendMedia(id,chatId,{buffer,mimetype,filename,caption,kind:voice?'audio':undefined,ptt:voice},{quotedMessageId:replyTo});
+    return send(res,200,{message:await enrichMessage(id,sent)});
   }
   if (req.method==='POST' && parts[4]==='messages') {
     const input=await readBody(req),replyTo=input.replyTo?String(input.replyTo):null; if (!input.chatId || !input.text?.trim()) return send(res,400,{message:'Recipient and message are required'});
