@@ -215,7 +215,7 @@ function messageBody(text, mentions) {
   const parts=String(text).split(pattern);
   return parts.map((part,index)=>index%2?<mark key={index} className="own-mention">@{part}</mark>:part);
 }
-function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, accountPicture, onMediaResolved, onReply, onReact, onForward, onEdit, onDelete, reaction }) {
+function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, accountPicture, onMediaResolved, onReply, onReact, onForward, onEdit, onStar, onDelete, reaction }) {
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
@@ -231,6 +231,7 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
     {message.fromMe && <Sender sender={{id:accountId,name:accountLabel||"You",picture:accountPicture}} />}
     {message?.replyTo && <div className="reply-context"><b>Replying to</b><span>{String(label).slice(0,140)}</span></div>}
     {message?.viewOnce && <span className="view-once-badge">👁 View once</span>}
+    {message?.starred && <span className="starred-badge" title="Starred" aria-label="Starred">★</span>}
     <MediaCard message={message} accountId={accountId} chatId={chatId} onResolved={onMediaResolved} />
     <LocationCard location={message?.location} />
     <ContactCard contacts={message?.contacts} />
@@ -251,6 +252,7 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
     {!message.fromMe && <button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>}
     {!message.fromMe && showReactions && <span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}
     <button type="button" onClick={()=>onForward?.(message)}>Forward</button>
+    {onStar && <button type="button" onClick={()=>onStar(message)}>{message.starred ? "Unstar" : "Star"}</button>}
     {messageIsEditable(message) && <button type="button" onClick={()=>onEdit?.(message)}>Edit</button>}
     <button type="button" className="message-delete" onClick={()=>onDelete?.(message)} aria-label={message.fromMe ? "Delete this message for everyone" : "Delete this message for you"}>Delete</button>
   </div>;
@@ -772,6 +774,21 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     }
   }, [accountId, chatId, forwarding, forwardBusy, onForwarded]);
 
+  const toggleStar = useCallback(async message => {
+    const messageId = serializedId(message?.id);
+    if (!messageId || !chatId) return;
+    const next = !message.starred;
+    setMessages(current => current.map(item => serializedId(item.id) === messageId ? { ...item, starred: next } : item));
+    try {
+      await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(messageId)}/star`, {
+        method: "POST", body: JSON.stringify({ chatId, starred: next }),
+      });
+    } catch (cause) {
+      setMessages(current => current.map(item => serializedId(item.id) === messageId ? { ...item, starred: !next } : item));
+      setError(cause.message || "Could not update the star.");
+    }
+  }, [accountId, chatId]);
+
   const deleteConversation = useCallback(async () => {
     if (!chatId || deleting) return;
     const confirmed = await confirmDialog({ title: "Delete conversation?", message: `The conversation with ${chat?.name || chatId} will be removed from WhatsApp. This can't be undone.`, confirmLabel: "Delete conversation", danger: true });
@@ -807,7 +824,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
       {loading && !messages.length ? <p className="chat-loading loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading messages…</p> : <div className="message-list">
-        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onForward={setForwarding} onEdit={beginEdit} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
+        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onForward={setForwarding} onEdit={beginEdit} onStar={toggleStar} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
       {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>

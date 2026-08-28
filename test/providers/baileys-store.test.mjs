@@ -236,3 +236,27 @@ test('upsertChats maps Baileys pin / mute / archive fields off a chats.update ro
   assert.equal(chat.archived, true);
   assert.equal(chat.mutedUntil, 4102444800);
 });
+
+test('setStarred / isStarred / listStarred round-trip and clean up on delete', () => {
+  const store = freshStore();
+  const chatId = 'starme@s.whatsapp.net';
+  store.upsertMessages('acct-1', [
+    { chatId, messageId: 'm1', timestamp: 100, fromMe: false, waMessage: { key: { id: 'm1' }, message: { conversation: 'one' } }, overviewMessage: { body: 'one', text: 'one', timestamp: 100, hasMedia: false, system: null } },
+    { chatId, messageId: 'm2', timestamp: 200, fromMe: true, waMessage: { key: { id: 'm2', fromMe: true }, message: { conversation: 'two' } }, overviewMessage: { body: 'two', text: 'two', timestamp: 200, hasMedia: false, system: null } },
+  ]);
+
+  store.setStarred('acct-1', chatId, 'm1', true);
+  store.setStarred('acct-1', chatId, 'm2', true);
+  assert.equal(store.isStarred('acct-1', 'm1'), true);
+  assert.deepEqual([...store.starredMessageIds('acct-1')].sort(), ['m1', 'm2']);
+
+  const listed = store.listStarred('acct-1', 10);
+  assert.equal(listed.length, 2);
+  assert.equal(listed[0].waMessage.key.id, 'm2', 'newest first');
+
+  store.setStarred('acct-1', chatId, 'm1', false);
+  assert.equal(store.isStarred('acct-1', 'm1'), false);
+
+  store.deleteMessage('acct-1', chatId, 'm2');
+  assert.equal(store.isStarred('acct-1', 'm2'), false);
+});

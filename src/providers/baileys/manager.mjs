@@ -582,7 +582,8 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     const rows = store.getMessagesPage(accountId, chatId, { limit, before });
     const views = rows.map(raw => messageView(raw, { accountId, chatId }));
     if (downloadMedia) await hydrateMedia(accountId, chatId, rows, views);
-    return views.map(view => withReaction(accountId, view));
+    const starred = store.starredMessageIds(accountId);
+    return views.map(view => withReaction(accountId, view, starred));
   }
 
   async function getMessage(accountId, chatId, messageId) {
@@ -594,9 +595,31 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return withReaction(accountId, view);
   }
 
-  function withReaction(accountId, view) {
+  function withReaction(accountId, view, starredSet) {
     const reaction = store.getReaction(accountId, view.id);
-    return reaction ? { ...view, reaction } : view;
+    const starred = starredSet ? starredSet.has(view.id) : store.isStarred(accountId, view.id);
+    let out = view;
+    if (reaction) out = { ...out, reaction };
+    if (starred) out = { ...out, starred: true };
+    return out;
+  }
+
+  async function setMessageStar(accountId, chatId, messageId, on) {
+    const { sock } = requireSocket(accountId);
+    const target = canonicalChatId(accountId, chatId);
+    const raw = store.getMessageById(accountId, target, messageId) || store.getMessageById(accountId, null, messageId);
+    if (!raw) throw Object.assign(new Error('Message not found'), { status: 404 });
+    await sock.chatModify({ star: { messages: [{ id: messageId, fromMe: Boolean(raw.key?.fromMe) }], star: Boolean(on) } }, target).catch(error => logger.warn({ error: error.message, accountId, messageId }, 'Remote star failed; applying locally anyway'));
+    store.setStarred(accountId, target, messageId, Boolean(on));
+    return { messageId, starred: Boolean(on) };
+  }
+
+  function getStarredMessages(accountId) {
+    return store.listStarred(accountId, 200).map(({ chatId, waMessage }) => ({
+      ...withReaction(accountId, messageView(waMessage, { accountId, chatId })),
+      chatId,
+      starred: true,
+    }));
   }
 
   // Pre-warms the media cache so `mediaUrl` resolves without a client
@@ -632,6 +655,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,
+    setMessageStar, getStarredMessages,
     getChatsOverview, getMessages, getMessage, downloadMedia,
     shutdown,
   };

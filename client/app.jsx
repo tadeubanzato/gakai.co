@@ -207,6 +207,7 @@ function App(){
   const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState(""),[newChat,setNewChat]=useState(false);
   const[chatFilter,setChatFilter]=useState("all");
   const[archivedChats,setArchivedChats]=useState([]);
+  const[starredMessages,setStarredMessages]=useState([]);
   const settingsRef=useRef(null);
   const chatListRef=useRef(null);
   const suppressAutoSelectRef=useRef(false);
@@ -544,6 +545,16 @@ function App(){
       .catch(()=>{if(active)setArchivedChats([])});
     return()=>{active=false};
   },[chatFilter,account?.id,account?.status]);
+
+  // Load starred messages only while that tab is active.
+  useEffect(()=>{
+    if(chatFilter!=="starred"||!account||account.status!=="WORKING"){return undefined;}
+    let active=true;
+    api("/api/app/accounts/"+encodeURIComponent(account.id)+"/starred")
+      .then(data=>{if(active)setStarredMessages(Array.isArray(data.messages)?data.messages:[])})
+      .catch(()=>{if(active)setStarredMessages([])});
+    return()=>{active=false};
+  },[chatFilter,account?.id,account?.status]);
   const handleChatDeleted=useCallback(chatId=>{
     suppressAutoSelectRef.current=true;
     setChats(current=>{
@@ -609,11 +620,18 @@ function App(){
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>
               <input placeholder="Search conversations" value={q} onChange={e=>setQ(e.target.value)} aria-label="Search conversations"/>
               <div className="chat-filters" role="tablist" aria-label="Filter conversations">
-                {[["all","All"],["unread","Unread"],["groups","Groups"],["archived","Archived"]].map(([key,label])=>
+                {[["all","All"],["unread","Unread"],["groups","Groups"],["archived","Archived"],["starred","Starred"]].map(([key,label])=>
                   <button key={key} type="button" role="tab" aria-selected={chatFilter===key} className={"chat-filter"+(chatFilter===key?" on":"")} onClick={()=>setChatFilter(key)}>{label}</button>
                 )}
               </div>
-              {visible.map(x=><div key={x.id} className="chat-row">
+              {chatFilter==="starred"
+                ? (starredMessages.length
+                    ? starredMessages.map((m,i)=><button key={(m.id||i)+"-star"} className="chat starred-item" onClick={()=>{const target=chats.find(c=>c.id===m.chatId)||archivedChats.find(c=>c.id===m.chatId)||{id:m.chatId,name:m.chatId};handleChatClick(target)}}>
+                        <span className="starred-item-icon" aria-hidden="true">★</span>
+                        <span><b>{m.sender?.name||(m.fromMe?"You":m.chatId)}</b><small>{m.body||m.text||(m.hasMedia?"Media attachment":m.location?"📍 Location":m.poll?"📊 Poll":"Message")}</small></span>
+                      </button>)
+                    : <p className="hint">No starred messages.</p>)
+                : visible.map(x=><div key={x.id} className="chat-row">
                 <button className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}>
                   <Avatar item={x}/>
                   <span><b>{x.pinned?"📌 ":""}{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||x.lastMessage?.system?.label||"Photo or message"}</small></span>

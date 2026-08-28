@@ -739,3 +739,8 @@ video.media{background:#000}
 .chat-row:hover .chat-row-menu,.chat-row-menu:focus-within,.chat-row-menu .menu-trigger[aria-expanded="true"]{opacity:1}
 .chat-row-menu .menu-trigger{width:28px;height:28px;background:var(--panel)}
 .chat-muted{flex:none;font-size:12px;opacity:.7}
+
+/* Starred messages */
+.starred-badge{display:inline-block;margin-bottom:4px;color:#e8c37a;font-size:13px}
+.starred-item{align-items:center}
+.starred-item-icon{flex:none;color:#e8c37a;font-size:16px}

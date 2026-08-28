@@ -134,7 +134,24 @@ export function createMockProvider({ onEvent } = {}) {
   }
   function withReaction(accountId, message) {
     const reaction = reactionsFor(accountId).get(message.id);
-    return reaction ? { ...message, reaction } : message;
+    let out = reaction ? { ...message, reaction } : message;
+    if (starredFor(accountId).has(message.id)) out = { ...out, starred: true };
+    return out;
+  }
+  const starred = new Map(); // accountId -> Map(messageId -> chatId)
+  const starredFor = accountId => { if (!starred.has(accountId)) starred.set(accountId, new Map()); return starred.get(accountId); };
+  async function setMessageStar(accountId, chatId, messageId, on) {
+    const list = messagesFor(accountId).get(chatId) || [];
+    if (!list.find(m => m.id === messageId)) throw Object.assign(new Error('Message not found'), { status: 404 });
+    if (on) starredFor(accountId).set(messageId, chatId);
+    else starredFor(accountId).delete(messageId);
+    return { messageId, starred: Boolean(on) };
+  }
+  function getStarredMessages(accountId) {
+    return [...starredFor(accountId).entries()].map(([messageId, chatId]) => {
+      const message = (messagesFor(accountId).get(chatId) || []).find(m => m.id === messageId);
+      return message ? { ...message, chatId, starred: true } : null;
+    }).filter(Boolean);
   }
   async function downloadMedia() { return null; }
   async function shutdown() {}
@@ -179,6 +196,7 @@ export function createMockProvider({ onEvent } = {}) {
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
     sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState,
+    setMessageStar, getStarredMessages,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,

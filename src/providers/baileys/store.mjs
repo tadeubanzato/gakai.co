@@ -241,6 +241,28 @@ export function openStore(db) {
   function deleteMessage(accountId, chatId, messageId) {
     stmt.deleteMessage.run(accountId, chatId, messageId);
     stmt.deleteReactionsForMessage.run(accountId, messageId);
+    db.prepare(`DELETE FROM wa_starred WHERE account_id=? AND message_id=?`).run(accountId, messageId);
+  }
+
+  function setStarred(accountId, chatId, messageId, on) {
+    if (on) db.prepare(`INSERT INTO wa_starred(account_id, chat_id, message_id, starred_at) VALUES (?,?,?,?) ON CONFLICT(account_id, message_id) DO NOTHING`).run(accountId, chatId, messageId, now());
+    else db.prepare(`DELETE FROM wa_starred WHERE account_id=? AND message_id=?`).run(accountId, messageId);
+  }
+  function isStarred(accountId, messageId) {
+    return Boolean(db.prepare(`SELECT 1 FROM wa_starred WHERE account_id=? AND message_id=?`).get(accountId, messageId));
+  }
+  function starredMessageIds(accountId) {
+    return new Set(db.prepare(`SELECT message_id FROM wa_starred WHERE account_id=?`).all(accountId).map(row => row.message_id));
+  }
+  // Starred messages across every chat, newest first, with their stored payload.
+  function listStarred(accountId, limit = 100) {
+    return db.prepare(`
+      SELECT s.chat_id, m.payload_json
+      FROM wa_starred s JOIN wa_messages m
+        ON m.account_id = s.account_id AND m.message_id = s.message_id
+      WHERE s.account_id=?
+      ORDER BY m.timestamp DESC LIMIT ?
+    `).all(accountId, limit).map(row => ({ chatId: row.chat_id, waMessage: JSON.parse(row.payload_json) }));
   }
 
   // Rewrite a stored message's text in place (an inbound or outbound edit) and
@@ -263,6 +285,7 @@ export function openStore(db) {
   function deleteChat(accountId, chatId) {
     stmt.deleteChatMessages.run(accountId, chatId);
     stmt.deleteChat.run(accountId, chatId);
+    db.prepare(`DELETE FROM wa_starred WHERE account_id=? AND chat_id=?`).run(accountId, chatId);
   }
 
   function listChatIds(accountId) {
@@ -404,6 +427,7 @@ export function openStore(db) {
     upsertChats, setChatUnread, setChatPicture, setChatFlags, deleteChat, getChatsOverview,
     listChatIds, chatExists, ensureChat, mergeChat,
     upsertMessages, deleteMessage, applyEdit, getMessagesPage, getMessageById,
+    setStarred, isStarred, starredMessageIds, listStarred,
     upsertContacts, setContactPicture, getContact, getContacts,
     setLidMapping, resolveLid,
     applyReaction, getReaction,
