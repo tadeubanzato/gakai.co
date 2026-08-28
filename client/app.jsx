@@ -536,6 +536,26 @@ function App(){
     }catch(x){fail(x.message||"Could not update this conversation");if(account)load(account.id);}
   },[account,fail,load]);
 
+  const blockAction=useCallback(async (targetChat,blocked)=>{
+    if(!account||!targetChat?.id)return;
+    try{
+      await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(targetChat.id)+"/block",{method:"POST",body:JSON.stringify({blocked})});
+      const patch=c=>c.id===targetChat.id?{...c,blocked}:c;
+      setChats(current=>{const next=current.map(patch);chatsCacheRef.current.set(account.id,next);return next;});
+      setChat(current=>current?.id===targetChat.id?{...current,blocked}:current);
+      setNote(blocked?"Contact blocked":"Contact unblocked");setTimeout(()=>setNote(""),3000);
+    }catch(x){fail(x.message||"Could not update block status");}
+  },[account,fail]);
+  const disappearingAction=useCallback(async (targetChat,seconds)=>{
+    if(!account||!targetChat?.id)return;
+    try{
+      const {chat:updated}=await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(targetChat.id)+"/disappearing",{method:"POST",body:JSON.stringify({seconds})});
+      const patch=c=>c.id===updated.id?{...c,...updated}:c;
+      setChats(current=>{const next=current.map(patch);chatsCacheRef.current.set(account.id,next);return next;});
+      setChat(current=>current?.id===updated.id?{...current,...updated}:current);
+    }catch(x){fail(x.message||"Could not update disappearing messages");}
+  },[account,fail]);
+
   // Load the archived list only while that tab is active.
   useEffect(()=>{
     if(chatFilter!=="archived"||!account||account.status!=="WORKING"){return undefined;}
@@ -652,7 +672,7 @@ function App(){
               </div>)}
               {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">{chatFilter==="archived"?"No archived conversations.":chats.length?"No conversations match this filter.":"No conversations yet. Gakai is waiting for WhatsApp to finish syncing."}</p>:null}
             </section>
-            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} chats={chats} onBack={()=>setChat()} onSent={handleSent} onForwarded={handleForwarded} onChatState={chatStateAction} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
+            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} chats={chats} onBack={()=>setChat()} onSent={handleSent} onForwarded={handleForwarded} onChatState={chatStateAction} onBlock={blockAction} onDisappearing={disappearingAction} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
         </main>
       </div>

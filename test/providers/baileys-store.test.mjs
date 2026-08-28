@@ -260,3 +260,23 @@ test('setStarred / isStarred / listStarred round-trip and clean up on delete', (
   store.deleteMessage('acct-1', chatId, 'm2');
   assert.equal(store.isStarred('acct-1', 'm2'), false);
 });
+
+test('blocklist round-trips via setBlocked / replaceBlocklist', () => {
+  const store = freshStore();
+  store.setBlocked('acct-1', 'a@s.whatsapp.net', true);
+  assert.equal(store.isBlocked('acct-1', 'a@s.whatsapp.net'), true);
+  store.setBlocked('acct-1', 'a@s.whatsapp.net', false);
+  assert.equal(store.isBlocked('acct-1', 'a@s.whatsapp.net'), false);
+
+  store.replaceBlocklist('acct-1', ['x@s.whatsapp.net', 'y@s.whatsapp.net']);
+  assert.deepEqual([...store.blockedJids('acct-1')].sort(), ['x@s.whatsapp.net', 'y@s.whatsapp.net']);
+  store.replaceBlocklist('acct-1', ['z@s.whatsapp.net']);
+  assert.deepEqual([...store.blockedJids('acct-1')], ['z@s.whatsapp.net']);
+});
+
+test('setChatFlags stores the ephemeral (disappearing-messages) duration', () => {
+  const store = freshStore();
+  store.setChatFlags('acct-1', 'e@s.whatsapp.net', { ephemeral: 604800 });
+  const [chat] = store.getChatsOverview('acct-1');
+  assert.equal(chat.ephemeral, 604800);
+});

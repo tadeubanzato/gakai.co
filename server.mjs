@@ -1062,6 +1062,17 @@ async function enrichMessage(session,view){
     const chat=await provider.setChatState(id,chatId,action,value);
     return send(res,200,{chat:await enrichChatOverview(id,chat,{pictures:false})});
   }
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='block'){
+    const chatId=decodeURIComponent(parts[5]),input=await readBody(req);
+    const result=await provider.setBlocked(id,chatId,Boolean(input.blocked));
+    return send(res,200,{ok:true,...result});
+  }
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='disappearing'){
+    const chatId=decodeURIComponent(parts[5]),input=await readBody(req);
+    const seconds=Math.max(0,Math.min(Number(input.seconds)||0,60*60*24*90));
+    const chat=await provider.setDisappearing(id,chatId,seconds);
+    return send(res,200,{chat:await enrichChatOverview(id,chat,{pictures:false})});
+  }
   // Open a new 1:1 conversation from a phone number (checks it's on WhatsApp).
   if(req.method==='POST'&&parts[4]==='chats'&&!parts[5]){
     const input=await readBody(req),phone=String(input.phone||'').replace(/[^0-9]/g,'');

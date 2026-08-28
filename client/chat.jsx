@@ -294,7 +294,9 @@ function ForwardDialog({ message, chats, currentChatId, busy, onForward, onClose
   </div>;
 }
 
-export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats, onBack, onSent, onForwarded, onChatState, onDeleted }) {
+const DISAPPEARING_OPTIONS = [["Off", 0], ["24 hours", 86400], ["7 days", 604800], ["90 days", 7776000]];
+
+export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats, onBack, onSent, onForwarded, onChatState, onBlock, onDisappearing, onDeleted }) {
   const paneRef = useRef(null);
   const requestRef = useRef(0);
   const initialChatRef = useRef(null);
@@ -817,6 +819,9 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
             : <MenuItem onSelect={()=>onChatState(chat,{mute:60*60*24*7})}>Mute 1 week</MenuItem>}
           <MenuItem onSelect={()=>onChatState(chat,{archive:!chat.archived})}>{chat.archived ? "Unarchive" : "Archive"}</MenuItem>
         </>}
+        {onDisappearing && chat && DISAPPEARING_OPTIONS.map(([label,seconds])=>
+          <MenuItem key={seconds} checked={(chat.ephemeral||0)===seconds} onSelect={()=>onDisappearing(chat,seconds)}>Disappearing: {label}</MenuItem>)}
+        {onBlock && chat && !/@g\.us$/i.test(chatId||"") && <MenuItem danger onSelect={()=>onBlock(chat,!chat.blocked)}>{chat.blocked ? "Unblock contact" : "Block contact"}</MenuItem>}
         <MenuItem onSelect={deleteConversation} danger disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</MenuItem>
       </Menu>
     </header>
@@ -829,7 +834,9 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
       {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
-    <form className="composer" onSubmit={submitComposer}>
+    {chat?.blocked
+      ? <div className="composer blocked-banner" role="status">You blocked this contact. <button type="button" onClick={()=>onBlock?.(chat,false)}>Unblock</button> to message them.</div>
+      : <form className="composer" onSubmit={submitComposer}>
       {replyingTo&&<div className="composer-reply"><span><b>Replying to</b>{String(replyingTo.body||replyingTo.text||"Message").slice(0,100)}</span><button type="button" onClick={()=>setReplyingTo(null)} aria-label="Cancel reply">×</button></div>}
       {editingMessage&&<div className="composer-reply composer-editing"><span><b>Editing message</b>{String(editingMessage.body||editingMessage.text||"").slice(0,100)}</span><button type="button" onClick={cancelEdit} aria-label="Cancel edit">×</button></div>}
       {attachment&&<div className="composer-attachment">
@@ -874,7 +881,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
         <span aria-hidden="true">＋</span>
       </label>
       <button className="primary" type="submit" disabled={sendingMedia}>{editingMessage?"Save":sendingMedia?"Sending…":"Send"}</button>
-    </form>
+    </form>}
     {forwarding && <ForwardDialog message={forwarding} chats={chats} currentChatId={chatId} busy={forwardBusy} onForward={submitForward} onClose={()=>{ if(!forwardBusy) setForwarding(null); }} />}
   </div>;
 }

@@ -744,3 +744,7 @@ video.media{background:#000}
 .starred-badge{display:inline-block;margin-bottom:4px;color:#e8c37a;font-size:13px}
 .starred-item{align-items:center}
 .starred-item-icon{flex:none;color:#e8c37a;font-size:16px}
+
+/* Blocked-contact banner (replaces the composer) */
+.blocked-banner{display:flex;align-items:center;justify-content:center;gap:8px;color:#c6d5d0;font-size:13px;text-align:center}
+.blocked-banner button{background:var(--soft);color:var(--ink);border-radius:6px;padding:5px 10px;font-size:12px}

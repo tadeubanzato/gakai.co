@@ -138,6 +138,12 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     sock.ev.on('presence.update', safe('presence.update', ({ id: chatId, presences }) => {
       onEvent?.('presence', { accountId, chatId, presences });
     }));
+
+    // Blocklist: 'set' is the full list, 'update' is a { blocklist, type } delta.
+    sock.ev.on('blocklist.set', safe('blocklist.set', ({ blocklist }) => store.replaceBlocklist(accountId, blocklist || [])));
+    sock.ev.on('blocklist.update', safe('blocklist.update', ({ blocklist, type }) => {
+      for (const jid of blocklist || []) store.setBlocked(accountId, normJid(jid), type !== 'remove');
+    }));
   }
 
   function mapContact(contact) {
@@ -452,11 +458,30 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return enrichedOverviewFor(accountId, chatId);
   }
 
+  async function setBlocked(accountId, chatId, blocked) {
+    const { sock } = requireSocket(accountId);
+    const jid = canonicalChatId(accountId, chatId);
+    if (isGroupChatId(jid)) throw Object.assign(new Error('Groups cannot be blocked'), { status: 400 });
+    await sock.updateBlockStatus(jid, blocked ? 'block' : 'unblock');
+    store.setBlocked(accountId, jid, Boolean(blocked));
+    return { chatId: jid, blocked: Boolean(blocked) };
+  }
+
+  async function setDisappearing(accountId, chatId, seconds) {
+    const { sock } = requireSocket(accountId);
+    const target = canonicalChatId(accountId, chatId);
+    const value = Math.max(0, Number(seconds) || 0);
+    await sock.sendMessage(target, { disappearingMessagesInChat: value || false });
+    store.setChatFlags(accountId, target, { ephemeral: value });
+    return enrichedOverviewFor(accountId, target);
+  }
+
   function enrichedOverviewFor(accountId, chatId) {
+    const blocked = store.isBlocked(accountId, chatId);
     const [row] = store.getChatsOverview(accountId, 1000).filter(chat => chat.id === chatId);
-    if (row) return domainChatOverview(row);
+    if (row) return domainChatOverview({ ...row, blocked });
     const contact = store.getContact(accountId, chatId);
-    return domainChatOverview({ id: chatId, name: contact?.name || null, picture: contact?.picture || null, unreadCount: 0, lastMessageTimestamp: 0, lastMessage: null });
+    return domainChatOverview({ id: chatId, name: contact?.name || null, picture: contact?.picture || null, unreadCount: 0, lastMessageTimestamp: 0, lastMessage: null, blocked });
   }
 
   async function subscribePresence(accountId, chatId) {
@@ -567,13 +592,14 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   async function getChatsOverview(accountId) {
     const rows = store.getChatsOverview(accountId, 200);
+    const blocked = store.blockedJids(accountId);
     return rows.map(row => {
       if (!row.name) {
         const contact = store.getContact(accountId, row.id);
         if (contact?.name) row = { ...row, name: contact.name };
         if (!row.picture && contact?.picture) row = { ...row, picture: contact.picture };
       }
-      return domainChatOverview(row);
+      return domainChatOverview({ ...row, blocked: blocked.has(row.id) });
     });
   }
 
@@ -651,7 +677,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState,
+    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState, setBlocked, setDisappearing,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,

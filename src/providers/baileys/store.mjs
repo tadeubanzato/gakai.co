@@ -214,6 +214,24 @@ export function openStore(db) {
     }
   }
 
+  // Blocklist: a set of jids this account has blocked, kept in sync from
+  // Baileys' blocklist.set (full) / blocklist.update (delta) events.
+  function replaceBlocklist(accountId, jids) {
+    db.prepare(`DELETE FROM wa_blocklist WHERE account_id=?`).run(accountId);
+    const insert = db.prepare(`INSERT INTO wa_blocklist(account_id, jid) VALUES (?,?) ON CONFLICT DO NOTHING`);
+    for (const jid of jids || []) if (jid) insert.run(accountId, jid);
+  }
+  function setBlocked(accountId, jid, blocked) {
+    if (blocked) db.prepare(`INSERT INTO wa_blocklist(account_id, jid) VALUES (?,?) ON CONFLICT DO NOTHING`).run(accountId, jid);
+    else db.prepare(`DELETE FROM wa_blocklist WHERE account_id=? AND jid=?`).run(accountId, jid);
+  }
+  function isBlocked(accountId, jid) {
+    return Boolean(db.prepare(`SELECT 1 FROM wa_blocklist WHERE account_id=? AND jid=?`).get(accountId, jid));
+  }
+  function blockedJids(accountId) {
+    return new Set(db.prepare(`SELECT jid FROM wa_blocklist WHERE account_id=?`).all(accountId).map(row => row.jid));
+  }
+
   function setChatUnread(accountId, chatId, unreadCount) {
     stmt.ensureChat.run(accountId, chatId, now());
     stmt.setUnread.run(Math.max(0, Number(unreadCount) || 0), accountId, chatId);
@@ -428,6 +446,7 @@ export function openStore(db) {
     listChatIds, chatExists, ensureChat, mergeChat,
     upsertMessages, deleteMessage, applyEdit, getMessagesPage, getMessageById,
     setStarred, isStarred, starredMessageIds, listStarred,
+    replaceBlocklist, setBlocked, isBlocked, blockedJids,
     upsertContacts, setContactPicture, getContact, getContacts,
     setLidMapping, resolveLid,
     applyReaction, getReaction,

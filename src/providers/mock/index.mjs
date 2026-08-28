@@ -86,6 +86,19 @@ export function createMockProvider({ onEvent } = {}) {
     const chat = chatsFor(accountId).get(chatId);
     if (chat) chat.unreadCount = 0;
   }
+  const blocked = new Map(); // accountId -> Set(jid)
+  const blockedFor = accountId => { if (!blocked.has(accountId)) blocked.set(accountId, new Set()); return blocked.get(accountId); };
+  async function setBlocked(accountId, chatId, isBlocked) {
+    if (/@g\.us$/i.test(chatId)) throw Object.assign(new Error('Groups cannot be blocked'), { status: 400 });
+    if (isBlocked) blockedFor(accountId).add(chatId); else blockedFor(accountId).delete(chatId);
+    return { chatId, blocked: Boolean(isBlocked) };
+  }
+  async function setDisappearing(accountId, chatId, seconds) {
+    const chat = chatsFor(accountId).get(chatId) || { id: chatId, name: null, picture: null, unreadCount: 0, lastMessageTimestamp: 0 };
+    chat.ephemeral = Math.max(0, Number(seconds) || 0);
+    chatsFor(accountId).set(chatId, chat);
+    return domainChatOverview(chat);
+  }
   async function setChatState(accountId, chatId, action, value) {
     const chat = chatsFor(accountId).get(chatId) || { id: chatId, name: null, picture: null, unreadCount: 0, lastMessageTimestamp: 0 };
     if (action === 'pin') chat.pinned = Boolean(value);
@@ -121,7 +134,7 @@ export function createMockProvider({ onEvent } = {}) {
   // Mirrors the real Baileys manager's contract: getChatsOverview always
   // returns the final, already-normalized Gakai view model, never a raw
   // store row.
-  async function getChatsOverview(accountId) { return [...chatsFor(accountId).values()].map(domainChatOverview); }
+  async function getChatsOverview(accountId) { const blocks = blockedFor(accountId); return [...chatsFor(accountId).values()].map(chat => domainChatOverview({ ...chat, blocked: blocks.has(chat.id) })); }
   async function getMessages(accountId, chatId, { limit = 20, before } = {}) {
     const list = (messagesFor(accountId).get(chatId) || []).slice();
     const filtered = Number.isFinite(before) && before > 0 ? list.filter(m => m.timestamp <= before - 1) : list;
@@ -196,7 +209,7 @@ export function createMockProvider({ onEvent } = {}) {
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
     sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState,
-    setMessageStar, getStarredMessages,
+    setMessageStar, getStarredMessages, setBlocked, setDisappearing,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,
