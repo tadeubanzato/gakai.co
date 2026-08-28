@@ -56,6 +56,10 @@ There is no separate WhatsApp provider process to run, configure, or pull. Gakai
 | QR-code pairing flow in browser | ✅ Live |
 | Receive & view text, image, audio, video, documents, stickers | ✅ Live |
 | Send text messages (with @-mentions and reply/quote) | ✅ Live |
+| Send media — image / video / document / voice note, with caption | ✅ Live |
+| Start a new conversation from a phone number (with contact suggestions) | ✅ Live |
+| Delivery / read status ticks on sent messages | ✅ Live |
+| Location, shared-contact, poll, and view-once message rendering | ✅ Live |
 | Group chats with sender identity | ✅ Live |
 | Group @-mentions — participant autocomplete in the composer | ✅ Live |
 | Mention alerts — toast when you're @-tagged in a group | ✅ Live |
@@ -84,16 +88,7 @@ There is no separate WhatsApp provider process to run, configure, or pull. Gakai
 WhatsApp capabilities Gakai does not have yet, roughly in priority order. Each
 note points at where the work would live.
 
-### Blocking for daily use
-
-| Gap | Notes |
-|---|---|
-| **Send media** (image / video / document / voice note) | The single biggest gap — the composer is text-only. Needs an attach control + upload endpoint in `server.mjs`, a `sendMedia` method on the provider adapter (`sock.sendMessage` already takes `{ image }` / `{ video }` / `{ document }` / `{ audio, ptt: true }`), and multipart handling. Incoming media already renders. |
-| **Start a new conversation** | You can only reply to threads already in the inbox. Needs a contact picker / phone-number entry, an `onWhatsApp()` existence check in the adapter, and a "new chat" entry point in `client/app.jsx`. |
-| **Delivery / read status on sent messages** | No ✓ / ✓✓ / blue tick. The data is already normalized (`ackName` in `src/domain/message.mjs`) — it just needs rendering in `client/chat.jsx` and to be carried on the live message events. |
-| **Render location, contact cards, polls, view-once** | These arrive but show as "Message unavailable". Contact vCards are already extracted (`message.vCards`); location/poll/view-once need `bodyTextFor` + a card in `client/chat.jsx`, plus fixtures in `test/fixtures/providers/baileys/`. |
-
-### Secondary
+### Next up
 
 | Gap | Notes |
 |---|---|
