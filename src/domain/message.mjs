@@ -329,6 +329,11 @@ export function messageView(waMessage, { accountId, chatId } = {}) {
     media,
     mediaUrl: hasMedia ? messageMediaUrl(accountId, chatId, messageId) : null,
     viewOnce: Boolean(inner?.viewOnce),
+    edited: Boolean(waMessage.edited),
+    // A text message the account itself sent is editable until WhatsApp's
+    // ~15-minute window closes. The client compares this against the clock so
+    // the affordance disappears on its own between refetches.
+    editableUntil: fromMe && (contentType === 'conversation' || contentType === 'extendedTextMessage') ? timestamp + EDIT_WINDOW_SECONDS : null,
     location: locationView(contentType, inner),
     contacts: contactsView(contentType, inner || {}),
     poll: pollView(contentType, inner),
@@ -369,3 +374,23 @@ export function revokeView(waMessage) {
   if (protocolMessage?.type !== 0 && protocolMessage?.type !== 'REVOKE') return null; // proto.Message.ProtocolMessage.Type.REVOKE === 0
   return { targetMessageId: protocolMessage.key?.id || null };
 }
+
+// An edit arrives as a protocolMessage (type MESSAGE_EDIT === 14) carrying the
+// replacement content in `editedMessage` and the original's id in `.key`.
+// Mirrors revokeView: the store rewrites the target message's text in place.
+export function editView(waMessage) {
+  const content = normalizeMessageContent(waMessage.message || {}) || {};
+  if (getContentType(content) !== 'protocolMessage') return null;
+  const protocolMessage = content.protocolMessage;
+  if (protocolMessage?.type !== 14 && protocolMessage?.type !== 'MESSAGE_EDIT') return null;
+  const edited = normalizeMessageContent(protocolMessage.editedMessage || {}) || {};
+  const editedType = getContentType(edited);
+  return {
+    targetMessageId: protocolMessage.key?.id || null,
+    newText: editedType ? bodyTextFor(editedType, edited[editedType]) : '',
+    editedAt: normalizedTimestamp(protocolMessage.timestampMs || waMessage.messageTimestamp),
+  };
+}
+
+// WhatsApp only accepts an edit within ~15 minutes of the original send.
+export const EDIT_WINDOW_SECONDS = 15 * 60;

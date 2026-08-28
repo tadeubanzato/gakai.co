@@ -129,6 +129,16 @@ export function buildMediaPending(file, caption, objectUrl) {
   };
 }
 
+// A sent text message is editable until the server-provided `editableUntil`
+// (original send + WhatsApp's ~15 min window) passes. Checked against the clock
+// so the "Edit" action disappears on its own between refetches.
+export function messageIsEditable(message) {
+  if (!message || !message.fromMe || message.pending) return false;
+  if (message.hasMedia || message.media || message.mediaUrl) return false;
+  if (!message.editableUntil) return false;
+  return Date.now() / 1000 < Number(message.editableUntil);
+}
+
 export function merge(current, extra) {
   const keyed = new Map();
   [...current, ...extra].forEach((message, index) => keyed.set(idFor(message, index), message));

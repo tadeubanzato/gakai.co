@@ -49,6 +49,17 @@ export function createMockProvider({ onEvent } = {}) {
     seedMessage(accountId, chatId, message);
     return message;
   }
+  async function editMessage(accountId, chatId, messageId, text) {
+    const list = messagesFor(accountId).get(chatId) || [];
+    const message = list.find(m => m.id === messageId);
+    if (!message) throw Object.assign(new Error('Message not found'), { status: 404 });
+    if (!message.fromMe) throw Object.assign(new Error('You can only edit your own messages'), { status: 403 });
+    const trimmed = String(text || '').trim();
+    if (!trimmed) throw Object.assign(new Error('An edited message cannot be empty'), { status: 400 });
+    sent.push({ accountId, kind: 'edit', chatId, messageId, text: trimmed });
+    message.body = trimmed; message.text = trimmed; message.edited = true;
+    return { ...message };
+  }
   async function forwardMessage(accountId, fromChatId, messageId, toChatId) {
     const fromList = messagesFor(accountId).get(fromChatId) || [];
     const source = fromList.find(m => m.id === messageId);
@@ -158,7 +169,7 @@ export function createMockProvider({ onEvent } = {}) {
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, sendMedia, forwardMessage, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,

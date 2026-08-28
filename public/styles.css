@@ -727,3 +727,7 @@ video.media{background:#000}
 .forward-target-list button:disabled{opacity:.5}
 .forward-target-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600}
 .forward-empty{padding:10px;color:var(--muted);font-size:13px}
+
+/* Edited-message marker + composer editing bar */
+.edited-marker{margin-right:5px;font-style:italic;opacity:.75}
+.composer-editing b{color:#e8c37a}

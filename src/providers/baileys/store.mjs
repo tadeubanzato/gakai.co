@@ -190,6 +190,23 @@ export function openStore(db) {
     stmt.deleteReactionsForMessage.run(accountId, messageId);
   }
 
+  // Rewrite a stored message's text in place (an inbound or outbound edit) and
+  // mark it edited, mirroring how deleteMessage handles a REVOKE.
+  function applyEdit(accountId, chatId, targetMessageId, newText) {
+    const row = (chatId && stmt.getMessage.get(accountId, chatId, targetMessageId)) || stmt.findMessageById.get(accountId, targetMessageId);
+    if (!row) return false;
+    const raw = JSON.parse(row.payload_json);
+    const message = raw.message || {};
+    if (typeof message.conversation === 'string') message.conversation = newText;
+    else if (message.extendedTextMessage) message.extendedTextMessage.text = newText;
+    else message.conversation = newText;
+    raw.message = message;
+    raw.edited = true;
+    stmt.upsertMessage.run(accountId, row.chat_id, targetMessageId, row.timestamp, row.from_me, JSON.stringify(raw), now());
+    stmt.bumpChatLastMessage.run(row.timestamp, JSON.stringify({ body: newText, text: newText, timestamp: row.timestamp, hasMedia: false, system: null }), now(), accountId, row.chat_id, row.timestamp);
+    return true;
+  }
+
   function deleteChat(accountId, chatId) {
     stmt.deleteChatMessages.run(accountId, chatId);
     stmt.deleteChat.run(accountId, chatId);
@@ -327,7 +344,7 @@ export function openStore(db) {
   return {
     upsertChats, setChatUnread, setChatPicture, deleteChat, getChatsOverview,
     listChatIds, chatExists, ensureChat, mergeChat,
-    upsertMessages, deleteMessage, getMessagesPage, getMessageById,
+    upsertMessages, deleteMessage, applyEdit, getMessagesPage, getMessageById,
     upsertContacts, setContactPicture, getContact, getContacts,
     setLidMapping, resolveLid,
     applyReaction, getReaction,

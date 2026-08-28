@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
-import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
+import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, editView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
 
@@ -234,6 +234,9 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
         const revoke = revokeView(raw);
         if (revoke?.targetMessageId) { store.deleteMessage(accountId, chatId, revoke.targetMessageId); continue; }
 
+        const edit = editView(raw);
+        if (edit?.targetMessageId) { store.applyEdit(accountId, chatId, edit.targetMessageId, edit.newText); continue; }
+
         const normalized = messageView(raw, { accountId, chatId });
         toStore.push({ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: normalized.fromMe, waMessage: raw, overviewMessage: overviewFromMessage(normalized) });
 
@@ -346,6 +349,20 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     const normalized = messageView(sent, { accountId, chatId: target });
     store.upsertMessages(accountId, [{ chatId: target, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: sent, overviewMessage: overviewFromMessage(normalized) }]);
     return normalized;
+  }
+
+  async function editMessage(accountId, chatId, messageId, text) {
+    const { sock } = requireSocket(accountId);
+    const target = canonicalChatId(accountId, chatId);
+    const raw = store.getMessageById(accountId, target, messageId) || store.getMessageById(accountId, null, messageId);
+    if (!raw?.key) throw Object.assign(new Error('Message not found'), { status: 404 });
+    if (!raw.key.fromMe) throw Object.assign(new Error('You can only edit your own messages'), { status: 403 });
+    const trimmed = String(text || '').trim();
+    if (!trimmed) throw Object.assign(new Error('An edited message cannot be empty'), { status: 400 });
+    await sock.sendMessage(target, { text: trimmed, edit: raw.key });
+    store.applyEdit(accountId, target, messageId, trimmed);
+    const updated = store.getMessageById(accountId, target, messageId);
+    return messageView(updated, { accountId, chatId: target });
   }
 
   async function forwardMessage(accountId, fromChatId, messageId, toChatId) {
@@ -575,7 +592,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, sendMedia, forwardMessage, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,

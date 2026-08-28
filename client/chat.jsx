@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending } from "./chat-helpers.mjs";
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending, messageIsEditable } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
 import { Avatar, Menu, MenuItem } from "./ui-helpers.jsx";
 import { confirmDialog } from "./confirm.jsx";
@@ -215,7 +215,7 @@ function messageBody(text, mentions) {
   const parts=String(text).split(pattern);
   return parts.map((part,index)=>index%2?<mark key={index} className="own-mention">@{part}</mark>:part);
 }
-function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, accountPicture, onMediaResolved, onReply, onReact, onForward, onDelete, reaction }) {
+function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, accountPicture, onMediaResolved, onReply, onReact, onForward, onEdit, onDelete, reaction }) {
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
@@ -240,7 +240,7 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
     {!isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
     {!visibleBody && !previewUrl && !structured && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
     {reaction && <span className="reaction-pill">{reaction}</span>}
-    <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}{message.fromMe && <AckTicks ackName={message.pending ? "PENDING" : message.ackName} />}</time>
+    <time>{message.edited && <span className="edited-marker">edited</span>}{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}{message.fromMe && <AckTicks ackName={message.pending ? "PENDING" : message.ackName} />}</time>
   </article>;
   // Buttons live outside the bubble now (a hover toolbar, not part of the
   // message content) — on the inner side of the bubble (left for "mine",
@@ -251,6 +251,7 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
     {!message.fromMe && <button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>}
     {!message.fromMe && showReactions && <span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}
     <button type="button" onClick={()=>onForward?.(message)}>Forward</button>
+    {messageIsEditable(message) && <button type="button" onClick={()=>onEdit?.(message)}>Edit</button>}
     <button type="button" className="message-delete" onClick={()=>onDelete?.(message)} aria-label={message.fromMe ? "Delete this message for everyone" : "Delete this message for you"}>Delete</button>
   </div>;
   return <div className={`message-group ${message.fromMe ? "mine" : ""}`}>
@@ -310,6 +311,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   const [sendingMedia, setSendingMedia] = useState(false);
   const [forwarding, setForwarding] = useState(null); // the message being forwarded, while the picker is open
   const [forwardBusy, setForwardBusy] = useState(false);
+  const [editingMessage, setEditingMessage] = useState(null); // the sent message being edited in the composer
   const fileInputRef = useRef(null);
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
@@ -398,7 +400,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     historyRestoreRef.current = null;
     olderRequestRef.current = false;
     hydratedSendersRef.current = new Set();
-    setMessages([]); setExhausted(false); setError(""); setReplyingTo(null); setReactionOverrides({}); setNewMessageCount(0); setLoading(Boolean(chatId));
+    setMessages([]); setExhausted(false); setError(""); setReplyingTo(null); setEditingMessage(null); setForwarding(null); setReactionOverrides({}); setNewMessageCount(0); setLoading(Boolean(chatId));
     if (!accountId || !chatId) return undefined;
     api(endpoint(accountId, chatId)).then(result => {
       if (requestRef.current !== version) return;
@@ -666,13 +668,14 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   // textarea text as its caption), otherwise it's a plain text message.
   const submitComposer = useCallback(event => {
     event.preventDefault();
+    if (editingMessage) { submitEdit(); return; }
     if (attachment?.file) {
       const caption = (composerRef.current?.value || "").trim();
       sendMedia(attachment.file, caption);
       return;
     }
     send(event);
-  }, [attachment, send, sendMedia]);
+  }, [attachment, editingMessage, submitEdit, send, sendMedia]);
 
   const reactToMessage = useCallback(async (message, emoji) => {
     const messageId=serializedId(message?.id);if(!messageId)return;
@@ -706,6 +709,45 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
       setError(cause.message || "Could not delete this message.");
     }
   }, [accountId, chatId]);
+
+  const beginEdit = useCallback(message => {
+    setReplyingTo(null);
+    setEditingMessage(message);
+    const field = composerRef.current;
+    if (field) {
+      field.value = message?.body || message?.text || "";
+      autoGrowComposer(field);
+      field.focus();
+    }
+  }, [autoGrowComposer]);
+
+  const cancelEdit = useCallback(() => {
+    setEditingMessage(null);
+    const field = composerRef.current;
+    if (field) { field.value = ""; autoGrowComposer(field); }
+  }, [autoGrowComposer]);
+
+  const submitEdit = useCallback(async () => {
+    const field = composerRef.current;
+    const text = field?.value?.trim();
+    const messageId = serializedId(editingMessage?.id);
+    if (!text || !messageId || !chatId) return;
+    const previous = editingMessage;
+    setEditingMessage(null);
+    if (field) { field.value = ""; autoGrowComposer(field); }
+    setMessages(current => current.map(item => serializedId(item.id) === messageId ? { ...item, body: text, text, edited: true } : item));
+    try {
+      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
+        method: "PATCH", body: JSON.stringify({ text }),
+      });
+      if (result.message) setMessages(current => merge(current.filter(item => serializedId(item.id) !== messageId), [result.message]));
+    } catch (cause) {
+      setMessages(current => current.map(item => serializedId(item.id) === messageId ? { ...item, body: previous?.body || previous?.text || "", text: previous?.text || previous?.body || "", edited: Boolean(previous?.edited) } : item));
+      if (field) { field.value = text; autoGrowComposer(field); }
+      setEditingMessage(previous);
+      setError(cause.message || "Could not edit this message.");
+    }
+  }, [accountId, chatId, editingMessage, autoGrowComposer]);
 
   const submitForward = useCallback(async (targetChat) => {
     const source = forwarding;
@@ -758,13 +800,14 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
       {loading && !messages.length ? <p className="chat-loading loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading messages…</p> : <div className="message-list">
-        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onForward={setForwarding} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
+        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onForward={setForwarding} onEdit={beginEdit} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
       {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
     <form className="composer" onSubmit={submitComposer}>
       {replyingTo&&<div className="composer-reply"><span><b>Replying to</b>{String(replyingTo.body||replyingTo.text||"Message").slice(0,100)}</span><button type="button" onClick={()=>setReplyingTo(null)} aria-label="Cancel reply">×</button></div>}
+      {editingMessage&&<div className="composer-reply composer-editing"><span><b>Editing message</b>{String(editingMessage.body||editingMessage.text||"").slice(0,100)}</span><button type="button" onClick={cancelEdit} aria-label="Cancel edit">×</button></div>}
       {attachment&&<div className="composer-attachment">
         {mediaKindFromMime(attachment.file.type)==="image"
           ? <img src={attachment.url} alt="" className="composer-attachment-thumb"/>
@@ -806,7 +849,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
         <input ref={fileInputRef} type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip" onChange={pickAttachment} hidden/>
         <span aria-hidden="true">＋</span>
       </label>
-      <button className="primary" type="submit" disabled={sendingMedia}>{sendingMedia?"Sending…":"Send"}</button>
+      <button className="primary" type="submit" disabled={sendingMedia}>{editingMessage?"Save":sendingMedia?"Sending…":"Send"}</button>
     </form>
     {forwarding && <ForwardDialog message={forwarding} chats={chats} currentChatId={chatId} busy={forwardBusy} onForward={submitForward} onClose={()=>{ if(!forwardBusy) setForwarding(null); }} />}
   </div>;

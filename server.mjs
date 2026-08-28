@@ -1081,6 +1081,15 @@ async function enrichMessage(session,view){
     await provider.deleteMessage(id,chatId,messageId);
     return send(res,200,{ok:true});
   }
+  if(req.method==='PATCH'&&parts[4]==='chats'&&parts[5]&&parts[6]==='messages'&&parts[7]){
+    const chatId=decodeURIComponent(parts[5]),messageId=decodeURIComponent(parts[7]);
+    const input=await readBody(req),text=String(input.text||'').trim();
+    if(!messageId)return send(res,400,{message:'Invalid message ID'});
+    if(!text)return send(res,400,{message:'An edited message cannot be empty'});
+    if(text.length>4096)return send(res,400,{message:'Message is too long'});
+    const message=await provider.editMessage(id,chatId,messageId,text);
+    return send(res,200,{message:await enrichMessage(id,message)});
+  }
   if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){const chatId=decodeURIComponent(parts[5]);await provider.deleteChat(id,chatId);return send(res,200,{ok:true});}
   // Presence stays behind the dashboard proxy so the browser never receives
   // direct provider access.
