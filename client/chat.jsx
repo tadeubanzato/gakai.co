@@ -95,6 +95,38 @@ function MediaCard({ message, accountId, chatId, onResolved }) {
     <span className="message-document-download" aria-hidden="true">⇩</span>
   </a>;
 }
+function LocationCard({ location }) {
+  if (!location) return null;
+  const { latitude, longitude, name, address, live } = location;
+  const label = [name, address].filter(Boolean).join(" · ");
+  const maps = `https://www.google.com/maps?q=${latitude},${longitude}`;
+  const osm = `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=16/${latitude}/${longitude}`;
+  return <div className="location-card">
+    <span className="location-pin" aria-hidden="true">📍</span>
+    <span className="location-info">
+      <b>{live ? "Live location" : name || "Location"}</b>
+      <small>{label || `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`}</small>
+      <span className="location-links"><a href={maps} target="_blank" rel="noreferrer">Open in Maps</a><a href={osm} target="_blank" rel="noreferrer">OpenStreetMap</a></span>
+    </span>
+  </div>;
+}
+function ContactCard({ contacts }) {
+  if (!contacts?.length) return null;
+  return <div className="contact-card-list">
+    {contacts.map((contact, index) => <div className="contact-card" key={index}>
+      <span className="contact-card-avatar" aria-hidden="true">{(contact.name || "?").trim()[0]?.toUpperCase() || "?"}</span>
+      <span className="contact-card-info"><b>{contact.name || "Shared contact"}</b>{contact.phone && <small>+{contact.phone}</small>}</span>
+    </div>)}
+  </div>;
+}
+function PollCard({ poll }) {
+  if (!poll) return null;
+  return <div className="poll-card">
+    <span className="poll-label">📊 Poll{poll.multiple ? " · choose multiple" : ""}</span>
+    <b className="poll-question">{poll.question || "Poll"}</b>
+    <ul className="poll-options">{(poll.options || []).map((option, index) => <li key={index}>{option}</li>)}</ul>
+  </div>;
+}
 function LinkPreview({ body, preview }) {
   const match = String(body || "").match(/https?:\/\/[^\s]+/i);
   const url = preview?.url || match?.[0];
@@ -190,15 +222,23 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
   const isInstagramLink = (() => { if (!previewUrl) return false; try { return /instagram\.com$/i.test(new URL(previewUrl).hostname); } catch { return false; } })();
   const [showReactions, setShowReactions] = useState(false);
   const label = message?.replyTo?.body || (message?.replyTo?.hasMedia ? "Media attachment" : "Message");
+  // A structured payload (location / contact / poll) renders as its own card,
+  // so the emoji-prefixed preview text the backend attaches for the inbox list
+  // is suppressed inside the thread.
+  const structured = Boolean(message?.location || message?.poll || message?.contacts?.length);
   const bubble = <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}${message.mentions?.some(mention=>mention.isMe)?" mentioned-me":""}`}>
     {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} />}
     {message.fromMe && <Sender sender={{id:accountId,name:accountLabel||"You",picture:accountPicture}} />}
     {message?.replyTo && <div className="reply-context"><b>Replying to</b><span>{String(label).slice(0,140)}</span></div>}
+    {message?.viewOnce && <span className="view-once-badge">👁 View once</span>}
     <MediaCard message={message} accountId={accountId} chatId={chatId} onResolved={onMediaResolved} />
+    <LocationCard location={message?.location} />
+    <ContactCard contacts={message?.contacts} />
+    <PollCard poll={message?.poll} />
     {isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
-    {visibleBody && <span className="message-body">{messageBody(visibleBody,message.mentions)}</span>}
+    {visibleBody && !structured && <span className="message-body">{messageBody(visibleBody,message.mentions)}</span>}
     {!isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
-    {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
+    {!visibleBody && !previewUrl && !structured && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
     {reaction && <span className="reaction-pill">{reaction}</span>}
     <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}{message.fromMe && <AckTicks ackName={message.pending ? "PENDING" : message.ackName} />}</time>
   </article>;

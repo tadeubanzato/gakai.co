@@ -1,0 +1,13 @@
+{
+  "key": { "remoteJid": "551199999999@s.whatsapp.net", "fromMe": false, "id": "3EB0LOCATION1" },
+  "messageTimestamp": 1735689700,
+  "pushName": "Fixture Contact",
+  "message": {
+    "locationMessage": {
+      "degreesLatitude": -23.56312,
+      "degreesLongitude": -46.65403,
+      "name": "Parque Ibirapuera",
+      "address": "Av. Pedro Alvares Cabral, Sao Paulo"
+    }
+  }
+}

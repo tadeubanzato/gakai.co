@@ -197,6 +197,45 @@ test('messageView maps a missed-call stub message to a system "call" view', () =
   assert.match(view.system.label, /video/i);
 });
 
+test('messageView normalizes a shared location into a location card view', async () => {
+  const view = messageView(await fixture('message-location.json'), ctx);
+  assert.equal(view.location.latitude, -23.56312);
+  assert.equal(view.location.longitude, -46.65403);
+  assert.equal(view.location.name, 'Parque Ibirapuera');
+  assert.equal(view.location.live, false);
+  assert.match(view.body, /Parque Ibirapuera/); // inbox preview text, not blank
+});
+
+test('messageView normalizes a shared contact, pulling the phone from the vCard waid', async () => {
+  const view = messageView(await fixture('message-contact.json'), ctx);
+  assert.deepEqual(view.contacts, [{ name: 'Sample Person', phone: '15550001234' }]);
+  assert.match(view.body, /Sample Person/);
+});
+
+test('messageView falls back to the vCard TEL when there is no waid', () => {
+  const view = messageView({
+    key: { remoteJid: ctx.chatId, fromMe: false, id: 'c2' }, messageTimestamp: 1735689710,
+    message: { contactMessage: { displayName: 'No Waid', vcard: 'BEGIN:VCARD\nFN:No Waid\nTEL:+1 555 777 8888\nEND:VCARD' } },
+  }, ctx);
+  assert.deepEqual(view.contacts, [{ name: 'No Waid', phone: '+15557778888' }]);
+});
+
+test('messageView normalizes a poll into a question + options list', async () => {
+  const view = messageView(await fixture('message-poll.json'), ctx);
+  assert.equal(view.poll.question, 'Where should we eat?');
+  assert.deepEqual(view.poll.options, ['Pizza', 'Sushi', 'Salad']);
+  assert.equal(view.poll.multiple, false);
+});
+
+test('messageView unwraps a view-once photo and flags it', async () => {
+  const view = messageView(await fixture('message-viewonce-image.json'), ctx);
+  assert.equal(view.viewOnce, true);
+  assert.equal(view.hasMedia, true, 'still routed through the media path');
+  assert.equal(view.body, 'one-time photo');
+  assert.equal(view.location, null);
+  assert.equal(view.poll, null);
+});
+
 test('ackStatusName normalizes the numeric WhatsApp status enum to a stable name', () => {
   assert.equal(ackStatusName(2), 'SERVER_ACK');
   assert.equal(ackStatusName(3), 'DELIVERY_ACK');

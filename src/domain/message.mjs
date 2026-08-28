@@ -183,6 +183,9 @@ function mediaView(contentType, content, accountId, chatId, messageId) {
   };
 }
 
+const POLL_TYPES = new Set(['pollCreationMessage', 'pollCreationMessageV2', 'pollCreationMessageV3']);
+const LOCATION_TYPES = new Set(['locationMessage', 'liveLocationMessage']);
+
 function bodyTextFor(contentType, content) {
   if (contentType === 'conversation') return content || '';
   if (!content) return '';
@@ -190,7 +193,50 @@ function bodyTextFor(contentType, content) {
   if (contentType === 'imageMessage' || contentType === 'videoMessage') return content.caption || '';
   if (contentType === 'documentMessage') return content.caption || '';
   if (contentType === 'documentWithCaptionMessage') return content.message?.documentMessage?.caption || '';
+  // Structured types have no free-text body — give the inbox preview and the
+  // "Replying to" line something meaningful instead of a blank bubble.
+  if (LOCATION_TYPES.has(contentType)) return content.name ? `📍 ${content.name}` : '📍 Location';
+  if (contentType === 'contactMessage') return `👤 ${content.displayName || 'Contact'}`;
+  if (contentType === 'contactsArrayMessage') return `👤 ${content.displayName || 'Contacts'}`;
+  if (POLL_TYPES.has(contentType)) return content.name ? `📊 ${content.name}` : '📊 Poll';
   return '';
+}
+
+function locationView(contentType, content) {
+  if (!LOCATION_TYPES.has(contentType)) return null;
+  const latitude = Number(content?.degreesLatitude), longitude = Number(content?.degreesLongitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return { latitude, longitude, name: content?.name || '', address: content?.address || '', live: contentType === 'liveLocationMessage' };
+}
+
+// Pull a display name + phone number out of a shared contact's vCard. WhatsApp
+// encodes the number as `TEL;…;waid=<digits>:<pretty>` — prefer the waid digits.
+function parseVCard(vcard) {
+  const text = String(vcard || '');
+  const name = (text.match(/(?:^|\n)FN:(.+)/) || [])[1]?.trim() || '';
+  const waid = (text.match(/waid=(\d+)/) || [])[1] || '';
+  const tel = (text.match(/(?:^|\n)TEL[^:\n]*:(.+)/) || [])[1]?.trim().replace(/[^\d+]/g, '') || '';
+  return { name, phone: waid || tel || '' };
+}
+
+function contactsView(contentType, content) {
+  if (contentType === 'contactMessage') {
+    const parsed = parseVCard(content?.vcard);
+    return [{ name: content?.displayName || parsed.name || '', phone: parsed.phone }];
+  }
+  if (contentType === 'contactsArrayMessage' && Array.isArray(content?.contacts)) {
+    return content.contacts.map(entry => {
+      const parsed = parseVCard(entry?.vcard);
+      return { name: entry?.displayName || parsed.name || '', phone: parsed.phone };
+    });
+  }
+  return [];
+}
+
+function pollView(contentType, content) {
+  if (!POLL_TYPES.has(contentType)) return null;
+  const options = Array.isArray(content?.options) ? content.options.map(option => option?.optionName || '').filter(Boolean) : [];
+  return { question: content?.name || '', options, multiple: Number(content?.selectableOptionsCount || 0) !== 1 };
 }
 
 // WhatsApp's own read-receipt/delivery status. Baileys delivers it as the
@@ -282,6 +328,10 @@ export function messageView(waMessage, { accountId, chatId } = {}) {
     hasMedia,
     media,
     mediaUrl: hasMedia ? messageMediaUrl(accountId, chatId, messageId) : null,
+    viewOnce: Boolean(inner?.viewOnce),
+    location: locationView(contentType, inner),
+    contacts: contactsView(contentType, inner || {}),
+    poll: pollView(contentType, inner),
     vCards: vCardsFor(contentType, inner || {}),
     sender: senderId ? { id: senderId, name: senderName, picture: null } : null,
     linkPreview: contentType === 'extendedTextMessage' ? linkPreviewView(inner) : null,
