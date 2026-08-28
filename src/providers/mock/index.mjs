@@ -42,6 +42,13 @@ export function createMockProvider({ onEvent } = {}) {
     seedMessage(accountId, chatId, message);
     return message;
   }
+  async function sendMedia(accountId, chatId, { buffer, mimetype, filename, caption, kind, ptt } = {}, { quotedMessageId } = {}) {
+    const resolvedKind = kind || (String(mimetype || '').startsWith('image/') ? 'image' : String(mimetype || '').startsWith('video/') ? 'video' : String(mimetype || '').startsWith('audio/') ? 'audio' : 'document');
+    sent.push({ accountId, chatId, kind: resolvedKind, mimetype: mimetype || null, filename: filename || null, caption: caption || '', ptt: Boolean(ptt), bytes: buffer ? buffer.length : 0, quotedMessageId: quotedMessageId || null });
+    const message = { id: `mock-media-${sent.length}`, timestamp: Math.floor(Date.now() / 1000), fromMe: true, body: caption || '', text: caption || '', hasMedia: true, media: { url: null, mimetype: mimetype || null, filename: filename || null }, mediaUrl: null, system: null, replyTo: null, sender: null, mentionedJids: [] };
+    seedMessage(accountId, chatId, message);
+    return message;
+  }
   async function setReaction(accountId, chatId, messageId, reaction) {
     if (reaction) reactionsFor(accountId).set(messageId, reaction);
     else reactionsFor(accountId).delete(messageId);
@@ -66,6 +73,19 @@ export function createMockProvider({ onEvent } = {}) {
     return contactsFor(accountId).get(contactId) || { id: contactId, phone: null, name: null, picture: null };
   }
   function getContacts(accountId) { return [...contactsFor(accountId).values()]; }
+  const whatsappNumbers = new Set(); // digit strings seeded as "on WhatsApp"
+  async function checkOnWhatsApp(accountId, phone) {
+    const digits = String(phone || '').replace(/[^0-9]/g, '');
+    if (digits.length < 6 || digits.length > 15) throw Object.assign(new Error('Enter a valid phone number in international format'), { status: 400 });
+    return { exists: whatsappNumbers.has(digits), jid: `${digits}@s.whatsapp.net` };
+  }
+  async function startConversation(accountId, phone) {
+    const { exists, jid } = await checkOnWhatsApp(accountId, phone);
+    if (!exists) throw Object.assign(new Error('That number is not on WhatsApp'), { status: 404 });
+    const existing = chatsFor(accountId).get(jid);
+    if (!existing) chatsFor(accountId).set(jid, { id: jid, name: contactsFor(accountId).get(jid)?.name || null, picture: null, unreadCount: 0, lastMessageTimestamp: Math.floor(Date.now() / 1000), lastMessage: null });
+    return domainChatOverview(chatsFor(accountId).get(jid));
+  }
   function resolveLid(accountId, lid) { return lid; }
   async function getGroupParticipants(accountId, chatId) { return [...(groupParticipantsFor(accountId).get(chatId) || [])]; }
 
@@ -111,6 +131,7 @@ export function createMockProvider({ onEvent } = {}) {
     }
   }
   function seedContact(accountId, contact) { contactsFor(accountId).set(contact.id, contact); }
+  function seedWhatsAppNumber(phone) { whatsappNumbers.add(String(phone || '').replace(/[^0-9]/g, '')); }
   function seedGroupParticipants(accountId, chatId, participants) { groupParticipantsFor(accountId).set(chatId, participants); }
   // Simulates a live inbound WhatsApp message the same way a real
   // messages.upsert('notify') event would — stores it and, unless it's a
@@ -128,11 +149,12 @@ export function createMockProvider({ onEvent } = {}) {
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
+    checkOnWhatsApp, startConversation,
     getChatsOverview, getMessages, getMessage, downloadMedia,
     shutdown,
-    __test: { seedAccount, seedChat, seedMessage, seedContact, seedGroupParticipants, simulateIncomingMessage, getSentMessages, getReaction },
+    __test: { seedAccount, seedChat, seedMessage, seedContact, seedWhatsAppNumber, seedGroupParticipants, simulateIncomingMessage, getSentMessages, getReaction },
   };
 }

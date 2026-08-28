@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload } from "./chat-helpers.mjs";
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
 import { Avatar } from "./ui-helpers.jsx";
 import { confirmDialog } from "./confirm.jsx";
@@ -95,6 +95,38 @@ function MediaCard({ message, accountId, chatId, onResolved }) {
     <span className="message-document-download" aria-hidden="true">⇩</span>
   </a>;
 }
+function LocationCard({ location }) {
+  if (!location) return null;
+  const { latitude, longitude, name, address, live } = location;
+  const label = [name, address].filter(Boolean).join(" · ");
+  const maps = `https://www.google.com/maps?q=${latitude},${longitude}`;
+  const osm = `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=16/${latitude}/${longitude}`;
+  return <div className="location-card">
+    <span className="location-pin" aria-hidden="true">📍</span>
+    <span className="location-info">
+      <b>{live ? "Live location" : name || "Location"}</b>
+      <small>{label || `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`}</small>
+      <span className="location-links"><a href={maps} target="_blank" rel="noreferrer">Open in Maps</a><a href={osm} target="_blank" rel="noreferrer">OpenStreetMap</a></span>
+    </span>
+  </div>;
+}
+function ContactCard({ contacts }) {
+  if (!contacts?.length) return null;
+  return <div className="contact-card-list">
+    {contacts.map((contact, index) => <div className="contact-card" key={index}>
+      <span className="contact-card-avatar" aria-hidden="true">{(contact.name || "?").trim()[0]?.toUpperCase() || "?"}</span>
+      <span className="contact-card-info"><b>{contact.name || "Shared contact"}</b>{contact.phone && <small>+{contact.phone}</small>}</span>
+    </div>)}
+  </div>;
+}
+function PollCard({ poll }) {
+  if (!poll) return null;
+  return <div className="poll-card">
+    <span className="poll-label">📊 Poll{poll.multiple ? " · choose multiple" : ""}</span>
+    <b className="poll-question">{poll.question || "Poll"}</b>
+    <ul className="poll-options">{(poll.options || []).map((option, index) => <li key={index}>{option}</li>)}</ul>
+  </div>;
+}
 function LinkPreview({ body, preview }) {
   const match = String(body || "").match(/https?:\/\/[^\s]+/i);
   const url = preview?.url || match?.[0];
@@ -162,6 +194,20 @@ function LinkPreview({ body, preview }) {
   }
   return <a className="link-preview" href={url} target="_blank" rel="noreferrer">{previewImage}<span><b>{readable(data.title || url, 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}</span></a>;
 }
+// WhatsApp-style delivery ticks for a message this account sent. Grey clock
+// while pending, single grey check on server ack, double grey on delivery,
+// double blue once read/played.
+const ACK_GLYPHS = {
+  PENDING: { glyph: "🕛", cls: "pending", label: "Sending" },
+  SERVER_ACK: { glyph: "✓", cls: "sent", label: "Sent" },
+  DELIVERY_ACK: { glyph: "✓✓", cls: "delivered", label: "Delivered" },
+  READ: { glyph: "✓✓", cls: "read", label: "Read" },
+  PLAYED: { glyph: "✓✓", cls: "read", label: "Played" },
+};
+function AckTicks({ ackName }) {
+  const state = ACK_GLYPHS[ackName] || ACK_GLYPHS.PENDING;
+  return <span className={`message-ack ${state.cls}`} title={state.label} aria-label={state.label}>{state.glyph}</span>;
+}
 function messageBody(text, mentions) {
   const ownNames=(mentions||[]).filter(mention=>mention.isMe&&mention.name).map(mention=>String(mention.name));
   if(!ownNames.length)return text;
@@ -176,17 +222,25 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
   const isInstagramLink = (() => { if (!previewUrl) return false; try { return /instagram\.com$/i.test(new URL(previewUrl).hostname); } catch { return false; } })();
   const [showReactions, setShowReactions] = useState(false);
   const label = message?.replyTo?.body || (message?.replyTo?.hasMedia ? "Media attachment" : "Message");
+  // A structured payload (location / contact / poll) renders as its own card,
+  // so the emoji-prefixed preview text the backend attaches for the inbox list
+  // is suppressed inside the thread.
+  const structured = Boolean(message?.location || message?.poll || message?.contacts?.length);
   const bubble = <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}${message.mentions?.some(mention=>mention.isMe)?" mentioned-me":""}`}>
     {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} />}
     {message.fromMe && <Sender sender={{id:accountId,name:accountLabel||"You",picture:accountPicture}} />}
     {message?.replyTo && <div className="reply-context"><b>Replying to</b><span>{String(label).slice(0,140)}</span></div>}
+    {message?.viewOnce && <span className="view-once-badge">👁 View once</span>}
     <MediaCard message={message} accountId={accountId} chatId={chatId} onResolved={onMediaResolved} />
+    <LocationCard location={message?.location} />
+    <ContactCard contacts={message?.contacts} />
+    <PollCard poll={message?.poll} />
     {isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
-    {visibleBody && <span className="message-body">{messageBody(visibleBody,message.mentions)}</span>}
+    {visibleBody && !structured && <span className="message-body">{messageBody(visibleBody,message.mentions)}</span>}
     {!isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
-    {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
+    {!visibleBody && !previewUrl && !structured && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
     {reaction && <span className="reaction-pill">{reaction}</span>}
-    <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}</time>
+    <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}{message.fromMe && <AckTicks ackName={message.pending ? "PENDING" : message.ackName} />}</time>
   </article>;
   // Buttons live outside the bubble now (a hover toolbar, not part of the
   // message content) — on the inner side of the bubble (left for "mine",
@@ -218,6 +272,9 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
+  const [attachment, setAttachment] = useState(null); // { file, url } chosen but not yet sent
+  const [sendingMedia, setSendingMedia] = useState(false);
+  const fileInputRef = useRef(null);
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
   const [newMessageCount, setNewMessageCount] = useState(0);
@@ -515,6 +572,72 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     }
   }, [accountId, chat, chatId, onSent, replyingTo, sendPresence, autoGrowComposer]);
 
+  // Picked file lives as a local blob: URL until it's sent or cleared; always
+  // revoke it so a long chat session doesn't leak object URLs.
+  const clearAttachment = useCallback(() => {
+    setAttachment(current => { if (current?.url) URL.revokeObjectURL(current.url); return null; });
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, []);
+  useEffect(() => () => { setAttachment(current => { if (current?.url) URL.revokeObjectURL(current.url); return null; }); }, []);
+  useEffect(() => { clearAttachment(); }, [chatId, clearAttachment]);
+
+  const pickAttachment = useCallback(event => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    if (file.size > 64 * 1024 * 1024) { setError("That file is larger than the 64 MB limit."); event.currentTarget.value = ""; return; }
+    setError("");
+    setAttachment(current => { if (current?.url) URL.revokeObjectURL(current.url); return { file, url: URL.createObjectURL(file) }; });
+  }, []);
+
+  const sendMedia = useCallback(async (file, caption) => {
+    if (!file || !chatId || sendingMedia) return;
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    sendPresence("paused");
+    const objectUrl = URL.createObjectURL(file);
+    const pending = { ...buildMediaPending(file, caption, objectUrl), replyTo: replyingTo };
+    const field = composerRef.current;
+    if (field) { field.value = ""; autoGrowComposer(field); }
+    setSendingMedia(true);
+    setAttachment(current => { if (current?.url) URL.revokeObjectURL(current.url); return null; });
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    followLatestRef.current = true;
+    setNewMessageCount(0);
+    setMessages(current => [...current, pending]);
+    try {
+      const params = new URLSearchParams({ chatId });
+      if (caption) params.set("caption", caption);
+      if (replyingTo?.id) params.set("replyTo", replyingTo.id);
+      if ((file.type || "").startsWith("audio/")) params.set("voice", "1");
+      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/media?${params.toString()}`, {
+        method: "POST",
+        headers: { "content-type": file.type || "application/octet-stream", "x-gakai-filename": encodeURIComponent(file.name || "file") },
+        body: file,
+      });
+      const confirmed = confirmSentMessage(pending, result.message);
+      setMessages(current => merge(current.filter(message => message.id !== pending.id), confirmed ? [confirmed] : []));
+      setReplyingTo(null);
+      onSent?.(result.message, chat);
+    } catch (cause) {
+      setMessages(current => current.filter(message => message.id !== pending.id));
+      setError(cause.message || "Could not send this file.");
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+      setSendingMedia(false);
+    }
+  }, [accountId, chat, chatId, onSent, replyingTo, sendingMedia, sendPresence, autoGrowComposer]);
+
+  // The composer's single submit path: a chosen file sends as media (with the
+  // textarea text as its caption), otherwise it's a plain text message.
+  const submitComposer = useCallback(event => {
+    event.preventDefault();
+    if (attachment?.file) {
+      const caption = (composerRef.current?.value || "").trim();
+      sendMedia(attachment.file, caption);
+      return;
+    }
+    send(event);
+  }, [attachment, send, sendMedia]);
+
   const reactToMessage = useCallback(async (message, emoji) => {
     const messageId=serializedId(message?.id);if(!messageId)return;
     const previous=reactionOverrides[messageId]||"",next=previous===emoji?"":emoji;
@@ -579,8 +702,15 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
       {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
-    <form className="composer" onSubmit={send}>
+    <form className="composer" onSubmit={submitComposer}>
       {replyingTo&&<div className="composer-reply"><span><b>Replying to</b>{String(replyingTo.body||replyingTo.text||"Message").slice(0,100)}</span><button type="button" onClick={()=>setReplyingTo(null)} aria-label="Cancel reply">×</button></div>}
+      {attachment&&<div className="composer-attachment">
+        {mediaKindFromMime(attachment.file.type)==="image"
+          ? <img src={attachment.url} alt="" className="composer-attachment-thumb"/>
+          : <span className="composer-attachment-icon" aria-hidden="true">{mediaKindFromMime(attachment.file.type)==="video"?"▶":mediaKindFromMime(attachment.file.type)==="audio"?"♪":"▧"}</span>}
+        <span className="composer-attachment-info"><b>{attachment.file.name||"Attachment"}</b><small>{humanFileSize(attachment.file.size)} · caption optional</small></span>
+        <button type="button" onClick={clearAttachment} aria-label="Remove attachment">×</button>
+      </div>}
       {mentionMenu&&mentionMatches.length>0&&<ul className="mention-suggest" role="listbox" aria-label="Mention someone">
         {mentionMatches.map((participant,i)=><li key={participant.id} role="option" aria-selected={i===mentionMenu.index}>
           <button type="button" className={i===mentionMenu.index?"active":""} onMouseDown={e=>{e.preventDefault();pickMention(participant)}}>
@@ -611,7 +741,11 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
           }
         }}
       />
-      <button className="primary" type="submit">Send</button>
+      <label className="composer-attach" title="Attach a file" aria-label="Attach a file">
+        <input ref={fileInputRef} type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip" onChange={pickAttachment} hidden/>
+        <span aria-hidden="true">＋</span>
+      </label>
+      <button className="primary" type="submit" disabled={sendingMedia}>{sendingMedia?"Sending…":"Send"}</button>
     </form>
   </div>;
 }

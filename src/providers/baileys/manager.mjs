@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
-import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
+import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
 
@@ -117,6 +117,22 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
     sock.ev.on('messages.upsert', safe('messages.upsert', ({ messages, type }) => {
       ingestMessages(accountId, messages, { live: type === 'notify' });
+    }));
+
+    // Delivery/read progress for messages this account sent. Baileys reports it
+    // as `update.status` (a proto.WebMessageInfo.Status enum) — fold it onto the
+    // stored raw message so the next read of the page shows the right tick.
+    sock.ev.on('messages.update', safe('messages.update', updates => {
+      for (const { key, update } of updates || []) {
+        if (!key?.id || !key.fromMe || update?.status == null) continue;
+        const chatId = canonicalChatId(accountId, key.remoteJid);
+        const raw = store.getMessageById(accountId, chatId, key.id) || store.getMessageById(accountId, null, key.id);
+        if (!raw) continue;
+        if (ackStatusRank(update.status) <= ackStatusRank(raw.status)) continue;
+        raw.status = update.status;
+        const normalized = messageView(raw, { accountId, chatId });
+        store.upsertMessages(accountId, [{ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: raw, overviewMessage: overviewFromMessage(normalized) }]);
+      }
     }));
 
     sock.ev.on('presence.update', safe('presence.update', ({ id: chatId, presences }) => {
@@ -302,6 +318,36 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return normalized;
   }
 
+  // Pick the Baileys media content shape from the mimetype unless the caller
+  // forces `kind` (the composer forces 'audio' with ptt for a voice note).
+  function mediaKindFor(mimetype, forced) {
+    if (forced) return forced;
+    const type = String(mimetype || '').toLowerCase();
+    if (type.startsWith('image/')) return 'image';
+    if (type.startsWith('video/')) return 'video';
+    if (type.startsWith('audio/')) return 'audio';
+    return 'document';
+  }
+
+  async function sendMedia(accountId, chatId, { buffer, mimetype, filename, caption, kind, ptt } = {}, { quotedMessageId } = {}) {
+    const { sock } = requireSocket(accountId);
+    if (!buffer || !buffer.length) throw Object.assign(new Error('No file data received'), { status: 400 });
+    const target = canonicalChatId(accountId, chatId);
+    const quoted = quotedMessageId ? store.getMessageById(accountId, target, quotedMessageId) : null;
+    const resolvedKind = mediaKindFor(mimetype, kind);
+    const trimmedCaption = caption ? String(caption).slice(0, 1024) : '';
+    let content;
+    if (resolvedKind === 'image') content = { image: buffer, mimetype: mimetype || 'image/jpeg', ...(trimmedCaption ? { caption: trimmedCaption } : {}) };
+    else if (resolvedKind === 'video') content = { video: buffer, mimetype: mimetype || 'video/mp4', ...(trimmedCaption ? { caption: trimmedCaption } : {}) };
+    else if (resolvedKind === 'audio') content = { audio: buffer, mimetype: mimetype || 'audio/ogg; codecs=opus', ptt: Boolean(ptt) };
+    else content = { document: buffer, mimetype: mimetype || 'application/octet-stream', fileName: filename || 'file', ...(trimmedCaption ? { caption: trimmedCaption } : {}) };
+    const sent = await sock.sendMessage(target, content, quoted ? { quoted } : undefined);
+    learnFromKey(accountId, sent?.key);
+    const normalized = messageView(sent, { accountId, chatId: target });
+    store.upsertMessages(accountId, [{ chatId: target, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: sent, overviewMessage: overviewFromMessage(normalized) }]);
+    return normalized;
+  }
+
   async function setReaction(accountId, chatId, messageId, reaction) {
     const { sock, me } = requireSocket(accountId);
     chatId = canonicalChatId(accountId, chatId);
@@ -424,6 +470,35 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return store.resolveLid(accountId, lid) || lid;
   }
 
+  // Is this number reachable on WhatsApp? Baileys' onWhatsApp() takes bare
+  // digits or a jid and returns the canonical jid plus an `exists` flag.
+  async function checkOnWhatsApp(accountId, phone) {
+    const { sock } = requireSocket(accountId);
+    const digits = String(phone || '').replace(/[^0-9]/g, '');
+    if (digits.length < 6 || digits.length > 15) throw Object.assign(new Error('Enter a valid phone number in international format'), { status: 400 });
+    const [result] = (await sock.onWhatsApp(digits)) || [];
+    return { exists: Boolean(result?.exists), jid: result?.jid || `${digits}@s.whatsapp.net` };
+  }
+
+  // Open a brand-new 1:1 conversation: verify the number is on WhatsApp, make
+  // sure a (canonical) chat row exists, and hand back the same overview shape
+  // the inbox list consumes so the client can drop it straight in.
+  async function startConversation(accountId, phone) {
+    const { exists, jid } = await checkOnWhatsApp(accountId, phone);
+    if (!exists) throw Object.assign(new Error('That number is not on WhatsApp'), { status: 404 });
+    const chatId = canonicalChatId(accountId, jid);
+    store.ensureChat(accountId, chatId);
+    const contact = store.getContact(accountId, chatId);
+    return domainChatOverview({
+      id: chatId,
+      name: contact?.name || null,
+      picture: contact?.picture || null,
+      unreadCount: 0,
+      lastMessageTimestamp: Math.floor(Date.now() / 1000),
+      lastMessage: null,
+    });
+  }
+
   async function getChatsOverview(accountId) {
     const rows = store.getChatsOverview(accountId, 200);
     return rows.map(row => {
@@ -487,9 +562,10 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
+    checkOnWhatsApp, startConversation,
     getChatsOverview, getMessages, getMessage, downloadMedia,
     shutdown,
   };

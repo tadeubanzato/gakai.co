@@ -1,0 +1,12 @@
+{
+  "key": { "remoteJid": "120363000000000001@g.us", "fromMe": false, "id": "3EB0POLL1", "participant": "551188888888@s.whatsapp.net" },
+  "messageTimestamp": 1735689720,
+  "pushName": "Fixture Contact",
+  "message": {
+    "pollCreationMessageV3": {
+      "name": "Where should we eat?",
+      "options": [ { "optionName": "Pizza" }, { "optionName": "Sushi" }, { "optionName": "Salad" } ],
+      "selectableOptionsCount": 1
+    }
+  }
+}

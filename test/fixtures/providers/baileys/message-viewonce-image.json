@@ -1,0 +1,19 @@
+{
+  "key": { "remoteJid": "551199999999@s.whatsapp.net", "fromMe": false, "id": "3EB0VIEWONCE1" },
+  "messageTimestamp": 1735689730,
+  "pushName": "Fixture Contact",
+  "message": {
+    "viewOnceMessageV2": {
+      "message": {
+        "imageMessage": {
+          "caption": "one-time photo",
+          "mimetype": "image/jpeg",
+          "viewOnce": true,
+          "mediaKey": "AAAA",
+          "directPath": "/v/fixture",
+          "url": "https://mmg.whatsapp.net/fixture"
+        }
+      }
+    }
+  }
+}

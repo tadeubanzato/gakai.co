@@ -203,6 +203,13 @@ export function openStore(db) {
     return Boolean(stmt.getChat.get(accountId, chatId));
   }
 
+  // Create an empty chat row if it doesn't exist yet (opening a brand-new
+  // conversation before any message has been exchanged). No-op if present.
+  function ensureChat(accountId, chatId) {
+    if (!accountId || !chatId) return;
+    stmt.ensureChat.run(accountId, chatId, now());
+  }
+
   // Fold one chat's history into another and drop the source row. Used to
   // reunite a conversation that WhatsApp split across a contact's phone-number
   // JID and its LID (privacy) identifier: `from` (the LID chat) is merged into
@@ -319,7 +326,7 @@ export function openStore(db) {
 
   return {
     upsertChats, setChatUnread, setChatPicture, deleteChat, getChatsOverview,
-    listChatIds, chatExists, mergeChat,
+    listChatIds, chatExists, ensureChat, mergeChat,
     upsertMessages, deleteMessage, getMessagesPage, getMessageById,
     upsertContacts, setContactPicture, getContact, getContacts,
     setLidMapping, resolveLid,

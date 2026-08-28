@@ -1,0 +1,11 @@
+{
+  "key": { "remoteJid": "551199999999@s.whatsapp.net", "fromMe": false, "id": "3EB0CONTACT1" },
+  "messageTimestamp": 1735689710,
+  "pushName": "Fixture Contact",
+  "message": {
+    "contactMessage": {
+      "displayName": "Sample Person",
+      "vcard": "BEGIN:VCARD\nVERSION:3.0\nFN:Sample Person\nTEL;type=CELL;type=VOICE;waid=15550001234:+1 555 000 1234\nEND:VCARD"
+    }
+  }
+}

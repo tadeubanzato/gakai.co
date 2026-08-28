@@ -41,6 +41,27 @@ test('upsertMessages never regresses the last-message snapshot to an older messa
   assert.equal(chat.lastMessageTimestamp, 200);
 });
 
+test('re-upserting a message id overwrites the stored raw payload (delivery-status folding)', () => {
+  const store = freshStore();
+  store.upsertMessages('acct-1', [{
+    chatId: 'chat-1', messageId: 'sent-1', timestamp: 100, fromMe: true,
+    waMessage: { key: { id: 'sent-1', fromMe: true }, messageTimestamp: 100, status: 2, message: { conversation: 'hi' } },
+    overviewMessage: { body: 'hi', text: 'hi', timestamp: 100, hasMedia: false, system: null },
+  }]);
+  // A messages.update event advances the status; the adapter folds it onto the
+  // stored raw and re-upserts under the same id.
+  const raw = store.getMessageById('acct-1', 'chat-1', 'sent-1');
+  raw.status = 4;
+  store.upsertMessages('acct-1', [{
+    chatId: 'chat-1', messageId: 'sent-1', timestamp: 100, fromMe: true,
+    waMessage: raw,
+    overviewMessage: { body: 'hi', text: 'hi', timestamp: 100, hasMedia: false, system: null },
+  }]);
+
+  assert.equal(store.getMessageById('acct-1', 'chat-1', 'sent-1').status, 4);
+  assert.equal(store.getMessagesPage('acct-1', 'chat-1', {}).length, 1, 're-upsert must not duplicate the row');
+});
+
 test('getMessagesPage pages backward from a timestamp cursor, most recent first', () => {
   const store = freshStore();
   const rows = [1, 2, 3, 4, 5].map(n => ({

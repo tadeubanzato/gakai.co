@@ -152,8 +152,59 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
   </div>
 }
 
+// "New chat": a phone-number field that suggests already-synced contacts as
+// you type, checks the number is on WhatsApp server-side, and hands the opened
+// conversation back to the inbox.
+function NewChatDialog({accountId,onClose,onOpened}){
+  const[value,setValue]=useState("");
+  const[suggestions,setSuggestions]=useState([]);
+  const[busy,setBusy]=useState(false);
+  const[error,setError]=useState("");
+  const digits=value.replace(/[^0-9]/g,"");
+  useEffect(()=>{
+    if(digits.length<3){setSuggestions([]);return undefined;}
+    let active=true;
+    const timer=setTimeout(async()=>{
+      try{
+        const data=await api("/api/app/accounts/"+encodeURIComponent(accountId)+"/contacts?q="+encodeURIComponent(digits));
+        if(active)setSuggestions(Array.isArray(data.contacts)?data.contacts:[]);
+      }catch{if(active)setSuggestions([]);}
+    },250);
+    return()=>{active=false;clearTimeout(timer);};
+  },[accountId,digits]);
+  const submit=async event=>{
+    event.preventDefault();
+    if(busy)return;
+    if(digits.length<6){setError("Enter the full number in international format, e.g. 15551234567.");return;}
+    setBusy(true);setError("");
+    try{
+      const data=await api("/api/app/accounts/"+encodeURIComponent(accountId)+"/chats",{method:"POST",body:JSON.stringify({phone:digits})});
+      onOpened(data.chat);
+    }catch(cause){setError(cause.message||"Could not start this conversation.");}
+    finally{setBusy(false);}
+  };
+  return <div className="modal-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="new-chat-title" onClick={e=>e.stopPropagation()}>
+      <h3 id="new-chat-title">New chat</h3>
+      <p>Enter a phone number in international format (country code, no + or spaces needed).</p>
+      <form className="integration-form" onSubmit={submit}>
+        <label>Phone number<input name="phone" type="tel" autoFocus placeholder="e.g. 15551234567" value={value} onChange={e=>{setValue(e.target.value);setError("")}}/></label>
+        {suggestions.length>0&&<ul className="new-chat-suggest" role="listbox" aria-label="Matching contacts">
+          {suggestions.map(contact=><li key={contact.id} role="option" aria-selected="false">
+            <button type="button" onClick={()=>{setValue(contact.phone);setSuggestions([])}}>
+              <b>{contact.name||("+"+contact.phone)}</b><small>+{contact.phone}</small>
+            </button>
+          </li>)}
+        </ul>}
+        <div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy?"Checking…":"Start chat"}</button></div>
+      </form>
+      {error&&<p className="modal-error">{error}</p>}
+    </div>
+  </div>;
+}
+
 function App(){
-  const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState("");
+  const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState(""),[newChat,setNewChat]=useState(false);
   const[chatFilter,setChatFilter]=useState("all");
   const settingsRef=useRef(null);
   const chatListRef=useRef(null);
@@ -397,6 +448,19 @@ function App(){
     }
   },[account,fail,load]);
 
+  // Drop a freshly-opened conversation into the inbox list (deduped) and select
+  // it, so a brand-new chat behaves exactly like clicking an existing one.
+  const openNewConversation=useCallback((newChatOverview)=>{
+    if(!newChatOverview?.id||!account)return;
+    setNewChat(false);
+    setChats(current=>{
+      const next=[newChatOverview,...current.filter(c=>c.id!==newChatOverview.id)];
+      chatsCacheRef.current.set(account.id,next);
+      return next;
+    });
+    handleChatClick(newChatOverview);
+  },[account,handleChatClick]);
+
   const pairingLockRef=useRef(new Set());
   const beginPairing=()=>runExclusive(pairingLockRef.current,"pairing",async()=>{
     // Shared by the auto-pair effect below and the manual "+ Connect
@@ -497,7 +561,10 @@ function App(){
         <main className="main">
           <header>
             <div><h2>Inbox</h2><small>{account?.label} · {status(account?.status)}</small></div>
-            <button type="button" className="subtle-btn" onClick={beginPairing}>+ Add account</button>
+            <div className="header-actions">
+              {account?.status==="WORKING"&&<button type="button" className="subtle-btn" onClick={()=>setNewChat(true)}>+ New chat</button>}
+              <button type="button" className="subtle-btn" onClick={beginPairing}>+ Add account</button>
+            </div>
           </header>
           {account?.status!=="WORKING"?<div className="empty"><div><h1>Account needs attention</h1><p>Reconnect this account to continue.</p><button className="primary" onClick={()=>{setPairCreated(false);setPair(account)}}>Reconnect with QR code</button></div></div>:<div className="inbox">
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>
@@ -515,6 +582,7 @@ function App(){
         </main>
       </div>
       {settings&&account?<Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>:null}
+      {newChat&&account?<NewChatDialog accountId={account.id} onClose={()=>setNewChat(false)} onOpened={openNewConversation}/>:null}
       {note?<div className="toast" role="status">{note}</div>:null}
       {mentionToastStack}
     </>
