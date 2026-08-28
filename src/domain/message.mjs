@@ -92,6 +92,11 @@ export function chatOverview(chat) {
       hasMedia: Boolean(chat.lastMessage.hasMedia),
       system: chat.lastMessage.system || null,
     } : null,
+    pinned: Boolean(chat.pinned),
+    muted: (Number(chat.mutedUntil) || 0) > Math.floor(Date.now() / 1000),
+    archived: Boolean(chat.archived),
+    ephemeral: Number(chat.ephemeral) || 0,
+    blocked: Boolean(chat.blocked),
   };
 }
 

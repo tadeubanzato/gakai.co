@@ -731,3 +731,11 @@ video.media{background:#000}
 /* Edited-message marker + composer editing bar */
 .edited-marker{margin-right:5px;font-style:italic;opacity:.75}
 .composer-editing b{color:#e8c37a}
+
+/* Chat-list row menu + pin/mute indicators */
+.chat-row{position:relative}
+.chat-row .chat{padding-right:38px}
+.chat-row-menu{position:absolute;right:6px;top:50%;transform:translateY(-50%);opacity:0}
+.chat-row:hover .chat-row-menu,.chat-row-menu:focus-within,.chat-row-menu .menu-trigger[aria-expanded="true"]{opacity:1}
+.chat-row-menu .menu-trigger{width:28px;height:28px;background:var(--panel)}
+.chat-muted{flex:none;font-size:12px;opacity:.7}

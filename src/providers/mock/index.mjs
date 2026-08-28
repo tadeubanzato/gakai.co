@@ -86,6 +86,15 @@ export function createMockProvider({ onEvent } = {}) {
     const chat = chatsFor(accountId).get(chatId);
     if (chat) chat.unreadCount = 0;
   }
+  async function setChatState(accountId, chatId, action, value) {
+    const chat = chatsFor(accountId).get(chatId) || { id: chatId, name: null, picture: null, unreadCount: 0, lastMessageTimestamp: 0 };
+    if (action === 'pin') chat.pinned = Boolean(value);
+    else if (action === 'archive') chat.archived = Boolean(value);
+    else if (action === 'mute') chat.mutedUntil = Number(value) > 0 ? Math.floor(Date.now() / 1000) + Number(value) : 0;
+    else throw Object.assign(new Error('Unknown chat action'), { status: 400 });
+    chatsFor(accountId).set(chatId, chat);
+    return domainChatOverview(chat);
+  }
   async function subscribePresence() {}
   async function publishPresence() {}
 
@@ -169,7 +178,7 @@ export function createMockProvider({ onEvent } = {}) {
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,

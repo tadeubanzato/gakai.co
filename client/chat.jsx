@@ -292,7 +292,7 @@ function ForwardDialog({ message, chats, currentChatId, busy, onForward, onClose
   </div>;
 }
 
-export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats, onBack, onSent, onForwarded, onDeleted }) {
+export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats, onBack, onSent, onForwarded, onChatState, onDeleted }) {
   const paneRef = useRef(null);
   const requestRef = useRef(0);
   const initialChatRef = useRef(null);
@@ -793,6 +793,13 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
       {onBack && <button type="button" className="back" onClick={onBack} aria-label="Back to conversations">‹</button>}
       <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small>Chat ID: {chatId || "Unavailable"}</small></span>
       <Menu label="Conversation actions" className="conversation-menu">
+        {onChatState && chat && <>
+          <MenuItem onSelect={()=>onChatState(chat,{pin:!chat.pinned})}>{chat.pinned ? "Unpin" : "Pin"} chat</MenuItem>
+          {chat.muted
+            ? <MenuItem onSelect={()=>onChatState(chat,{mute:0})}>Unmute</MenuItem>
+            : <MenuItem onSelect={()=>onChatState(chat,{mute:60*60*24*7})}>Mute 1 week</MenuItem>}
+          <MenuItem onSelect={()=>onChatState(chat,{archive:!chat.archived})}>{chat.archived ? "Unarchive" : "Archive"}</MenuItem>
+        </>}
         <MenuItem onSelect={deleteConversation} danger disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</MenuItem>
       </Menu>
     </header>

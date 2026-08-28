@@ -423,6 +423,42 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     store.setChatUnread(accountId, chatId, 0);
   }
 
+  // Pin / mute / archive. `value` is a boolean for pin/archive, a duration in
+  // seconds (0 = unmute) for mute. Baileys' chatModify is best-effort; the
+  // local store stays authoritative for what the inbox renders, same as
+  // deleteChat.
+  async function setChatState(accountId, chatId, action, value) {
+    chatId = canonicalChatId(accountId, chatId);
+    const entry = accounts.get(accountId);
+    let flags;
+    if (action === 'pin') flags = { pinned: Boolean(value) };
+    else if (action === 'archive') flags = { archived: Boolean(value) };
+    else if (action === 'mute') {
+      const seconds = Number(value) || 0;
+      flags = { mutedUntil: seconds > 0 ? Math.floor(Date.now() / 1000) + seconds : 0 };
+    } else throw Object.assign(new Error('Unknown chat action'), { status: 400 });
+
+    if (entry) {
+      try {
+        if (action === 'pin') await entry.sock.chatModify({ pin: Boolean(value) }, chatId);
+        else if (action === 'mute') await entry.sock.chatModify({ mute: Number(value) > 0 ? Date.now() + Number(value) * 1000 : null }, chatId);
+        else if (action === 'archive') {
+          const [lastMessage] = store.getMessagesPage(accountId, chatId, { limit: 1 });
+          await entry.sock.chatModify({ archive: Boolean(value), lastMessages: lastMessage ? [{ key: lastMessage.key, messageTimestamp: lastMessage.messageTimestamp }] : [] }, chatId);
+        }
+      } catch (error) { logger.warn({ error: error.message, accountId, chatId, action }, 'Remote chatModify failed; applying locally anyway'); }
+    }
+    store.setChatFlags(accountId, chatId, flags);
+    return enrichedOverviewFor(accountId, chatId);
+  }
+
+  function enrichedOverviewFor(accountId, chatId) {
+    const [row] = store.getChatsOverview(accountId, 1000).filter(chat => chat.id === chatId);
+    if (row) return domainChatOverview(row);
+    const contact = store.getContact(accountId, chatId);
+    return domainChatOverview({ id: chatId, name: contact?.name || null, picture: contact?.picture || null, unreadCount: 0, lastMessageTimestamp: 0, lastMessage: null });
+  }
+
   async function subscribePresence(accountId, chatId) {
     const { sock } = requireSocket(accountId);
     await sock.presenceSubscribe(canonicalChatId(accountId, chatId)).catch(() => {});
@@ -592,7 +628,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,

@@ -1051,6 +1051,17 @@ async function enrichMessage(session,view){
   if (req.method==='POST' && parts[4]==='start') {await provider.startAccount(id,{label:store.accountLabels[id]}); return send(res,200,{ok:true});}
   if (req.method==='POST' && parts[4]==='restart') {await provider.restartAccount(id); return send(res,200,{ok:true});}
   if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await provider.markChatRead(id,decodeURIComponent(parts[5]));return send(res,200,{ok:true});}
+  // Pin / mute / archive a chat. Body: { pin: bool } | { archive: bool } | { mute: seconds }.
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='state'){
+    const chatId=decodeURIComponent(parts[5]),input=await readBody(req);
+    let action,value;
+    if('pin' in input){action='pin';value=Boolean(input.pin);}
+    else if('archive' in input){action='archive';value=Boolean(input.archive);}
+    else if('mute' in input){action='mute';value=Math.max(0,Math.min(Number(input.mute)||0,60*60*24*365));}
+    else return send(res,400,{message:'Provide one of pin, archive or mute'});
+    const chat=await provider.setChatState(id,chatId,action,value);
+    return send(res,200,{chat:await enrichChatOverview(id,chat,{pictures:false})});
+  }
   // Open a new 1:1 conversation from a phone number (checks it's on WhatsApp).
   if(req.method==='POST'&&parts[4]==='chats'&&!parts[5]){
     const input=await readBody(req),phone=String(input.phone||'').replace(/[^0-9]/g,'');
@@ -1121,11 +1132,19 @@ async function enrichMessage(session,view){
   }
   if (req.method==='GET' && parts[4]==='chats') {
     const chats=await provider.getChatsOverview(id);
+    const wantArchived=url.searchParams.get('archived')==='1';
+    if(wantArchived){
+      const archived=chats.filter(chat=>chat.archived&&hasMessageContent(chat)).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
+      return send(res,200,(await mapWithConcurrency(archived,8,chat=>enrichChatOverview(id,chat,{pictures:false}))).sort((a,b)=>b.timestamp-a.timestamp));
+    }
     const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
-    const recent=chats.filter(chat=>hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
+    // Archived chats drop out of the main list; pinned chats stay regardless of
+    // how old their last message is, and sort above everything else.
+    const recent=chats.filter(chat=>!chat.archived&&hasMessageContent(chat)&&(chat.pinned||chatTimestamp(chat)>=recencyFloor)).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
     // pictures:false — the list must not block on a burst of avatar lookups;
     // the client hydrates them separately via /chats/pictures.
-    return send(res,200,(await mapWithConcurrency(recent,8,chat=>enrichChatOverview(id,chat,{pictures:false}))).sort((a,b) => b.timestamp - a.timestamp));
+    const enriched=await mapWithConcurrency(recent,8,chat=>enrichChatOverview(id,chat,{pictures:false}));
+    return send(res,200,enriched.sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||b.timestamp-a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
   if (req.method==='GET' && parts[4]==='messages') {

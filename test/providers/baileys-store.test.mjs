@@ -206,3 +206,33 @@ test('listChatIds and chatExists reflect the stored chats', () => {
   assert.equal(store.chatExists('acct-1', 'a@s.whatsapp.net'), true);
   assert.equal(store.chatExists('acct-1', 'b@lid'), false);
 });
+
+test('setChatFlags round-trips pinned / mutedUntil / archived through getChatsOverview', () => {
+  const store = freshStore();
+  const chatId = 'flags@s.whatsapp.net';
+  store.upsertMessages('acct-1', [{ chatId, messageId: 'm1', timestamp: 100, fromMe: false, waMessage: {}, overviewMessage: { body: 'x', text: 'x', timestamp: 100, hasMedia: false, system: null } }]);
+
+  store.setChatFlags('acct-1', chatId, { pinned: true });
+  store.setChatFlags('acct-1', chatId, { mutedUntil: 4102444800, archived: true });
+
+  const [chat] = store.getChatsOverview('acct-1');
+  assert.equal(chat.pinned, true);
+  assert.equal(chat.mutedUntil, 4102444800);
+  assert.equal(chat.archived, true);
+
+  // a partial update leaves the other flags alone
+  store.setChatFlags('acct-1', chatId, { archived: false });
+  const [after] = store.getChatsOverview('acct-1');
+  assert.equal(after.archived, false);
+  assert.equal(after.pinned, true);
+});
+
+test('upsertChats maps Baileys pin / mute / archive fields off a chats.update row', () => {
+  const store = freshStore();
+  const chatId = 'evt@s.whatsapp.net';
+  store.upsertChats('acct-1', [{ id: chatId, conversationTimestamp: 200, pin: 1699999999, archived: true, muteEndTime: 4102444800 }]);
+  const [chat] = store.getChatsOverview('acct-1');
+  assert.equal(chat.pinned, true);
+  assert.equal(chat.archived, true);
+  assert.equal(chat.mutedUntil, 4102444800);
+});
