@@ -668,6 +668,45 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     }
   }, [accountId, chat, chatId, onSent, replyingTo, sendingMedia, sendPresence, autoGrowComposer]);
 
+  const beginEdit = useCallback(message => {
+    setReplyingTo(null);
+    setEditingMessage(message);
+    const field = composerRef.current;
+    if (field) {
+      field.value = message?.body || message?.text || "";
+      autoGrowComposer(field);
+      field.focus();
+    }
+  }, [autoGrowComposer]);
+
+  const cancelEdit = useCallback(() => {
+    setEditingMessage(null);
+    const field = composerRef.current;
+    if (field) { field.value = ""; autoGrowComposer(field); }
+  }, [autoGrowComposer]);
+
+  const submitEdit = useCallback(async () => {
+    const field = composerRef.current;
+    const text = field?.value?.trim();
+    const messageId = serializedId(editingMessage?.id);
+    if (!text || !messageId || !chatId) return;
+    const previous = editingMessage;
+    setEditingMessage(null);
+    if (field) { field.value = ""; autoGrowComposer(field); }
+    setMessages(current => current.map(item => serializedId(item.id) === messageId ? { ...item, body: text, text, edited: true } : item));
+    try {
+      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
+        method: "PATCH", body: JSON.stringify({ text }),
+      });
+      if (result.message) setMessages(current => merge(current.filter(item => serializedId(item.id) !== messageId), [result.message]));
+    } catch (cause) {
+      setMessages(current => current.map(item => serializedId(item.id) === messageId ? { ...item, body: previous?.body || previous?.text || "", text: previous?.text || previous?.body || "", edited: Boolean(previous?.edited) } : item));
+      if (field) { field.value = text; autoGrowComposer(field); }
+      setEditingMessage(previous);
+      setError(cause.message || "Could not edit this message.");
+    }
+  }, [accountId, chatId, editingMessage, autoGrowComposer]);
+
   // The composer's single submit path: a chosen file sends as media (with the
   // textarea text as its caption), otherwise it's a plain text message.
   const submitComposer = useCallback(event => {
@@ -714,44 +753,6 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     }
   }, [accountId, chatId]);
 
-  const beginEdit = useCallback(message => {
-    setReplyingTo(null);
-    setEditingMessage(message);
-    const field = composerRef.current;
-    if (field) {
-      field.value = message?.body || message?.text || "";
-      autoGrowComposer(field);
-      field.focus();
-    }
-  }, [autoGrowComposer]);
-
-  const cancelEdit = useCallback(() => {
-    setEditingMessage(null);
-    const field = composerRef.current;
-    if (field) { field.value = ""; autoGrowComposer(field); }
-  }, [autoGrowComposer]);
-
-  const submitEdit = useCallback(async () => {
-    const field = composerRef.current;
-    const text = field?.value?.trim();
-    const messageId = serializedId(editingMessage?.id);
-    if (!text || !messageId || !chatId) return;
-    const previous = editingMessage;
-    setEditingMessage(null);
-    if (field) { field.value = ""; autoGrowComposer(field); }
-    setMessages(current => current.map(item => serializedId(item.id) === messageId ? { ...item, body: text, text, edited: true } : item));
-    try {
-      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
-        method: "PATCH", body: JSON.stringify({ text }),
-      });
-      if (result.message) setMessages(current => merge(current.filter(item => serializedId(item.id) !== messageId), [result.message]));
-    } catch (cause) {
-      setMessages(current => current.map(item => serializedId(item.id) === messageId ? { ...item, body: previous?.body || previous?.text || "", text: previous?.text || previous?.body || "", edited: Boolean(previous?.edited) } : item));
-      if (field) { field.value = text; autoGrowComposer(field); }
-      setEditingMessage(previous);
-      setError(cause.message || "Could not edit this message.");
-    }
-  }, [accountId, chatId, editingMessage, autoGrowComposer]);
 
   const submitForward = useCallback(async (targetChat) => {
     const source = forwarding;
