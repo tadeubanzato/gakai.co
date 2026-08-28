@@ -1147,6 +1147,13 @@ async function enrichMessage(session,view){
     await provider.setReaction(id,url.searchParams.get('chatId')||null,messageId,reaction);
     return send(res,200,{ok:true,reaction});
   }
+  if(req.method==='POST'&&parts[4]==='messages'&&parts[5]&&parts[6]==='forward'){
+    const input=await readBody(req),messageId=decodeURIComponent(parts[5]);
+    const fromChatId=String(input.fromChatId||''),toChatId=String(input.toChatId||'');
+    if(!messageId||!fromChatId||!toChatId)return send(res,400,{message:'messageId, fromChatId and toChatId are required'});
+    const {chatId:targetChatId,message}=await provider.forwardMessage(id,fromChatId,messageId,toChatId);
+    return send(res,200,{chatId:targetChatId,message:await enrichMessage(id,message)});
+  }
   if (req.method==='POST' && parts[4]==='media') {
     const chatId=url.searchParams.get('chatId');
     if(!chatId)return send(res,400,{message:'chatId is required'});

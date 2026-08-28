@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
-import { Avatar } from "./ui-helpers.jsx";
+import { Avatar, Menu, MenuItem } from "./ui-helpers.jsx";
 import { confirmDialog } from "./confirm.jsx";
 
 function mediaSrc(message) {
@@ -215,7 +215,7 @@ function messageBody(text, mentions) {
   const parts=String(text).split(pattern);
   return parts.map((part,index)=>index%2?<mark key={index} className="own-mention">@{part}</mark>:part);
 }
-function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, accountPicture, onMediaResolved, onReply, onReact, onDelete, reaction }) {
+function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, accountPicture, onMediaResolved, onReply, onReact, onForward, onDelete, reaction }) {
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
@@ -250,6 +250,7 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
     {!message.fromMe && <button type="button" onClick={()=>onReply?.(message)}>Reply</button>}
     {!message.fromMe && <button type="button" onClick={()=>setShowReactions(value=>!value)}>React</button>}
     {!message.fromMe && showReactions && <span className="reaction-picker">{["👍","❤️","😂","😮","😢","🙏"].map(emoji=><button key={emoji} type="button" onClick={()=>{onReact?.(message,emoji);setShowReactions(false)}}>{emoji}</button>)}</span>}
+    <button type="button" onClick={()=>onForward?.(message)}>Forward</button>
     <button type="button" className="message-delete" onClick={()=>onDelete?.(message)} aria-label={message.fromMe ? "Delete this message for everyone" : "Delete this message for you"}>Delete</button>
   </div>;
   return <div className={`message-group ${message.fromMe ? "mine" : ""}`}>
@@ -257,7 +258,40 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
   </div>;
 }
 
-export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBack, onSent, onDeleted }) {
+function forwardPreviewText(message) {
+  if (message?.body || message?.text) return String(message.body || message.text).slice(0, 120);
+  if (message?.hasMedia || message?.media || message?.mediaUrl) return "Media attachment";
+  if (message?.location) return "📍 Location";
+  if (message?.poll) return "📊 Poll";
+  if (message?.contacts?.length) return "👤 Contact";
+  return "Message";
+}
+function ForwardDialog({ message, chats, currentChatId, busy, onForward, onClose }) {
+  const [query, setQuery] = useState("");
+  const options = (chats || [])
+    .filter(chat => chat.id && chat.id !== currentChatId)
+    .filter(chat => !query || String(chat.name || chat.id).toLowerCase().includes(query.toLowerCase()))
+    .slice(0, 50);
+  return <div className="modal-overlay" role="presentation" onClick={busy ? undefined : onClose}>
+    <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="forward-title" onClick={event => event.stopPropagation()}>
+      <h3 id="forward-title">Forward message</h3>
+      <p className="forward-preview">{forwardPreviewText(message)}</p>
+      <input type="search" autoFocus placeholder="Search conversations" value={query} onChange={event => setQuery(event.target.value)} aria-label="Search conversations" />
+      <ul className="forward-target-list">
+        {options.length === 0 && <li className="forward-empty">No conversations match.</li>}
+        {options.map(chat => <li key={chat.id}>
+          <button type="button" disabled={busy} onClick={() => onForward(chat)}>
+            <Avatar item={chat} />
+            <span className="forward-target-name">{chat.name || chat.id}</span>
+          </button>
+        </li>)}
+      </ul>
+      <div className="modal-actions"><button type="button" className="secondary" onClick={onClose} disabled={busy}>Cancel</button></div>
+    </div>
+  </div>;
+}
+
+export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats, onBack, onSent, onForwarded, onDeleted }) {
   const paneRef = useRef(null);
   const requestRef = useRef(0);
   const initialChatRef = useRef(null);
@@ -274,6 +308,8 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
   const [replyingTo, setReplyingTo] = useState(null);
   const [attachment, setAttachment] = useState(null); // { file, url } chosen but not yet sent
   const [sendingMedia, setSendingMedia] = useState(false);
+  const [forwarding, setForwarding] = useState(null); // the message being forwarded, while the picker is open
+  const [forwardBusy, setForwardBusy] = useState(false);
   const fileInputRef = useRef(null);
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
@@ -671,6 +707,29 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     }
   }, [accountId, chatId]);
 
+  const submitForward = useCallback(async (targetChat) => {
+    const source = forwarding;
+    const messageId = serializedId(source?.id);
+    if (!source || !messageId || !targetChat?.id || forwardBusy) return;
+    setForwardBusy(true); setError("");
+    try {
+      const result = await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(messageId)}/forward`, {
+        method: "POST",
+        body: JSON.stringify({ fromChatId: chatId, toChatId: targetChat.id }),
+      });
+      setForwarding(null);
+      if (result.chatId === chatId && result.message) {
+        followLatestRef.current = true;
+        setMessages(current => merge(current, [result.message]));
+      }
+      onForwarded?.(targetChat, result.message);
+    } catch (cause) {
+      setError(cause.message || "Could not forward this message.");
+    } finally {
+      setForwardBusy(false);
+    }
+  }, [accountId, chatId, forwarding, forwardBusy, onForwarded]);
+
   const deleteConversation = useCallback(async () => {
     if (!chatId || deleting) return;
     const confirmed = await confirmDialog({ title: "Delete conversation?", message: `The conversation with ${chat?.name || chatId} will be removed from WhatsApp. This can't be undone.`, confirmLabel: "Delete conversation", danger: true });
@@ -691,13 +750,15 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
     <header className="conversation-head">
       {onBack && <button type="button" className="back" onClick={onBack} aria-label="Back to conversations">‹</button>}
       <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small>Chat ID: {chatId || "Unavailable"}</small></span>
-      <button type="button" className="conversation-delete" onClick={deleteConversation} disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</button>
+      <Menu label="Conversation actions" className="conversation-menu">
+        <MenuItem onSelect={deleteConversation} danger disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</MenuItem>
+      </Menu>
     </header>
     <div className="messages" ref={paneRef} onScroll={maybeLoadOlder}>
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
       {loading && !messages.length ? <p className="chat-loading loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading messages…</p> : <div className="message-list">
-        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
+        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onForward={setForwarding} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
       {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>
@@ -747,6 +808,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, onBac
       </label>
       <button className="primary" type="submit" disabled={sendingMedia}>{sendingMedia?"Sending…":"Send"}</button>
     </form>
+    {forwarding && <ForwardDialog message={forwarding} chats={chats} currentChatId={chatId} busy={forwardBusy} onForward={submitForward} onClose={()=>{ if(!forwardBusy) setForwarding(null); }} />}
   </div>;
 }
 export default ChatPanel;

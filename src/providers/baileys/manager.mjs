@@ -348,6 +348,19 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return normalized;
   }
 
+  async function forwardMessage(accountId, fromChatId, messageId, toChatId) {
+    const { sock } = requireSocket(accountId);
+    const source = store.getMessageById(accountId, canonicalChatId(accountId, fromChatId), messageId)
+      || store.getMessageById(accountId, null, messageId);
+    if (!source) throw Object.assign(new Error('Original message not found'), { status: 404 });
+    const target = canonicalChatId(accountId, toChatId);
+    const sent = await sock.sendMessage(target, { forward: source });
+    learnFromKey(accountId, sent?.key);
+    const normalized = messageView(sent, { accountId, chatId: target });
+    store.upsertMessages(accountId, [{ chatId: target, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: sent, overviewMessage: overviewFromMessage(normalized) }]);
+    return { chatId: target, message: normalized };
+  }
+
   async function setReaction(accountId, chatId, messageId, reaction) {
     const { sock, me } = requireSocket(accountId);
     chatId = canonicalChatId(accountId, chatId);
@@ -562,7 +575,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, sendMedia, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, forwardMessage, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,

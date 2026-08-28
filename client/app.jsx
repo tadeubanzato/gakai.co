@@ -505,6 +505,11 @@ function App(){
       load(account.id);
     }
   },[account?.id, load]);
+  const handleForwarded=useCallback((targetChat)=>{
+    setNote(`Forwarded to ${targetChat?.name||targetChat?.id||"chat"}`);
+    setTimeout(()=>setNote(""),3500);
+    if(account)load(account.id);
+  },[account?.id, load]);
   const handleChatDeleted=useCallback(chatId=>{
     suppressAutoSelectRef.current=true;
     setChats(current=>{
@@ -577,7 +582,7 @@ function App(){
               {visible.map(x=><button key={x.id} className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}><Avatar item={x}/><span><b>{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||x.lastMessage?.system?.label||"Photo or message"}</small></span>{x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}</button>)}
               {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">{chats.length?"No conversations match this filter.":"No conversations yet. Gakai is waiting for WhatsApp to finish syncing."}</p>:null}
             </section>
-            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} onBack={()=>setChat()} onSent={handleSent} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
+            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} chats={chats} onBack={()=>setChat()} onSent={handleSent} onForwarded={handleForwarded} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
         </main>
       </div>

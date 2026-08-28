@@ -49,6 +49,15 @@ export function createMockProvider({ onEvent } = {}) {
     seedMessage(accountId, chatId, message);
     return message;
   }
+  async function forwardMessage(accountId, fromChatId, messageId, toChatId) {
+    const fromList = messagesFor(accountId).get(fromChatId) || [];
+    const source = fromList.find(m => m.id === messageId);
+    if (!source) throw Object.assign(new Error('Original message not found'), { status: 404 });
+    sent.push({ accountId, kind: 'forward', fromChatId, toChatId, messageId });
+    const message = { ...source, id: `mock-forward-${sent.length}`, timestamp: Math.floor(Date.now() / 1000), fromMe: true, replyTo: null };
+    seedMessage(accountId, toChatId, message);
+    return { chatId: toChatId, message };
+  }
   async function setReaction(accountId, chatId, messageId, reaction) {
     if (reaction) reactionsFor(accountId).set(messageId, reaction);
     else reactionsFor(accountId).delete(messageId);
@@ -149,7 +158,7 @@ export function createMockProvider({ onEvent } = {}) {
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, sendMedia, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, forwardMessage, setReaction, deleteMessage, deleteChat, markChatRead,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,

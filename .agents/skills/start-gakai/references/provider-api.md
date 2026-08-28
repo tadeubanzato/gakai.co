@@ -37,6 +37,24 @@ Superseded. The previous notes in this section described a REST/webhook provider
   `viewOnceMessage*`, `ephemeralMessage`, `documentWithCaptionMessage`,
   `editedMessage`; `locationMessage`, `contactMessage`/`contactsArrayMessage`, and
   `pollCreationMessage*` are leaf types it does not unwrap.
+- **Forward** — `sock.sendMessage(jid, { forward: waMessage })` where `waMessage`
+  is a stored `proto.IWebMessageInfo` (from `store.getMessageById`). Returns a
+  normal sent-message object.
+- **Edit** — `sock.sendMessage(jid, { text, edit: waMessage.key })`. WhatsApp
+  only accepts an edit within ~15 minutes of the original send.
+- **Chat state** — `sock.chatModify(mod, jid)`: `{ pin: boolean }`,
+  `{ mute: number | null }` (epoch **ms** to mute until; `null` unmutes),
+  `{ archive: boolean, lastMessages: [{ key, messageTimestamp }] }`.
+- **Star** — `sock.star(jid, [{ id, fromMe }], starOn: boolean)` — per message.
+- **Block** — `sock.updateBlockStatus(jid, 'block' | 'unblock')`; current
+  blocklist via `blocklist.set` (full) / `blocklist.update` (`{ blocklist, type }`)
+  events.
+- **Disappearing messages** — `sock.sendMessage(jid, { disappearingMessagesInChat: seconds })`
+  (`0` off, `86400` 24h, `604800` 7d, `7776000` 90d).
+- **Group** (deferred feature) — `groupCreate(subject, participants[])`,
+  `groupParticipantsUpdate(jid, participants[], 'add'|'remove'|'promote'|'demote')`,
+  `groupUpdateSubject(jid, subject)`, `groupUpdateDescription(jid, desc?)`,
+  `groupLeave(jid)`, `updateProfilePicture(groupJid, WAMediaUpload)`.
 
 ## Integration procedure
 
