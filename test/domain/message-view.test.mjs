@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, resolveMentionLabels, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../src/domain/message.mjs';
+import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, resolveMentionLabels, bareJidUser, isGroupChatId, isLidJid, isSameIdentity, ackStatusName, ackStatusRank } from '../../src/domain/message.mjs';
 
 const ctx = { accountId: 'account-fixture', chatId: '551199999999@s.whatsapp.net' };
 const fixture = name => readFile(fileURLToPath(new URL(`../fixtures/providers/baileys/${name}`, import.meta.url)), 'utf8').then(JSON.parse);
@@ -195,4 +195,33 @@ test('messageView maps a missed-call stub message to a system "call" view', () =
   const view = messageView(message, ctx);
   assert.equal(view.system.kind, 'call');
   assert.match(view.system.label, /video/i);
+});
+
+test('ackStatusName normalizes the numeric WhatsApp status enum to a stable name', () => {
+  assert.equal(ackStatusName(2), 'SERVER_ACK');
+  assert.equal(ackStatusName(3), 'DELIVERY_ACK');
+  assert.equal(ackStatusName(4), 'READ');
+  assert.equal(ackStatusName(5), 'PLAYED');
+  assert.equal(ackStatusName('READ'), 'READ', 'an already-named status passes through');
+  assert.equal(ackStatusName('3'), 'DELIVERY_ACK', 'a numeric string is still mapped');
+  assert.equal(ackStatusName(null), null);
+  assert.equal(ackStatusName(''), null);
+  assert.equal(ackStatusName('nonsense'), null);
+});
+
+test('ackStatusRank orders statuses so a late update can never downgrade a tick', () => {
+  assert.ok(ackStatusRank(4) > ackStatusRank(3));
+  assert.ok(ackStatusRank(3) > ackStatusRank(2));
+  assert.ok(ackStatusRank('READ') > ackStatusRank('SERVER_ACK'));
+  assert.equal(ackStatusRank(null), -1);
+  assert.equal(ackStatusRank('nonsense'), -1);
+});
+
+test('messageView surfaces a sent message\'s delivery status as ackName', () => {
+  const delivered = messageView({ key: { remoteJid: ctx.chatId, fromMe: true, id: 'sent-1' }, messageTimestamp: 1735690000, status: 3, message: { conversation: 'hi' } }, ctx);
+  assert.equal(delivered.ackName, 'DELIVERY_ACK');
+  const read = messageView({ key: { remoteJid: ctx.chatId, fromMe: true, id: 'sent-2' }, messageTimestamp: 1735690000, status: 4, message: { conversation: 'hi' } }, ctx);
+  assert.equal(read.ackName, 'READ');
+  const noStatus = messageView({ key: { remoteJid: ctx.chatId, fromMe: true, id: 'sent-3' }, messageTimestamp: 1735690000, message: { conversation: 'hi' } }, ctx);
+  assert.equal(noStatus.ackName, null);
 });

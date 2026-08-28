@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
-import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
+import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
 
@@ -117,6 +117,22 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
     sock.ev.on('messages.upsert', safe('messages.upsert', ({ messages, type }) => {
       ingestMessages(accountId, messages, { live: type === 'notify' });
+    }));
+
+    // Delivery/read progress for messages this account sent. Baileys reports it
+    // as `update.status` (a proto.WebMessageInfo.Status enum) — fold it onto the
+    // stored raw message so the next read of the page shows the right tick.
+    sock.ev.on('messages.update', safe('messages.update', updates => {
+      for (const { key, update } of updates || []) {
+        if (!key?.id || !key.fromMe || update?.status == null) continue;
+        const chatId = canonicalChatId(accountId, key.remoteJid);
+        const raw = store.getMessageById(accountId, chatId, key.id) || store.getMessageById(accountId, null, key.id);
+        if (!raw) continue;
+        if (ackStatusRank(update.status) <= ackStatusRank(raw.status)) continue;
+        raw.status = update.status;
+        const normalized = messageView(raw, { accountId, chatId });
+        store.upsertMessages(accountId, [{ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: raw, overviewMessage: overviewFromMessage(normalized) }]);
+      }
     }));
 
     sock.ev.on('presence.update', safe('presence.update', ({ id: chatId, presences }) => {

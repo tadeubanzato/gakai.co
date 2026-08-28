@@ -280,6 +280,9 @@ h2 {
   text-align:right;
   color:#c4d5ccaa;
 }
+.message-ack { margin-left:4px; font-size:10px; letter-spacing:-1px; }
+.message-ack.pending, .message-ack.sent, .message-ack.delivered { color:#c4d5cc88; }
+.message-ack.read { color:#53bdeb; }
 .media {
   max-width:100%;
   max-height:360px;

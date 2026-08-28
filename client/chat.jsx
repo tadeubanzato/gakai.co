@@ -162,6 +162,20 @@ function LinkPreview({ body, preview }) {
   }
   return <a className="link-preview" href={url} target="_blank" rel="noreferrer">{previewImage}<span><b>{readable(data.title || url, 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}</span></a>;
 }
+// WhatsApp-style delivery ticks for a message this account sent. Grey clock
+// while pending, single grey check on server ack, double grey on delivery,
+// double blue once read/played.
+const ACK_GLYPHS = {
+  PENDING: { glyph: "🕛", cls: "pending", label: "Sending" },
+  SERVER_ACK: { glyph: "✓", cls: "sent", label: "Sent" },
+  DELIVERY_ACK: { glyph: "✓✓", cls: "delivered", label: "Delivered" },
+  READ: { glyph: "✓✓", cls: "read", label: "Read" },
+  PLAYED: { glyph: "✓✓", cls: "read", label: "Played" },
+};
+function AckTicks({ ackName }) {
+  const state = ACK_GLYPHS[ackName] || ACK_GLYPHS.PENDING;
+  return <span className={`message-ack ${state.cls}`} title={state.label} aria-label={state.label}>{state.glyph}</span>;
+}
 function messageBody(text, mentions) {
   const ownNames=(mentions||[]).filter(mention=>mention.isMe&&mention.name).map(mention=>String(mention.name));
   if(!ownNames.length)return text;
@@ -186,7 +200,7 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
     {!isInstagramLink && <LinkPreview body={body} preview={message?.linkPreview} />}
     {!visibleBody && !previewUrl && !message?.hasMedia && !message?.media && !message?.mediaUrl && <span className={`message-body system-message ${message?.system?.kind || ""}`}>{message?.system?.label || "Message unavailable"}</span>}
     {reaction && <span className="reaction-pill">{reaction}</span>}
-    <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}</time>
+    <time>{stamp(message) ? new Date(stamp(message) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}{message.fromMe && <AckTicks ackName={message.pending ? "PENDING" : message.ackName} />}</time>
   </article>;
   // Buttons live outside the bubble now (a hover toolbar, not part of the
   // message content) — on the inner side of the bubble (left for "mine",

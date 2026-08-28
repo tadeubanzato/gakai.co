@@ -193,13 +193,26 @@ function bodyTextFor(contentType, content) {
   return '';
 }
 
-// WhatsApp's own read-receipt/delivery status, as Baileys' named enum
-// (proto.WebMessageInfo.Status: ERROR, PENDING, SERVER_ACK, DELIVERY_ACK,
-// READ, PLAYED) — the client only ever used this for display, so the name
-// is what it needs.
+// WhatsApp's own read-receipt/delivery status. Baileys delivers it as the
+// numeric proto.WebMessageInfo.Status enum on `waMessage.status`; the client
+// only ever uses this for display, so it's normalized to the stable name.
+const ACK_STATUS_NAMES = ['ERROR', 'PENDING', 'SERVER_ACK', 'DELIVERY_ACK', 'READ', 'PLAYED'];
+export function ackStatusName(status) {
+  if (status == null || status === '') return null;
+  if (typeof status === 'number') return ACK_STATUS_NAMES[status] || null;
+  const raw = String(status);
+  if (/^\d+$/.test(raw)) return ACK_STATUS_NAMES[Number(raw)] || null;
+  return ACK_STATUS_NAMES.includes(raw) ? raw : null;
+}
+// Ordering so a late, out-of-order status update can never downgrade a tick
+// (a stray SERVER_ACK arriving after READ must not turn the blue ticks grey).
+export function ackStatusRank(status) {
+  const name = ackStatusName(status);
+  const index = ACK_STATUS_NAMES.indexOf(name);
+  return index < 0 ? -1 : index;
+}
 function ackView(status) {
-  if (!status) return { ack: null, ackName: null };
-  const name = typeof status === 'string' ? status : String(status);
+  const name = ackStatusName(status);
   return { ack: name, ackName: name };
 }
 
