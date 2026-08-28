@@ -65,8 +65,12 @@ There is no separate WhatsApp provider process to run, configure, or pull. Gakai
 | Mention alerts — toast when you're @-tagged in a group | ✅ Live |
 | Message reactions | ✅ Live |
 | Reply / quote, delete for everyone | ✅ Live |
+| Forward a message to another conversation | ✅ Live |
+| Edit a sent message (within WhatsApp's time window) | ✅ Live |
+| Star a message; pin / mute / archive a chat | ✅ Live |
+| Block / unblock a contact; disappearing-messages toggle | ✅ Live |
 | Unread counts and bold unread state | ✅ Live |
-| Inbox filters — all / unread / groups | ✅ Live |
+| Inbox filters — all / unread / groups / archived / starred | ✅ Live |
 | Media relay (images, documents, voice notes) | ✅ Live |
 | Open Graph and Instagram link previews | ✅ Live |
 | n8n one-click automation connect | ✅ Live |
@@ -92,12 +96,7 @@ note points at where the work would live.
 
 | Gap | Notes |
 |---|---|
-| **Forward a message** | `sock.sendMessage(jid, { forward: msg })`; needs a "forward" action + chat picker. |
-| **Edit a sent message** | `sock.sendMessage(jid, { text, edit: key })`; time-limited by WhatsApp. |
-| **Star / pin / archive / mute a chat** | `sock.chatModify(...)`; needs per-chat state in the store and UI affordances. |
-| **Group management** | Create group, add / remove participants, change subject / icon, leave. `sock.groupCreate` / `groupParticipantsUpdate` / `groupUpdateSubject` / `groupLeave`. |
-| **Block / unblock a contact** | `sock.updateBlockStatus(jid, 'block' \| 'unblock')`. |
-| **Disappearing-messages toggle** | `sock.sendMessage(jid, { disappearingMessagesInChat: seconds })`. |
+| **Group management** | Create group, add / remove / promote participants, change subject / icon, leave. `sock.groupCreate` / `groupParticipantsUpdate` / `groupUpdateSubject` / `groupUpdateDescription` / `groupLeave` / `updateProfilePicture`. Needs a group-info screen. |
 
 ### Out of scope (for now)
 

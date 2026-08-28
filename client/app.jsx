@@ -1,6 +1,6 @@
 import React,{useCallback,useEffect,useMemo,useRef,useState}from"react";
 import{runExclusive,api}from"./app-helpers.mjs";
-import{Avatar,IconLogout}from"./ui-helpers.jsx";
+import{Avatar,IconLogout,Menu,MenuItem}from"./ui-helpers.jsx";
 import{createRoot}from"react-dom/client";
 import{ChatPanel}from"./chat.jsx";
 import{ConfirmHost,confirmDialog}from"./confirm.jsx";
@@ -206,6 +206,8 @@ function NewChatDialog({accountId,onClose,onOpened}){
 function App(){
   const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState(""),[newChat,setNewChat]=useState(false);
   const[chatFilter,setChatFilter]=useState("all");
+  const[archivedChats,setArchivedChats]=useState([]);
+  const[starredMessages,setStarredMessages]=useState([]);
   const settingsRef=useRef(null);
   const chatListRef=useRef(null);
   const suppressAutoSelectRef=useRef(false);
@@ -344,8 +346,9 @@ function App(){
           if(seenEventIdsRef.current.size>500)seenEventIdsRef.current.clear();
           seenEventIdsRef.current.add(eventId);
           const fresh=Date.now()-Date.parse(change.occurredAt||0)<60000;
-          if(fresh&&change.chat?.id&&change.chat.id!==openChatIdRef.current){
-            const known=chatsRef.current.find(item=>item.id===change.chat.id);
+          const knownForToast=chatsRef.current.find(item=>item.id===change.chat?.id);
+          if(fresh&&change.chat?.id&&change.chat.id!==openChatIdRef.current&&!knownForToast?.muted){
+            const known=knownForToast;
             const toast={id:eventId,chatId:change.chat.id,from:change.message?.sender?.name||"Someone",group:known?.name||change.chat?.name||"a group"};
             setMentionToasts(current=>[...current.filter(item=>item.id!==toast.id),toast]);
             window.setTimeout(()=>setMentionToasts(current=>current.filter(item=>item.id!==toast.id)),6000);
@@ -413,11 +416,14 @@ function App(){
 
   const logout=async()=>{if(!await confirmDialog({title:"Log off?",message:"You'll need your administrator username and password to sign back in.",confirmLabel:"Log off"}))return;await api("/api/app/auth/logout",{method:"POST"}).catch(()=>{});window.location.assign("/")};
   
-  const visible=useMemo(()=>chats.filter(x=>{
-    if(chatFilter==="unread"&&!x.unreadCount)return false;
-    if(chatFilter==="groups"&&!/@g\.us$/i.test(x.id||""))return false;
-    return (String(x.name||x.id)+" "+String(x.lastMessage?.body||x.lastMessage?.text||"")).toLowerCase().includes(q.toLowerCase());
-  }),[chats,q,chatFilter]);
+  const visible=useMemo(()=>{
+    const source=chatFilter==="archived"?archivedChats:chats;
+    return source.filter(x=>{
+      if(chatFilter==="unread"&&!x.unreadCount)return false;
+      if(chatFilter==="groups"&&!/@g\.us$/i.test(x.id||""))return false;
+      return (String(x.name||x.id)+" "+String(x.lastMessage?.body||x.lastMessage?.text||"")).toLowerCase().includes(q.toLowerCase());
+    });
+  },[chats,archivedChats,q,chatFilter]);
 
   // Keep unread state server-authoritative. The badge clears only after the
   // provider has accepted the read receipt; no arbitrary client timer.
@@ -505,6 +511,70 @@ function App(){
       load(account.id);
     }
   },[account?.id, load]);
+  const handleForwarded=useCallback((targetChat)=>{
+    setNote(`Forwarded to ${targetChat?.name||targetChat?.id||"chat"}`);
+    setTimeout(()=>setNote(""),3500);
+    if(account)load(account.id);
+  },[account?.id, load]);
+
+  // Pin / mute / archive a chat. Optimistically patches both list states, then
+  // reconciles from the server's returned overview.
+  const chatStateAction=useCallback(async (targetChat,body)=>{
+    if(!account||!targetChat?.id)return;
+    const patch=chatItem=>chatItem.id===targetChat.id?{...chatItem,
+      ...( 'pin' in body?{pinned:body.pin}:{}),
+      ...( 'archive' in body?{archived:body.archive}:{}),
+      ...( 'mute' in body?{muted:body.mute>0}:{})}:chatItem;
+    setChats(current=>{const next=current.map(patch).filter(c=>!c.archived);chatsCacheRef.current.set(account.id,next);return next;});
+    setArchivedChats(current=>current.map(patch).filter(c=>c.archived));
+    try{
+      const {chat:updated}=await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(targetChat.id)+"/state",{method:"POST",body:JSON.stringify(body)});
+      const merge=chatItem=>chatItem.id===updated.id?{...chatItem,...updated}:chatItem;
+      setChats(current=>{const next=current.map(merge).filter(c=>!c.archived);chatsCacheRef.current.set(account.id,next);return next;});
+      setArchivedChats(current=>{const has=current.some(c=>c.id===updated.id);const merged=has?current.map(merge):[updated,...current];return merged.filter(c=>c.archived);});
+      if(account)load(account.id);
+    }catch(x){fail(x.message||"Could not update this conversation");if(account)load(account.id);}
+  },[account,fail,load]);
+
+  const blockAction=useCallback(async (targetChat,blocked)=>{
+    if(!account||!targetChat?.id)return;
+    try{
+      await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(targetChat.id)+"/block",{method:"POST",body:JSON.stringify({blocked})});
+      const patch=c=>c.id===targetChat.id?{...c,blocked}:c;
+      setChats(current=>{const next=current.map(patch);chatsCacheRef.current.set(account.id,next);return next;});
+      setChat(current=>current?.id===targetChat.id?{...current,blocked}:current);
+      setNote(blocked?"Contact blocked":"Contact unblocked");setTimeout(()=>setNote(""),3000);
+    }catch(x){fail(x.message||"Could not update block status");}
+  },[account,fail]);
+  const disappearingAction=useCallback(async (targetChat,seconds)=>{
+    if(!account||!targetChat?.id)return;
+    try{
+      const {chat:updated}=await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(targetChat.id)+"/disappearing",{method:"POST",body:JSON.stringify({seconds})});
+      const patch=c=>c.id===updated.id?{...c,...updated}:c;
+      setChats(current=>{const next=current.map(patch);chatsCacheRef.current.set(account.id,next);return next;});
+      setChat(current=>current?.id===updated.id?{...current,...updated}:current);
+    }catch(x){fail(x.message||"Could not update disappearing messages");}
+  },[account,fail]);
+
+  // Load the archived list only while that tab is active.
+  useEffect(()=>{
+    if(chatFilter!=="archived"||!account||account.status!=="WORKING"){return undefined;}
+    let active=true;
+    api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats?archived=1")
+      .then(rows=>{if(active)setArchivedChats(Array.isArray(rows)?rows:(rows.chats||[]))})
+      .catch(()=>{if(active)setArchivedChats([])});
+    return()=>{active=false};
+  },[chatFilter,account?.id,account?.status]);
+
+  // Load starred messages only while that tab is active.
+  useEffect(()=>{
+    if(chatFilter!=="starred"||!account||account.status!=="WORKING"){return undefined;}
+    let active=true;
+    api("/api/app/accounts/"+encodeURIComponent(account.id)+"/starred")
+      .then(data=>{if(active)setStarredMessages(Array.isArray(data.messages)?data.messages:[])})
+      .catch(()=>{if(active)setStarredMessages([])});
+    return()=>{active=false};
+  },[chatFilter,account?.id,account?.status]);
   const handleChatDeleted=useCallback(chatId=>{
     suppressAutoSelectRef.current=true;
     setChats(current=>{
@@ -570,14 +640,39 @@ function App(){
             <section className={"chats "+(chat?"mobile-hide":"")} ref={chatListRef}>
               <input placeholder="Search conversations" value={q} onChange={e=>setQ(e.target.value)} aria-label="Search conversations"/>
               <div className="chat-filters" role="tablist" aria-label="Filter conversations">
-                {[["all","All"],["unread","Unread"],["groups","Groups"]].map(([key,label])=>
+                {[["all","All"],["unread","Unread"],["groups","Groups"],["archived","Archived"],["starred","Starred"]].map(([key,label])=>
                   <button key={key} type="button" role="tab" aria-selected={chatFilter===key} className={"chat-filter"+(chatFilter===key?" on":"")} onClick={()=>setChatFilter(key)}>{label}</button>
                 )}
               </div>
-              {visible.map(x=><button key={x.id} className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}><Avatar item={x}/><span><b>{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||x.lastMessage?.system?.label||"Photo or message"}</small></span>{x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}</button>)}
-              {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">{chats.length?"No conversations match this filter.":"No conversations yet. Gakai is waiting for WhatsApp to finish syncing."}</p>:null}
+              {chatFilter==="starred"
+                ? (starredMessages.length
+                    ? starredMessages.map((m,i)=><button key={(m.id||i)+"-star"} className="chat starred-item" onClick={()=>{const target=chats.find(c=>c.id===m.chatId)||archivedChats.find(c=>c.id===m.chatId)||{id:m.chatId,name:m.chatId};handleChatClick(target)}}>
+                        <span className="starred-item-icon" aria-hidden="true">★</span>
+                        <span><b>{m.sender?.name||(m.fromMe?"You":m.chatId)}</b><small>{m.body||m.text||(m.hasMedia?"Media attachment":m.location?"📍 Location":m.poll?"📊 Poll":"Message")}</small></span>
+                      </button>)
+                    : <p className="hint">No starred messages.</p>)
+                : visible.map(x=><div key={x.id} className="chat-row">
+                <button className={"chat "+(x.id===chat?.id?"active":"")+(x.unreadCount?" has-unread":"")} onClick={()=>handleChatClick(x)}>
+                  <Avatar item={x}/>
+                  <span><b>{x.pinned?"📌 ":""}{x.name||x.id}</b><small>{x.lastMessage?.body||x.lastMessage?.text||x.lastMessage?.system?.label||"Photo or message"}</small></span>
+                  {x.muted?<span className="chat-muted" title="Muted" aria-hidden="true">🔇</span>:null}
+                  {x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}
+                </button>
+                <Menu label={"Actions for "+(x.name||x.id)} className="chat-row-menu">
+                  <MenuItem onSelect={()=>chatStateAction(x,{pin:!x.pinned})}>{x.pinned?"Unpin":"Pin"} chat</MenuItem>
+                  {x.muted
+                    ? <MenuItem onSelect={()=>chatStateAction(x,{mute:0})}>Unmute</MenuItem>
+                    : <>
+                        <MenuItem onSelect={()=>chatStateAction(x,{mute:60*60*8})}>Mute 8 hours</MenuItem>
+                        <MenuItem onSelect={()=>chatStateAction(x,{mute:60*60*24*7})}>Mute 1 week</MenuItem>
+                        <MenuItem onSelect={()=>chatStateAction(x,{mute:60*60*24*365})}>Mute always</MenuItem>
+                      </>}
+                  <MenuItem onSelect={()=>chatStateAction(x,{archive:!x.archived})}>{x.archived?"Unarchive":"Archive"}</MenuItem>
+                </Menu>
+              </div>)}
+              {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">{chatFilter==="archived"?"No archived conversations.":chats.length?"No conversations match this filter.":"No conversations yet. Gakai is waiting for WhatsApp to finish syncing."}</p>:null}
             </section>
-            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} onBack={()=>setChat()} onSent={handleSent} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
+            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} chats={chats} onBack={()=>setChat()} onSent={handleSent} onForwarded={handleForwarded} onChatState={chatStateAction} onBlock={blockAction} onDisappearing={disappearingAction} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
         </main>
       </div>

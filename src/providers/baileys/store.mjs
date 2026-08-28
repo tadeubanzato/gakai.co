@@ -66,7 +66,31 @@ export function openStore(db) {
       reacted_at TEXT NOT NULL,
       PRIMARY KEY (account_id, message_id, sender_id)
     );
+
+    CREATE TABLE IF NOT EXISTS wa_starred (
+      account_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      starred_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, message_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS wa_blocklist (
+      account_id TEXT NOT NULL,
+      jid TEXT NOT NULL,
+      PRIMARY KEY (account_id, jid)
+    );
   `);
+
+  // Lightweight column migration for wa_chats — the schema above only runs for a
+  // fresh database, so per-chat state added later needs an explicit ALTER.
+  const chatColumns = new Set(db.prepare(`PRAGMA table_info(wa_chats)`).all().map(column => column.name));
+  for (const [name, ddl] of [
+    ['pinned', 'INTEGER NOT NULL DEFAULT 0'],
+    ['muted_until', 'INTEGER NOT NULL DEFAULT 0'],
+    ['archived', 'INTEGER NOT NULL DEFAULT 0'],
+    ['ephemeral', 'INTEGER NOT NULL DEFAULT 0'],
+  ]) if (!chatColumns.has(name)) db.exec(`ALTER TABLE wa_chats ADD COLUMN ${name} ${ddl}`);
 
   const stmt = {
     upsertChat: db.prepare(`
@@ -146,6 +170,33 @@ export function openStore(db) {
 
   const now = () => new Date().toISOString();
 
+  // Partial update of the per-chat state columns (pinned / muted_until /
+  // archived / ephemeral). Only the keys present in `flags` are written.
+  function setChatFlags(accountId, chatId, flags = {}) {
+    stmt.ensureChat.run(accountId, chatId, now());
+    const map = { pinned: 'pinned', mutedUntil: 'muted_until', archived: 'archived', ephemeral: 'ephemeral' };
+    const sets = [], values = [];
+    for (const [key, column] of Object.entries(map)) {
+      if (flags[key] === undefined) continue;
+      sets.push(`${column}=?`);
+      values.push(typeof flags[key] === 'boolean' ? (flags[key] ? 1 : 0) : Number(flags[key]) || 0);
+    }
+    if (!sets.length) return;
+    db.prepare(`UPDATE wa_chats SET ${sets.join(', ')} WHERE account_id=? AND chat_id=?`).run(...values, accountId, chatId);
+  }
+
+  // Map Baileys' own pin/mute/archive fields off a chats.update row. They arrive
+  // inconsistently named across event shapes, so accept every spelling seen.
+  function chatFlagsFromEvent(chat) {
+    const flags = {};
+    if ('pin' in chat || 'pinned' in chat) flags.pinned = Boolean(chat.pin || chat.pinned);
+    const mute = chat.muteEndTime ?? chat.mute;
+    if (mute !== undefined && mute !== null) flags.mutedUntil = Math.floor(Number(mute) > 1e12 ? Number(mute) / 1000 : Number(mute)) || 0;
+    if ('archived' in chat || 'archive' in chat) flags.archived = Boolean(chat.archived ?? chat.archive);
+    if (chat.ephemeralExpiration !== undefined) flags.ephemeral = Number(chat.ephemeralExpiration) || 0;
+    return flags;
+  }
+
   function upsertChats(accountId, chats) {
     for (const chat of chats) {
       if (!chat?.id) continue;
@@ -158,7 +209,27 @@ export function openStore(db) {
         null,
         now(),
       );
+      const flags = chatFlagsFromEvent(chat);
+      if (Object.keys(flags).length) setChatFlags(accountId, chat.id, flags);
     }
+  }
+
+  // Blocklist: a set of jids this account has blocked, kept in sync from
+  // Baileys' blocklist.set (full) / blocklist.update (delta) events.
+  function replaceBlocklist(accountId, jids) {
+    db.prepare(`DELETE FROM wa_blocklist WHERE account_id=?`).run(accountId);
+    const insert = db.prepare(`INSERT INTO wa_blocklist(account_id, jid) VALUES (?,?) ON CONFLICT DO NOTHING`);
+    for (const jid of jids || []) if (jid) insert.run(accountId, jid);
+  }
+  function setBlocked(accountId, jid, blocked) {
+    if (blocked) db.prepare(`INSERT INTO wa_blocklist(account_id, jid) VALUES (?,?) ON CONFLICT DO NOTHING`).run(accountId, jid);
+    else db.prepare(`DELETE FROM wa_blocklist WHERE account_id=? AND jid=?`).run(accountId, jid);
+  }
+  function isBlocked(accountId, jid) {
+    return Boolean(db.prepare(`SELECT 1 FROM wa_blocklist WHERE account_id=? AND jid=?`).get(accountId, jid));
+  }
+  function blockedJids(accountId) {
+    return new Set(db.prepare(`SELECT jid FROM wa_blocklist WHERE account_id=?`).all(accountId).map(row => row.jid));
   }
 
   function setChatUnread(accountId, chatId, unreadCount) {
@@ -188,11 +259,51 @@ export function openStore(db) {
   function deleteMessage(accountId, chatId, messageId) {
     stmt.deleteMessage.run(accountId, chatId, messageId);
     stmt.deleteReactionsForMessage.run(accountId, messageId);
+    db.prepare(`DELETE FROM wa_starred WHERE account_id=? AND message_id=?`).run(accountId, messageId);
+  }
+
+  function setStarred(accountId, chatId, messageId, on) {
+    if (on) db.prepare(`INSERT INTO wa_starred(account_id, chat_id, message_id, starred_at) VALUES (?,?,?,?) ON CONFLICT(account_id, message_id) DO NOTHING`).run(accountId, chatId, messageId, now());
+    else db.prepare(`DELETE FROM wa_starred WHERE account_id=? AND message_id=?`).run(accountId, messageId);
+  }
+  function isStarred(accountId, messageId) {
+    return Boolean(db.prepare(`SELECT 1 FROM wa_starred WHERE account_id=? AND message_id=?`).get(accountId, messageId));
+  }
+  function starredMessageIds(accountId) {
+    return new Set(db.prepare(`SELECT message_id FROM wa_starred WHERE account_id=?`).all(accountId).map(row => row.message_id));
+  }
+  // Starred messages across every chat, newest first, with their stored payload.
+  function listStarred(accountId, limit = 100) {
+    return db.prepare(`
+      SELECT s.chat_id, m.payload_json
+      FROM wa_starred s JOIN wa_messages m
+        ON m.account_id = s.account_id AND m.message_id = s.message_id
+      WHERE s.account_id=?
+      ORDER BY m.timestamp DESC LIMIT ?
+    `).all(accountId, limit).map(row => ({ chatId: row.chat_id, waMessage: JSON.parse(row.payload_json) }));
+  }
+
+  // Rewrite a stored message's text in place (an inbound or outbound edit) and
+  // mark it edited, mirroring how deleteMessage handles a REVOKE.
+  function applyEdit(accountId, chatId, targetMessageId, newText) {
+    const row = (chatId && stmt.getMessage.get(accountId, chatId, targetMessageId)) || stmt.findMessageById.get(accountId, targetMessageId);
+    if (!row) return false;
+    const raw = JSON.parse(row.payload_json);
+    const message = raw.message || {};
+    if (typeof message.conversation === 'string') message.conversation = newText;
+    else if (message.extendedTextMessage) message.extendedTextMessage.text = newText;
+    else message.conversation = newText;
+    raw.message = message;
+    raw.edited = true;
+    stmt.upsertMessage.run(accountId, row.chat_id, targetMessageId, row.timestamp, row.from_me, JSON.stringify(raw), now());
+    stmt.bumpChatLastMessage.run(row.timestamp, JSON.stringify({ body: newText, text: newText, timestamp: row.timestamp, hasMedia: false, system: null }), now(), accountId, row.chat_id, row.timestamp);
+    return true;
   }
 
   function deleteChat(accountId, chatId) {
     stmt.deleteChatMessages.run(accountId, chatId);
     stmt.deleteChat.run(accountId, chatId);
+    db.prepare(`DELETE FROM wa_starred WHERE account_id=? AND chat_id=?`).run(accountId, chatId);
   }
 
   function listChatIds(accountId) {
@@ -251,6 +362,10 @@ export function openStore(db) {
       unreadCount: row.unread_count,
       lastMessageTimestamp: row.last_message_timestamp,
       lastMessage: row.last_message_json ? JSON.parse(row.last_message_json) : null,
+      pinned: Boolean(row.pinned),
+      mutedUntil: row.muted_until || 0,
+      archived: Boolean(row.archived),
+      ephemeral: row.ephemeral || 0,
     }));
   }
 
@@ -322,12 +437,16 @@ export function openStore(db) {
     stmt.deleteAccountContacts.run(accountId);
     stmt.deleteAccountLids.run(accountId);
     stmt.deleteAccountReactions.run(accountId);
+    db.prepare(`DELETE FROM wa_starred WHERE account_id=?`).run(accountId);
+    db.prepare(`DELETE FROM wa_blocklist WHERE account_id=?`).run(accountId);
   }
 
   return {
-    upsertChats, setChatUnread, setChatPicture, deleteChat, getChatsOverview,
+    upsertChats, setChatUnread, setChatPicture, setChatFlags, deleteChat, getChatsOverview,
     listChatIds, chatExists, ensureChat, mergeChat,
-    upsertMessages, deleteMessage, getMessagesPage, getMessageById,
+    upsertMessages, deleteMessage, applyEdit, getMessagesPage, getMessageById,
+    setStarred, isStarred, starredMessageIds, listStarred,
+    replaceBlocklist, setBlocked, isBlocked, blockedJids,
     upsertContacts, setContactPicture, getContact, getContacts,
     setLidMapping, resolveLid,
     applyReaction, getReaction,

@@ -1051,6 +1051,28 @@ async function enrichMessage(session,view){
   if (req.method==='POST' && parts[4]==='start') {await provider.startAccount(id,{label:store.accountLabels[id]}); return send(res,200,{ok:true});}
   if (req.method==='POST' && parts[4]==='restart') {await provider.restartAccount(id); return send(res,200,{ok:true});}
   if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await provider.markChatRead(id,decodeURIComponent(parts[5]));return send(res,200,{ok:true});}
+  // Pin / mute / archive a chat. Body: { pin: bool } | { archive: bool } | { mute: seconds }.
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='state'){
+    const chatId=decodeURIComponent(parts[5]),input=await readBody(req);
+    let action,value;
+    if('pin' in input){action='pin';value=Boolean(input.pin);}
+    else if('archive' in input){action='archive';value=Boolean(input.archive);}
+    else if('mute' in input){action='mute';value=Math.max(0,Math.min(Number(input.mute)||0,60*60*24*365));}
+    else return send(res,400,{message:'Provide one of pin, archive or mute'});
+    const chat=await provider.setChatState(id,chatId,action,value);
+    return send(res,200,{chat:await enrichChatOverview(id,chat,{pictures:false})});
+  }
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='block'){
+    const chatId=decodeURIComponent(parts[5]),input=await readBody(req);
+    const result=await provider.setBlocked(id,chatId,Boolean(input.blocked));
+    return send(res,200,{ok:true,...result});
+  }
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='disappearing'){
+    const chatId=decodeURIComponent(parts[5]),input=await readBody(req);
+    const seconds=Math.max(0,Math.min(Number(input.seconds)||0,60*60*24*90));
+    const chat=await provider.setDisappearing(id,chatId,seconds);
+    return send(res,200,{chat:await enrichChatOverview(id,chat,{pictures:false})});
+  }
   // Open a new 1:1 conversation from a phone number (checks it's on WhatsApp).
   if(req.method==='POST'&&parts[4]==='chats'&&!parts[5]){
     const input=await readBody(req),phone=String(input.phone||'').replace(/[^0-9]/g,'');
@@ -1080,6 +1102,15 @@ async function enrichMessage(session,view){
     // confirmation prompt reflects that distinction.
     await provider.deleteMessage(id,chatId,messageId);
     return send(res,200,{ok:true});
+  }
+  if(req.method==='PATCH'&&parts[4]==='chats'&&parts[5]&&parts[6]==='messages'&&parts[7]){
+    const chatId=decodeURIComponent(parts[5]),messageId=decodeURIComponent(parts[7]);
+    const input=await readBody(req),text=String(input.text||'').trim();
+    if(!messageId)return send(res,400,{message:'Invalid message ID'});
+    if(!text)return send(res,400,{message:'An edited message cannot be empty'});
+    if(text.length>4096)return send(res,400,{message:'Message is too long'});
+    const message=await provider.editMessage(id,chatId,messageId,text);
+    return send(res,200,{message:await enrichMessage(id,message)});
   }
   if(req.method==='DELETE'&&parts[4]==='chats'&&parts[5]){const chatId=decodeURIComponent(parts[5]);await provider.deleteChat(id,chatId);return send(res,200,{ok:true});}
   // Presence stays behind the dashboard proxy so the browser never receives
@@ -1112,11 +1143,19 @@ async function enrichMessage(session,view){
   }
   if (req.method==='GET' && parts[4]==='chats') {
     const chats=await provider.getChatsOverview(id);
+    const wantArchived=url.searchParams.get('archived')==='1';
+    if(wantArchived){
+      const archived=chats.filter(chat=>chat.archived&&hasMessageContent(chat)).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
+      return send(res,200,(await mapWithConcurrency(archived,8,chat=>enrichChatOverview(id,chat,{pictures:false}))).sort((a,b)=>b.timestamp-a.timestamp));
+    }
     const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
-    const recent=chats.filter(chat=>hasMessageContent(chat)&&chatTimestamp(chat)>=recencyFloor).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
+    // Archived chats drop out of the main list; pinned chats stay regardless of
+    // how old their last message is, and sort above everything else.
+    const recent=chats.filter(chat=>!chat.archived&&hasMessageContent(chat)&&(chat.pinned||chatTimestamp(chat)>=recencyFloor)).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
     // pictures:false — the list must not block on a burst of avatar lookups;
     // the client hydrates them separately via /chats/pictures.
-    return send(res,200,(await mapWithConcurrency(recent,8,chat=>enrichChatOverview(id,chat,{pictures:false}))).sort((a,b) => b.timestamp - a.timestamp));
+    const enriched=await mapWithConcurrency(recent,8,chat=>enrichChatOverview(id,chat,{pictures:false}));
+    return send(res,200,enriched.sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||b.timestamp-a.timestamp));
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
   if (req.method==='GET' && parts[4]==='messages') {
@@ -1146,6 +1185,23 @@ async function enrichMessage(session,view){
     const reaction=String(input.reaction||'');if(reaction.length>16)return send(res,400,{message:'Invalid reaction'});
     await provider.setReaction(id,url.searchParams.get('chatId')||null,messageId,reaction);
     return send(res,200,{ok:true,reaction});
+  }
+  if(req.method==='POST'&&parts[4]==='messages'&&parts[5]&&parts[6]==='star'){
+    const input=await readBody(req),messageId=decodeURIComponent(parts[5]),chatId=String(input.chatId||url.searchParams.get('chatId')||'');
+    if(!messageId||!chatId)return send(res,400,{message:'chatId and messageId are required'});
+    const result=await provider.setMessageStar(id,chatId,messageId,Boolean(input.starred));
+    return send(res,200,{ok:true,...result});
+  }
+  if(req.method==='GET'&&parts[4]==='starred'){
+    const messages=await Promise.all((provider.getStarredMessages(id)||[]).map(async message=>({...await enrichMessage(id,message),chatId:message.chatId})));
+    return send(res,200,{messages});
+  }
+  if(req.method==='POST'&&parts[4]==='messages'&&parts[5]&&parts[6]==='forward'){
+    const input=await readBody(req),messageId=decodeURIComponent(parts[5]);
+    const fromChatId=String(input.fromChatId||''),toChatId=String(input.toChatId||'');
+    if(!messageId||!fromChatId||!toChatId)return send(res,400,{message:'messageId, fromChatId and toChatId are required'});
+    const {chatId:targetChatId,message}=await provider.forwardMessage(id,fromChatId,messageId,toChatId);
+    return send(res,200,{chatId:targetChatId,message:await enrichMessage(id,message)});
   }
   if (req.method==='POST' && parts[4]==='media') {
     const chatId=url.searchParams.get('chatId');

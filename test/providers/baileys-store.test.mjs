@@ -206,3 +206,77 @@ test('listChatIds and chatExists reflect the stored chats', () => {
   assert.equal(store.chatExists('acct-1', 'a@s.whatsapp.net'), true);
   assert.equal(store.chatExists('acct-1', 'b@lid'), false);
 });
+
+test('setChatFlags round-trips pinned / mutedUntil / archived through getChatsOverview', () => {
+  const store = freshStore();
+  const chatId = 'flags@s.whatsapp.net';
+  store.upsertMessages('acct-1', [{ chatId, messageId: 'm1', timestamp: 100, fromMe: false, waMessage: {}, overviewMessage: { body: 'x', text: 'x', timestamp: 100, hasMedia: false, system: null } }]);
+
+  store.setChatFlags('acct-1', chatId, { pinned: true });
+  store.setChatFlags('acct-1', chatId, { mutedUntil: 4102444800, archived: true });
+
+  const [chat] = store.getChatsOverview('acct-1');
+  assert.equal(chat.pinned, true);
+  assert.equal(chat.mutedUntil, 4102444800);
+  assert.equal(chat.archived, true);
+
+  // a partial update leaves the other flags alone
+  store.setChatFlags('acct-1', chatId, { archived: false });
+  const [after] = store.getChatsOverview('acct-1');
+  assert.equal(after.archived, false);
+  assert.equal(after.pinned, true);
+});
+
+test('upsertChats maps Baileys pin / mute / archive fields off a chats.update row', () => {
+  const store = freshStore();
+  const chatId = 'evt@s.whatsapp.net';
+  store.upsertChats('acct-1', [{ id: chatId, conversationTimestamp: 200, pin: 1699999999, archived: true, muteEndTime: 4102444800 }]);
+  const [chat] = store.getChatsOverview('acct-1');
+  assert.equal(chat.pinned, true);
+  assert.equal(chat.archived, true);
+  assert.equal(chat.mutedUntil, 4102444800);
+});
+
+test('setStarred / isStarred / listStarred round-trip and clean up on delete', () => {
+  const store = freshStore();
+  const chatId = 'starme@s.whatsapp.net';
+  store.upsertMessages('acct-1', [
+    { chatId, messageId: 'm1', timestamp: 100, fromMe: false, waMessage: { key: { id: 'm1' }, message: { conversation: 'one' } }, overviewMessage: { body: 'one', text: 'one', timestamp: 100, hasMedia: false, system: null } },
+    { chatId, messageId: 'm2', timestamp: 200, fromMe: true, waMessage: { key: { id: 'm2', fromMe: true }, message: { conversation: 'two' } }, overviewMessage: { body: 'two', text: 'two', timestamp: 200, hasMedia: false, system: null } },
+  ]);
+
+  store.setStarred('acct-1', chatId, 'm1', true);
+  store.setStarred('acct-1', chatId, 'm2', true);
+  assert.equal(store.isStarred('acct-1', 'm1'), true);
+  assert.deepEqual([...store.starredMessageIds('acct-1')].sort(), ['m1', 'm2']);
+
+  const listed = store.listStarred('acct-1', 10);
+  assert.equal(listed.length, 2);
+  assert.equal(listed[0].waMessage.key.id, 'm2', 'newest first');
+
+  store.setStarred('acct-1', chatId, 'm1', false);
+  assert.equal(store.isStarred('acct-1', 'm1'), false);
+
+  store.deleteMessage('acct-1', chatId, 'm2');
+  assert.equal(store.isStarred('acct-1', 'm2'), false);
+});
+
+test('blocklist round-trips via setBlocked / replaceBlocklist', () => {
+  const store = freshStore();
+  store.setBlocked('acct-1', 'a@s.whatsapp.net', true);
+  assert.equal(store.isBlocked('acct-1', 'a@s.whatsapp.net'), true);
+  store.setBlocked('acct-1', 'a@s.whatsapp.net', false);
+  assert.equal(store.isBlocked('acct-1', 'a@s.whatsapp.net'), false);
+
+  store.replaceBlocklist('acct-1', ['x@s.whatsapp.net', 'y@s.whatsapp.net']);
+  assert.deepEqual([...store.blockedJids('acct-1')].sort(), ['x@s.whatsapp.net', 'y@s.whatsapp.net']);
+  store.replaceBlocklist('acct-1', ['z@s.whatsapp.net']);
+  assert.deepEqual([...store.blockedJids('acct-1')], ['z@s.whatsapp.net']);
+});
+
+test('setChatFlags stores the ephemeral (disappearing-messages) duration', () => {
+  const store = freshStore();
+  store.setChatFlags('acct-1', 'e@s.whatsapp.net', { ephemeral: 604800 });
+  const [chat] = store.getChatsOverview('acct-1');
+  assert.equal(chat.ephemeral, 604800);
+});

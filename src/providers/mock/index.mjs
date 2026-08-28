@@ -49,6 +49,26 @@ export function createMockProvider({ onEvent } = {}) {
     seedMessage(accountId, chatId, message);
     return message;
   }
+  async function editMessage(accountId, chatId, messageId, text) {
+    const list = messagesFor(accountId).get(chatId) || [];
+    const message = list.find(m => m.id === messageId);
+    if (!message) throw Object.assign(new Error('Message not found'), { status: 404 });
+    if (!message.fromMe) throw Object.assign(new Error('You can only edit your own messages'), { status: 403 });
+    const trimmed = String(text || '').trim();
+    if (!trimmed) throw Object.assign(new Error('An edited message cannot be empty'), { status: 400 });
+    sent.push({ accountId, kind: 'edit', chatId, messageId, text: trimmed });
+    message.body = trimmed; message.text = trimmed; message.edited = true;
+    return { ...message };
+  }
+  async function forwardMessage(accountId, fromChatId, messageId, toChatId) {
+    const fromList = messagesFor(accountId).get(fromChatId) || [];
+    const source = fromList.find(m => m.id === messageId);
+    if (!source) throw Object.assign(new Error('Original message not found'), { status: 404 });
+    sent.push({ accountId, kind: 'forward', fromChatId, toChatId, messageId });
+    const message = { ...source, id: `mock-forward-${sent.length}`, timestamp: Math.floor(Date.now() / 1000), fromMe: true, replyTo: null };
+    seedMessage(accountId, toChatId, message);
+    return { chatId: toChatId, message };
+  }
   async function setReaction(accountId, chatId, messageId, reaction) {
     if (reaction) reactionsFor(accountId).set(messageId, reaction);
     else reactionsFor(accountId).delete(messageId);
@@ -65,6 +85,28 @@ export function createMockProvider({ onEvent } = {}) {
   async function markChatRead(accountId, chatId) {
     const chat = chatsFor(accountId).get(chatId);
     if (chat) chat.unreadCount = 0;
+  }
+  const blocked = new Map(); // accountId -> Set(jid)
+  const blockedFor = accountId => { if (!blocked.has(accountId)) blocked.set(accountId, new Set()); return blocked.get(accountId); };
+  async function setBlocked(accountId, chatId, isBlocked) {
+    if (/@g\.us$/i.test(chatId)) throw Object.assign(new Error('Groups cannot be blocked'), { status: 400 });
+    if (isBlocked) blockedFor(accountId).add(chatId); else blockedFor(accountId).delete(chatId);
+    return { chatId, blocked: Boolean(isBlocked) };
+  }
+  async function setDisappearing(accountId, chatId, seconds) {
+    const chat = chatsFor(accountId).get(chatId) || { id: chatId, name: null, picture: null, unreadCount: 0, lastMessageTimestamp: 0 };
+    chat.ephemeral = Math.max(0, Number(seconds) || 0);
+    chatsFor(accountId).set(chatId, chat);
+    return domainChatOverview(chat);
+  }
+  async function setChatState(accountId, chatId, action, value) {
+    const chat = chatsFor(accountId).get(chatId) || { id: chatId, name: null, picture: null, unreadCount: 0, lastMessageTimestamp: 0 };
+    if (action === 'pin') chat.pinned = Boolean(value);
+    else if (action === 'archive') chat.archived = Boolean(value);
+    else if (action === 'mute') chat.mutedUntil = Number(value) > 0 ? Math.floor(Date.now() / 1000) + Number(value) : 0;
+    else throw Object.assign(new Error('Unknown chat action'), { status: 400 });
+    chatsFor(accountId).set(chatId, chat);
+    return domainChatOverview(chat);
   }
   async function subscribePresence() {}
   async function publishPresence() {}
@@ -92,7 +134,7 @@ export function createMockProvider({ onEvent } = {}) {
   // Mirrors the real Baileys manager's contract: getChatsOverview always
   // returns the final, already-normalized Gakai view model, never a raw
   // store row.
-  async function getChatsOverview(accountId) { return [...chatsFor(accountId).values()].map(domainChatOverview); }
+  async function getChatsOverview(accountId) { const blocks = blockedFor(accountId); return [...chatsFor(accountId).values()].map(chat => domainChatOverview({ ...chat, blocked: blocks.has(chat.id) })); }
   async function getMessages(accountId, chatId, { limit = 20, before } = {}) {
     const list = (messagesFor(accountId).get(chatId) || []).slice();
     const filtered = Number.isFinite(before) && before > 0 ? list.filter(m => m.timestamp <= before - 1) : list;
@@ -105,7 +147,24 @@ export function createMockProvider({ onEvent } = {}) {
   }
   function withReaction(accountId, message) {
     const reaction = reactionsFor(accountId).get(message.id);
-    return reaction ? { ...message, reaction } : message;
+    let out = reaction ? { ...message, reaction } : message;
+    if (starredFor(accountId).has(message.id)) out = { ...out, starred: true };
+    return out;
+  }
+  const starred = new Map(); // accountId -> Map(messageId -> chatId)
+  const starredFor = accountId => { if (!starred.has(accountId)) starred.set(accountId, new Map()); return starred.get(accountId); };
+  async function setMessageStar(accountId, chatId, messageId, on) {
+    const list = messagesFor(accountId).get(chatId) || [];
+    if (!list.find(m => m.id === messageId)) throw Object.assign(new Error('Message not found'), { status: 404 });
+    if (on) starredFor(accountId).set(messageId, chatId);
+    else starredFor(accountId).delete(messageId);
+    return { messageId, starred: Boolean(on) };
+  }
+  function getStarredMessages(accountId) {
+    return [...starredFor(accountId).entries()].map(([messageId, chatId]) => {
+      const message = (messagesFor(accountId).get(chatId) || []).find(m => m.id === messageId);
+      return message ? { ...message, chatId, starred: true } : null;
+    }).filter(Boolean);
   }
   async function downloadMedia() { return null; }
   async function shutdown() {}
@@ -149,7 +208,8 @@ export function createMockProvider({ onEvent } = {}) {
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, sendMedia, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState,
+    setMessageStar, getStarredMessages, setBlocked, setDisappearing,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,

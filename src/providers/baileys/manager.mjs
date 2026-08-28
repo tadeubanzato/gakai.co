@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
-import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
+import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, editView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
 
@@ -138,6 +138,12 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     sock.ev.on('presence.update', safe('presence.update', ({ id: chatId, presences }) => {
       onEvent?.('presence', { accountId, chatId, presences });
     }));
+
+    // Blocklist: 'set' is the full list, 'update' is a { blocklist, type } delta.
+    sock.ev.on('blocklist.set', safe('blocklist.set', ({ blocklist }) => store.replaceBlocklist(accountId, blocklist || [])));
+    sock.ev.on('blocklist.update', safe('blocklist.update', ({ blocklist, type }) => {
+      for (const jid of blocklist || []) store.setBlocked(accountId, normJid(jid), type !== 'remove');
+    }));
   }
 
   function mapContact(contact) {
@@ -233,6 +239,9 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
         const revoke = revokeView(raw);
         if (revoke?.targetMessageId) { store.deleteMessage(accountId, chatId, revoke.targetMessageId); continue; }
+
+        const edit = editView(raw);
+        if (edit?.targetMessageId) { store.applyEdit(accountId, chatId, edit.targetMessageId, edit.newText); continue; }
 
         const normalized = messageView(raw, { accountId, chatId });
         toStore.push({ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: normalized.fromMe, waMessage: raw, overviewMessage: overviewFromMessage(normalized) });
@@ -348,6 +357,33 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return normalized;
   }
 
+  async function editMessage(accountId, chatId, messageId, text) {
+    const { sock } = requireSocket(accountId);
+    const target = canonicalChatId(accountId, chatId);
+    const raw = store.getMessageById(accountId, target, messageId) || store.getMessageById(accountId, null, messageId);
+    if (!raw?.key) throw Object.assign(new Error('Message not found'), { status: 404 });
+    if (!raw.key.fromMe) throw Object.assign(new Error('You can only edit your own messages'), { status: 403 });
+    const trimmed = String(text || '').trim();
+    if (!trimmed) throw Object.assign(new Error('An edited message cannot be empty'), { status: 400 });
+    await sock.sendMessage(target, { text: trimmed, edit: raw.key });
+    store.applyEdit(accountId, target, messageId, trimmed);
+    const updated = store.getMessageById(accountId, target, messageId);
+    return messageView(updated, { accountId, chatId: target });
+  }
+
+  async function forwardMessage(accountId, fromChatId, messageId, toChatId) {
+    const { sock } = requireSocket(accountId);
+    const source = store.getMessageById(accountId, canonicalChatId(accountId, fromChatId), messageId)
+      || store.getMessageById(accountId, null, messageId);
+    if (!source) throw Object.assign(new Error('Original message not found'), { status: 404 });
+    const target = canonicalChatId(accountId, toChatId);
+    const sent = await sock.sendMessage(target, { forward: source });
+    learnFromKey(accountId, sent?.key);
+    const normalized = messageView(sent, { accountId, chatId: target });
+    store.upsertMessages(accountId, [{ chatId: target, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: true, waMessage: sent, overviewMessage: overviewFromMessage(normalized) }]);
+    return { chatId: target, message: normalized };
+  }
+
   async function setReaction(accountId, chatId, messageId, reaction) {
     const { sock, me } = requireSocket(accountId);
     chatId = canonicalChatId(accountId, chatId);
@@ -391,6 +427,61 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
       if (recent.length) await entry.sock.readMessages(recent.map(m => m.key)).catch(() => {});
     }
     store.setChatUnread(accountId, chatId, 0);
+  }
+
+  // Pin / mute / archive. `value` is a boolean for pin/archive, a duration in
+  // seconds (0 = unmute) for mute. Baileys' chatModify is best-effort; the
+  // local store stays authoritative for what the inbox renders, same as
+  // deleteChat.
+  async function setChatState(accountId, chatId, action, value) {
+    chatId = canonicalChatId(accountId, chatId);
+    const entry = accounts.get(accountId);
+    let flags;
+    if (action === 'pin') flags = { pinned: Boolean(value) };
+    else if (action === 'archive') flags = { archived: Boolean(value) };
+    else if (action === 'mute') {
+      const seconds = Number(value) || 0;
+      flags = { mutedUntil: seconds > 0 ? Math.floor(Date.now() / 1000) + seconds : 0 };
+    } else throw Object.assign(new Error('Unknown chat action'), { status: 400 });
+
+    if (entry) {
+      try {
+        if (action === 'pin') await entry.sock.chatModify({ pin: Boolean(value) }, chatId);
+        else if (action === 'mute') await entry.sock.chatModify({ mute: Number(value) > 0 ? Date.now() + Number(value) * 1000 : null }, chatId);
+        else if (action === 'archive') {
+          const [lastMessage] = store.getMessagesPage(accountId, chatId, { limit: 1 });
+          await entry.sock.chatModify({ archive: Boolean(value), lastMessages: lastMessage ? [{ key: lastMessage.key, messageTimestamp: lastMessage.messageTimestamp }] : [] }, chatId);
+        }
+      } catch (error) { logger.warn({ error: error.message, accountId, chatId, action }, 'Remote chatModify failed; applying locally anyway'); }
+    }
+    store.setChatFlags(accountId, chatId, flags);
+    return enrichedOverviewFor(accountId, chatId);
+  }
+
+  async function setBlocked(accountId, chatId, blocked) {
+    const { sock } = requireSocket(accountId);
+    const jid = canonicalChatId(accountId, chatId);
+    if (isGroupChatId(jid)) throw Object.assign(new Error('Groups cannot be blocked'), { status: 400 });
+    await sock.updateBlockStatus(jid, blocked ? 'block' : 'unblock');
+    store.setBlocked(accountId, jid, Boolean(blocked));
+    return { chatId: jid, blocked: Boolean(blocked) };
+  }
+
+  async function setDisappearing(accountId, chatId, seconds) {
+    const { sock } = requireSocket(accountId);
+    const target = canonicalChatId(accountId, chatId);
+    const value = Math.max(0, Number(seconds) || 0);
+    await sock.sendMessage(target, { disappearingMessagesInChat: value || false });
+    store.setChatFlags(accountId, target, { ephemeral: value });
+    return enrichedOverviewFor(accountId, target);
+  }
+
+  function enrichedOverviewFor(accountId, chatId) {
+    const blocked = store.isBlocked(accountId, chatId);
+    const [row] = store.getChatsOverview(accountId, 1000).filter(chat => chat.id === chatId);
+    if (row) return domainChatOverview({ ...row, blocked });
+    const contact = store.getContact(accountId, chatId);
+    return domainChatOverview({ id: chatId, name: contact?.name || null, picture: contact?.picture || null, unreadCount: 0, lastMessageTimestamp: 0, lastMessage: null, blocked });
   }
 
   async function subscribePresence(accountId, chatId) {
@@ -501,13 +592,14 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   async function getChatsOverview(accountId) {
     const rows = store.getChatsOverview(accountId, 200);
+    const blocked = store.blockedJids(accountId);
     return rows.map(row => {
       if (!row.name) {
         const contact = store.getContact(accountId, row.id);
         if (contact?.name) row = { ...row, name: contact.name };
         if (!row.picture && contact?.picture) row = { ...row, picture: contact.picture };
       }
-      return domainChatOverview(row);
+      return domainChatOverview({ ...row, blocked: blocked.has(row.id) });
     });
   }
 
@@ -516,7 +608,8 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     const rows = store.getMessagesPage(accountId, chatId, { limit, before });
     const views = rows.map(raw => messageView(raw, { accountId, chatId }));
     if (downloadMedia) await hydrateMedia(accountId, chatId, rows, views);
-    return views.map(view => withReaction(accountId, view));
+    const starred = store.starredMessageIds(accountId);
+    return views.map(view => withReaction(accountId, view, starred));
   }
 
   async function getMessage(accountId, chatId, messageId) {
@@ -528,9 +621,31 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return withReaction(accountId, view);
   }
 
-  function withReaction(accountId, view) {
+  function withReaction(accountId, view, starredSet) {
     const reaction = store.getReaction(accountId, view.id);
-    return reaction ? { ...view, reaction } : view;
+    const starred = starredSet ? starredSet.has(view.id) : store.isStarred(accountId, view.id);
+    let out = view;
+    if (reaction) out = { ...out, reaction };
+    if (starred) out = { ...out, starred: true };
+    return out;
+  }
+
+  async function setMessageStar(accountId, chatId, messageId, on) {
+    const { sock } = requireSocket(accountId);
+    const target = canonicalChatId(accountId, chatId);
+    const raw = store.getMessageById(accountId, target, messageId) || store.getMessageById(accountId, null, messageId);
+    if (!raw) throw Object.assign(new Error('Message not found'), { status: 404 });
+    await sock.chatModify({ star: { messages: [{ id: messageId, fromMe: Boolean(raw.key?.fromMe) }], star: Boolean(on) } }, target).catch(error => logger.warn({ error: error.message, accountId, messageId }, 'Remote star failed; applying locally anyway'));
+    store.setStarred(accountId, target, messageId, Boolean(on));
+    return { messageId, starred: Boolean(on) };
+  }
+
+  function getStarredMessages(accountId) {
+    return store.listStarred(accountId, 200).map(({ chatId, waMessage }) => ({
+      ...withReaction(accountId, messageView(waMessage, { accountId, chatId })),
+      chatId,
+      starred: true,
+    }));
   }
 
   // Pre-warms the media cache so `mediaUrl` resolves without a client
@@ -562,10 +677,11 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   return {
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
-    sendText, sendMedia, setReaction, deleteMessage, deleteChat, markChatRead,
+    sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState, setBlocked, setDisappearing,
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,
+    setMessageStar, getStarredMessages,
     getChatsOverview, getMessages, getMessage, downloadMedia,
     shutdown,
   };

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, resolveMentionLabels, bareJidUser, isGroupChatId, isLidJid, isSameIdentity, ackStatusName, ackStatusRank } from '../../src/domain/message.mjs';
+import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, resolveMentionLabels, bareJidUser, isGroupChatId, isLidJid, isSameIdentity, ackStatusName, ackStatusRank, editView, EDIT_WINDOW_SECONDS } from '../../src/domain/message.mjs';
 
 const ctx = { accountId: 'account-fixture', chatId: '551199999999@s.whatsapp.net' };
 const fixture = name => readFile(fileURLToPath(new URL(`../fixtures/providers/baileys/${name}`, import.meta.url)), 'utf8').then(JSON.parse);
@@ -234,6 +234,36 @@ test('messageView unwraps a view-once photo and flags it', async () => {
   assert.equal(view.body, 'one-time photo');
   assert.equal(view.location, null);
   assert.equal(view.poll, null);
+});
+
+test('editView extracts the target id and new text from a MESSAGE_EDIT protocol message', () => {
+  const view = editView({
+    key: { remoteJid: ctx.chatId, fromMe: false, id: 'edit-wrapper-1' },
+    messageTimestamp: 1735690000,
+    message: { protocolMessage: { key: { id: 'ORIGINAL1' }, type: 14, editedMessage: { conversation: 'the corrected text' }, timestampMs: 1735690123000 } },
+  });
+  assert.equal(view.targetMessageId, 'ORIGINAL1');
+  assert.equal(view.newText, 'the corrected text');
+  assert.equal(view.editedAt, 1735690123);
+});
+
+test('editView ignores a REVOKE protocol message', () => {
+  assert.equal(editView({ key: {}, message: { protocolMessage: { key: { id: 'X' }, type: 0 } } }), null);
+});
+
+test('messageView marks a sent text message editable within the 15-minute window', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const fresh = messageView({ key: { remoteJid: ctx.chatId, fromMe: true, id: 's1' }, messageTimestamp: now, message: { conversation: 'hi' } }, ctx);
+  assert.equal(fresh.editableUntil, now + EDIT_WINDOW_SECONDS);
+  const theirs = messageView({ key: { remoteJid: ctx.chatId, fromMe: false, id: 's2' }, messageTimestamp: now, message: { conversation: 'hi' } }, ctx);
+  assert.equal(theirs.editableUntil, null, 'someone else\'s message is never editable');
+  const media = messageView(JSON.parse(JSON.stringify({ key: { remoteJid: ctx.chatId, fromMe: true, id: 's3' }, messageTimestamp: now, message: { imageMessage: { caption: 'x', mimetype: 'image/jpeg' } } })), ctx);
+  assert.equal(media.editableUntil, null, 'media messages are not editable');
+});
+
+test('messageView reflects the stored edited flag', () => {
+  const view = messageView({ key: { remoteJid: ctx.chatId, fromMe: true, id: 's4' }, messageTimestamp: 1735690000, edited: true, message: { conversation: 'fixed' } }, ctx);
+  assert.equal(view.edited, true);
 });
 
 test('ackStatusName normalizes the numeric WhatsApp status enum to a stable name', () => {
