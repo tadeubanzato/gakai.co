@@ -14,11 +14,16 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
-import { freshPictureUrl } from './picture.mjs';
+import { freshPictureUrl, createPictureRefresher } from './picture.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
 import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, editView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
+// Avatar upkeep: shortly after an account connects, then on a fixed interval.
+// Only the chats the inbox can actually show are swept.
+const PICTURE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const PICTURE_REFRESH_START_DELAY_MS = 30 * 1000;
+const PICTURE_REFRESH_CHAT_LIMIT = 80;
 
 // Gakai's own presence vocabulary ('typing'/'recording'/'paused') maps onto
 // Baileys' WAPresence type ('composing'/'recording'/'paused'/'available'/
@@ -43,6 +48,25 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   const groupParticipantsCache = createBoundedCache({ limit: 500, ttlMs: 5 * 60 * 1000 });
 
   const accountDir = accountId => join(sessionsDir, accountId);
+
+  const pictureRefresher = createPictureRefresher({
+    listChatIds: accountId => store.getChatsOverview(accountId, PICTURE_REFRESH_CHAT_LIMIT).map(chat => chat.id),
+    getStoredPicture: (accountId, chatId) => store.getContact(accountId, chatId)?.picture || null,
+    isKnownMissing: (accountId, chatId) => Boolean(noPictureCache.get(`${accountId}:${chatId}`)),
+    refresh: (accountId, chatId) => lookupPicture(accountId, chatId),
+    // Renew anything that would expire before the next sweep comes round.
+    lookaheadMs: PICTURE_REFRESH_INTERVAL_MS,
+  });
+
+  function sweepPictures(accountId) {
+    const entry = accounts.get(accountId);
+    if (!entry || entry.status !== 'WORKING') return;
+    pictureRefresher.sweep(accountId, { isActive: () => accounts.get(accountId) === entry && entry.status === 'WORKING' })
+      .then(result => { if (result.checked) logger.info({ accountId, ...result }, 'Refreshed profile pictures'); })
+      .catch(error => logger.warn({ error: error.message, accountId }, 'Profile picture refresh failed'));
+  }
+  const pictureRefreshTimer = setInterval(() => { for (const accountId of accounts.keys()) sweepPictures(accountId); }, PICTURE_REFRESH_INTERVAL_MS);
+  pictureRefreshTimer.unref();
 
   function setStatus(accountId, status) {
     const entry = accounts.get(accountId);
@@ -78,6 +102,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
         // Fold any conversation that a previous session split across a
         // phone-JID chat and a LID chat back into one. Best-effort.
         reconcileLidChats(accountId).catch(error => logger.warn({ error: error.message, accountId }, 'LID chat reconciliation failed'));
+        setTimeout(() => sweepPictures(accountId), PICTURE_REFRESH_START_DELAY_MS).unref();
       }
       if (update.connection === 'connecting' && !entry.qr) entry.status = 'STARTING';
       if (update.connection === 'close') {
@@ -506,17 +531,24 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     const entry = accounts.get(accountId);
     const cacheKey = `${accountId}:${contactId}`;
     let picture = freshPictureUrl(cached?.picture);
-    if (!namesOnly && !picture && entry && !noPictureCache.get(cacheKey)) {
-      picture = (await entry.sock.profilePictureUrl(contactId, 'preview').catch(() => null)) || null;
-      if (picture) store.setContactPicture(accountId, contactId, picture);
-      else noPictureCache.set(cacheKey, true);
-    }
+    if (!namesOnly && !picture && entry && !noPictureCache.get(cacheKey)) picture = await lookupPicture(accountId, contactId);
     return {
       id: contactId,
       phone: cached?.phone || (jidDecode(contactId)?.server === 's.whatsapp.net' ? bareJidUser(contactId) : null),
       name: cached?.name || null,
       picture,
     };
+  }
+
+  // One live WhatsApp lookup, with the outcome recorded either way: a link is
+  // stored, a miss is remembered for a while (see noPictureCache).
+  async function lookupPicture(accountId, contactId) {
+    const entry = accounts.get(accountId);
+    if (!entry) return null;
+    const picture = (await entry.sock.profilePictureUrl(contactId, 'preview').catch(() => null)) || null;
+    if (picture) store.setContactPicture(accountId, contactId, picture);
+    else noPictureCache.set(`${accountId}:${contactId}`, true);
+    return picture;
   }
 
   function getContacts(accountId) { return store.getContacts(accountId); }
@@ -676,6 +708,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   }
 
   async function shutdown() {
+    clearInterval(pictureRefreshTimer);
     for (const [, entry] of accounts) { try { entry.sock.end(undefined); } catch {} }
   }
 
