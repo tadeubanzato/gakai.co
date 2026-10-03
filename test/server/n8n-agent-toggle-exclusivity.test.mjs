@@ -267,9 +267,9 @@ test('PATCH /automations/:id enabling a hand-authored automation does not distur
   assert.equal(config.nativeEnabled, true, 'a hand-authored automation is not a reply path and must not turn native replies off');
 });
 
-test('POST /n8n/connect/ai requires an LLM proxy to be configured first', async () => {
+test('POST /n8n/connect/ai requires AI Responses to be configured first', async () => {
   const response = await fetch(`${base}/api/app/accounts/agent-toggle-no-llm/n8n/connect/ai`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: '{}' });
   assert.equal(response.status, 400);
   const body = await response.json();
-  assert.match(body.message, /Connect an LLM proxy/i);
+  assert.match(body.message, /Set up AI Responses/i);
 });

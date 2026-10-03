@@ -236,8 +236,8 @@ simulated event at the workflow without messaging a real contact.
 
 ### Native AI replies
 
-1. Open the account's settings (⚙) → **Services → LLM Proxy**
-2. Enter an OpenAI-compatible proxy URL (e.g. LiteLLM, OmniRoute), an API key, and a model
+1. Open the account's settings (⚙) → **Services → AI Responses**
+2. Pick a provider — **LiteLLM** (your own proxy URL + key), **Claude**, or **ChatGPT** (your API key) — and enter the key. Gakai asks the provider which models that key can use and fills the **Model** dropdown from the answer
 3. Choose how replies are generated:
    - **Enable native AI replies** — Gakai sends the incoming message straight to the proxy and returns its response through WhatsApp, no n8n involved
    - **Enable n8n AI Agent replies** — Gakai builds/updates an AI Agent workflow in n8n and replies through that (requires n8n connected)

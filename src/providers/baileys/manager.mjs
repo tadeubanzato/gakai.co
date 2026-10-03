@@ -98,7 +98,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
       if (update.connection === 'open') {
         entry.qr = null;
         entry.status = 'WORKING';
-        entry.me = sock.user ? { id: sock.user.id, name: sock.user.name || sock.user.notify || null } : null;
+        entry.me = sock.user ? { id: sock.user.id, lid: sock.user.lid || null, name: sock.user.name || sock.user.notify || null } : null;
         // Fold any conversation that a previous session split across a
         // phone-JID chat and a LID chat back into one. Best-effort.
         reconcileLidChats(accountId).catch(error => logger.warn({ error: error.message, accountId }, 'LID chat reconciliation failed'));
@@ -318,6 +318,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
       phone: entry.me?.id && jidDecode(entry.me.id)?.server === 's.whatsapp.net' ? bareJidUser(entry.me.id) : null,
       profile: entry.me?.name || null,
       ownJid: entry.me?.id || null,
+      ownLid: entry.me?.lid || null,
     };
   }
 

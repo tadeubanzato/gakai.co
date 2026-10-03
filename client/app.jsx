@@ -1,9 +1,12 @@
 import React,{useCallback,useEffect,useMemo,useRef,useState}from"react";
-import{runExclusive,api}from"./app-helpers.mjs";
+import{runExclusive,api,compareChats}from"./app-helpers.mjs";
 import{Avatar,IconLogout,Menu,MenuItem}from"./ui-helpers.jsx";
 import{createRoot}from"react-dom/client";
 import{ChatPanel}from"./chat.jsx";
 import{ConfirmHost,confirmDialog}from"./confirm.jsx";
+import{AiProviderFields}from"./ai-responses.jsx";
+import{AiReplyRules}from"./ai-reply-rules.jsx";
+import{AdminProfileCard}from"./admin-profile.jsx";
 
 const slug=x=>String(x||"").trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
 const status=x=>({WORKING:"Connected",SCAN_QR_CODE:"Ready to scan",STARTING:"Starting WhatsApp",STOPPED:"Offline",FAILED:"Needs attention"})[x]||x||"Connecting";
@@ -17,7 +20,7 @@ function Login({setup,done,fail}){
     try{await api("/api/app/auth/"+(setup?"setup":"login"),{method:"POST",body:JSON.stringify({username:e.currentTarget.username.value,password:e.currentTarget.password.value,remember:e.currentTarget.remember?.checked||false})});done();return}
     catch(x){setError(x.message||"Sign in failed");fail(x.message)}
   };
-  return <main className="pairing"><section className="pair-card"><span className="eyebrow">GAKAI WORKSPACE</span><h1>{setup?"Create your administrator account":"Welcome back"}</h1><p>{setup?"This administrator account protects your Gakai workspace. Use it to connect, manage, and switch between multiple WhatsApp accounts.":"Sign in to manage your connected WhatsApp accounts."}</p><form onSubmit={go}>{error?<p className="form-error" role="alert">{error}</p>:null}<label>{setup?"Administrator username":"Username"}<input name="username" minLength="3" required autoComplete="username"/></label><label>{setup?"Administrator password":"Password"}<input name="password" type="password" minLength="10" required autoComplete={setup?"new-password":"current-password"}/></label><label className="check-row"><input name="remember" type="checkbox"/> Keep me logged in</label><button type="submit" className="primary wide">{setup?"Create administrator account":"Sign in"}</button></form></section></main>
+  return <main className="pairing"><section className="pair-card"><span className="eyebrow">GAKAI WORKSPACE</span><h1>{setup?"Create your administrator account":"Welcome back"}</h1><p>{setup?"This administrator account protects your Gakai workspace. Use it to connect, manage, and switch between multiple WhatsApp accounts.":"Sign in to manage your connected WhatsApp accounts."}</p><form onSubmit={go}>{error?<p className="form-error" role="alert">{error}</p>:null}<label>{setup?"Administrator username":"Username or email"}<input name="username" minLength="3" required autoComplete="username"/></label><label>{setup?"Administrator password":"Password"}<input name="password" type="password" minLength="10" required autoComplete={setup?"new-password":"current-password"}/></label><label className="check-row"><input name="remember" type="checkbox"/> Keep me logged in</label><button type="submit" className="primary wide">{setup?"Create administrator account":"Sign in"}</button></form></section></main>
 }
 
 function qrImage(value){const raw=typeof value==="string"?value:(value?.image||value?.qr||value?.value||value?.data||value?.code||value?.qrCode||value?.base64||value?.imageData||"");if(!raw)return null;if(/^data:image\//i.test(raw)||/^https?:\/\//i.test(raw))return raw;return "data:image/png;base64,"+raw}
@@ -38,6 +41,7 @@ function Pairing({account,onLinked,onCancel}){
 function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
   const[llm,setLlm]=useState(null),[n8n,setN8n]=useState(null),[profile,setProfile]=useState(null),[service,setService]=useState(null),[busy,setBusy]=useState(false),[testModal,setTestModal]=useState(null),[testResult,setTestResult]=useState(null);
   const base="/api/app/accounts/"+encodeURIComponent(account.id);
+  const llmFormRef=useRef(null);
   const[n8nWorkflowId,setN8nWorkflowId]=useState("");
   const refresh=useCallback(()=>Promise.all([api(base+"/llm"),api(base+"/n8n/connect"),api("/api/app/auth/profile")]).then(x=>{setLlm(x[0]);setN8n(x[1]);setProfile(x[2])}).catch(x=>onNotice(x.message)),[base,onNotice]);
   useEffect(()=>{refresh()},[refresh]);
@@ -49,7 +53,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
     return()=>window.removeEventListener("keydown",onKey);
   },[onClose,testModal]);
 
-  const saveLlm=async e=>{e.preventDefault();const f=e.currentTarget;const enteredKey=f.apiKey.value.trim(),next={configured:true,baseUrl:f.baseUrl.value.trim().replace(/\/+$/,"") ,model:f.model.value.trim(),systemPrompt:f.systemPrompt.value,nativeEnabled:llm?.nativeEnabled||false,apiKeyLast4:enteredKey?enteredKey.slice(-4):llm?.apiKeyLast4||""};setBusy(true);try{const result=await api(base+"/llm",{method:"POST",body:JSON.stringify({baseUrl:next.baseUrl,apiKey:enteredKey||"__keep__",model:next.model,systemPrompt:next.systemPrompt,n8nWorkflowId})});setLlm(next);await refresh();onNotice(result.n8nAgentExampleAdded?"LLM Proxy saved. Gakai added an AI Agent example to the selected n8n workflow—connect it where you need it.":"LLM Proxy saved and verified.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  const saveLlm=async e=>{e.preventDefault();const f=e.currentTarget;const enteredKey=f.apiKey.value.trim(),next={configured:true,provider:f.provider.value,baseUrl:f.baseUrl.value.trim().replace(/\/+$/,"") ,model:f.model.value.trim(),systemPrompt:f.systemPrompt.value,nativeEnabled:llm?.nativeEnabled||false,apiKeyLast4:enteredKey?enteredKey.slice(-4):llm?.apiKeyLast4||""};setBusy(true);try{const result=await api(base+"/llm",{method:"POST",body:JSON.stringify({provider:next.provider,baseUrl:next.baseUrl,apiKey:enteredKey||"__keep__",model:next.model,systemPrompt:next.systemPrompt,n8nWorkflowId})});setLlm(next);await refresh();onNotice(result.n8nAgentExampleAdded?"AI Responses saved. Gakai added an AI Agent example to the selected n8n workflow—connect it where you need it.":"AI Responses saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   // Immediate "Enable native AI replies" toggle — matches setN8nAgentEnabled's
   // immediacy so both mutually-exclusive reply paths behave the same way.
   const setNativeEnabled=async enabled=>{
@@ -57,12 +61,12 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
     try{
       const result=await api(base+"/llm/native",{method:"PATCH",body:JSON.stringify({nativeEnabled:enabled})});
       await refresh();
-      onNotice(enabled&&result?.n8nWorkflowsDeactivated?"Native AI replies are on. Gakai will reply directly through the proxy; both n8n reply workflows are inactive.":enabled?"Native AI replies enabled.":"Native AI replies disabled.");
+      onNotice(enabled&&result?.n8nWorkflowsDeactivated?"Native AI replies are on. Gakai will reply directly through your AI provider; both n8n reply workflows are inactive.":enabled?"Native AI replies enabled.":"Native AI replies disabled.");
     }catch(x){onNotice(x.message)}finally{setBusy(false)}
   };
   const connectN8n=async e=>{e.preventDefault();const f=e.currentTarget;const n8nUrl=f.n8nUrl.value.trim().replace(/\/+$/,"");const enteredKey=f.n8nApiKey.value.trim();setBusy(true);try{const result=await api(base+"/n8n/connect",{method:"POST",body:JSON.stringify({n8nUrl,n8nApiKey:enteredKey||"__keep__"})});setN8n(current=>({...current,connected:true,n8nUrl,n8nApiKeyLength:enteredKey.length||current?.n8nApiKeyLength||0,n8nApiKeyLast4:enteredKey?enteredKey.slice(-4):current?.n8nApiKeyLast4||"",workflows:result.workflowId?[...(current?.workflows||[]).filter(workflow=>workflow.kind!=="standard"),{kind:"standard",workflowId:result.workflowId,workflowName:result.workflowName,workflowUrl:result.workflowUrl}]:current?.workflows||[]}));await refresh();onNotice(result.reused?"n8n connection verified.":"n8n workflow created and connected.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const saveName=async e=>{e.preventDefault();const label=e.currentTarget.label.value.trim();if(!label)return;setBusy(true);try{await api(base+"/label",{method:"PATCH",body:JSON.stringify({label})});onRenamed?.(account.id,label);onNotice("Account name saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
-  const saveProfile=async e=>{e.preventDefault();const f=e.currentTarget;setBusy(true);try{const result=await api("/api/app/auth/profile",{method:"PATCH",body:JSON.stringify({username:f.username.value,currentPassword:f.currentPassword.value,newPassword:f.newPassword.value})});setProfile(current=>({...current,username:result.username}));f.currentPassword.value="";f.newPassword.value="";onNotice("Sign-in details saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  const saveProfile=async payload=>{setBusy(true);try{const result=await api("/api/app/auth/profile",{method:"PATCH",body:JSON.stringify(payload)});setProfile(current=>({...current,username:result.username,email:result.email}));onNotice("Sign-in details saved.");return true}catch(x){onNotice(x.message);return false}finally{setBusy(false)}};
   const del=async()=>{if(!await confirmDialog({title:"Delete this account?",message:`${account.label} will be removed from Gakai and its linked WhatsApp session cleared. You can add and scan it again later.`,confirmLabel:"Delete account",danger:true}))return;setBusy(true);try{await api(base,{method:"DELETE"});onDeleted()}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   // "Enable n8n AI Agent replies": one action for both first-time setup
   // (creates the n8n workflow) and re-enabling an existing one — the server
@@ -100,7 +104,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
         await refresh();
       }else{
         const result=await api(base+"/llm/test",{method:"POST",body:JSON.stringify({prompt:text,phone})});
-        setTestResult({ok:true,text:result.delivered?`Reply from LLM Proxy: "${result.reply}" — sent to ${phone}`:`LLM Proxy replied: "${result.reply}" (enter a phone number above to actually deliver it to WhatsApp)`});
+        setTestResult({ok:true,text:result.delivered?`Reply from AI Responses: "${result.reply}" — sent to ${phone}`:`AI Responses replied: "${result.reply}" (enter a phone number above to actually deliver it to WhatsApp)`});
       }
     }catch(x){
       setTestResult({ok:false,text:x.message});
@@ -108,17 +112,17 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
       setBusy(false);
     }
   };
-  const deleteIntegration=async kind=>{const label=kind==="n8n"?"n8n automation":"LLM Proxy";if(!await confirmDialog({title:`Delete ${label} integration?`,message:`The ${label} integration for ${account.label} will be removed.`,confirmLabel:"Delete integration",danger:true}))return;setBusy(true);try{await api(base+(kind==="n8n"?"/n8n/connect":"/llm"),{method:"DELETE"});await refresh();onNotice(`${label} integration deleted.`)}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  const deleteIntegration=async kind=>{const label=kind==="n8n"?"n8n automation":"AI Responses";if(!await confirmDialog({title:`Delete ${label} integration?`,message:`The ${label} integration for ${account.label} will be removed.`,confirmLabel:"Delete integration",danger:true}))return;setBusy(true);try{await api(base+(kind==="n8n"?"/n8n/connect":"/llm"),{method:"DELETE"});await refresh();onNotice(`${label} integration deleted.`)}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const toggleAutomation=async(subscriptionId,enabled,label)=>{if(!subscriptionId)return;setBusy(true);try{const result=await api(base+"/automations/"+encodeURIComponent(subscriptionId),{method:"PATCH",body:JSON.stringify({enabled})});await refresh();onNotice(enabled&&result.aiWorkflowUnpublished?"n8n replies are on. The AI Agent workflow is now inactive.":enabled&&result.aiWorkflowMissing?"n8n replies are on. The old AI Agent workflow no longer exists in n8n.":enabled&&result.standardWorkflowRecreated?"n8n replies are on. A new standard workflow was created and activated.":enabled?"n8n replies are on and the workflow is active.":result.n8nWorkflowsDeactivated?"n8n replies are off. Both n8n workflows are inactive.":"n8n replies are off.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
 
   const services={
+    llm:{title:"AI Responses",subtitle:"AI replies",ready:!!llm?.configured},
     n8n:{title:"n8n Automation",subtitle:"Automation",ready:!!n8n?.connected},
-    llm:{title:"LLM Proxy",subtitle:"AI replies",ready:!!llm?.configured},
   };
   const agentWorkflow=n8n?.workflows?.find(workflow=>workflow.kind==="agentic");
   const standardWorkflow=n8n?.workflows?.find(workflow=>workflow.kind==="standard");
   useEffect(()=>{if(agentWorkflow?.workflowId)setN8nWorkflowId(agentWorkflow.workflowId)},[agentWorkflow?.workflowId]);
-  const detail=service==="n8n"?<><h3>n8n Automation</h3><p>Create Gakai’s standard automation template in your n8n instance. It contains no AI node.</p>{standardWorkflow?<div className="workflow-links"><a href={standardWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`n8n workflow (${standardWorkflow.workflowId})`}</span><b>{standardWorkflow.workflowName||"Gakai"}</b><em>Open in n8n ↗</em></a></div>:null}{standardWorkflow?.subscriptionId?<label className="checkbox-field"><input type="checkbox" checked={!!standardWorkflow.active} disabled={busy} onChange={e=>toggleAutomation(standardWorkflow.subscriptionId,e.currentTarget.checked,"n8n replies")}/><span><b>Enable n8n replies</b><small>Route direct messages, and group messages where you're tagged, through this n8n automation. Turns off native AI replies and n8n AI Agent replies.</small></span></label>:null}{standardWorkflow?.subscriptionId?<button type="button" className="secondary n8n-test-action" onClick={()=>{setTestModal({kind:"n8n",subscriptionId:standardWorkflow.subscriptionId});setTestResult(null)}}>Send test message</button>:null}<form key={`n8n-${n8n?.n8nUrl||"new"}`} className="integration-form integration-form-stacked" onSubmit={connectN8n}><label>n8n URL<input name="n8nUrl" type="url" defaultValue={n8n?.n8nUrl||""} placeholder="https://yourname.app.n8n.cloud" required/></label><label>n8n API key<input name="n8nApiKey" type="password" placeholder="Paste a replacement n8n API key" required={!n8n?.connected}/>{n8n?.connected&&<small className="saved-key-mask">Saved key: ••••…••{n8n.n8nApiKeyLast4}</small>}</label><button className="primary integration-submit" disabled={busy}>{busy?"Verifying authorization…":"Save and verify authorization"}</button></form></>:service==="llm"?<><h3>LLM Proxy</h3><p>Connect LiteLLM or OmniRoute for AI-powered replies.</p>{agentWorkflow?<div className="workflow-links"><a href={agentWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`AI Agent workflow (${agentWorkflow.workflowId})`}</span><b>{agentWorkflow.workflowName||"Gakai AI Agent"}</b><em>Open in n8n ↗</em></a></div>:null}{llm?.configured?<button type="button" className="secondary llm-test-action" onClick={()=>{const useAgent=!!agentWorkflow?.active&&!!agentWorkflow?.subscriptionId;setTestModal(useAgent?{kind:"n8n",subscriptionId:agentWorkflow.subscriptionId}:{kind:"llm"});setTestResult(null)}}>Send test message{agentWorkflow?.active?" (via n8n AI Agent)":""}</button>:null}<form key={`llm-${llm?.baseUrl||"new"}-${llm?.model||""}`} className="integration-form integration-form-stacked" onSubmit={saveLlm}><label>Proxy URL<input name="baseUrl" type="url" defaultValue={llm?.baseUrl||""} placeholder="https://proxy.example/v1" required/></label><label>Proxy API key<input name="apiKey" type="password" placeholder="Paste a replacement proxy API key" required={!llm?.configured}/>{llm?.configured&&<small className="saved-key-mask">Saved key: ••••…••{llm.apiKeyLast4}</small>}</label><label>Model<input name="model" defaultValue={llm?.model||""} placeholder="oc/nemotron-3-ultra-free" required/></label><label>Assistant instructions<textarea name="systemPrompt" rows="6" defaultValue={llm?.systemPrompt||""}/></label>{llm?.configured&&n8n?.connected?<label className="checkbox-field"><input type="checkbox" checked={!!agentWorkflow?.active} disabled={busy} onChange={e=>setN8nAgentEnabled(e.currentTarget.checked)}/><span><b>Enable n8n AI Agent replies</b><small>Creates or updates the n8n AI Agent workflow and replies through it — direct messages, and group messages where you're tagged. Turns off native AI replies and standard n8n replies.</small></span></label>:llm?.configured?<p className="hint-inline"><small>Connect n8n in the n8n Automation panel to enable AI Agent replies through n8n.</small></p>:null}{llm?.configured?<label className="checkbox-field"><input type="checkbox" checked={!!llm?.nativeEnabled} disabled={busy} onChange={e=>setNativeEnabled(e.currentTarget.checked)}/><span><b>Enable native AI replies (no n8n)</b><small>Gakai sends the incoming message to this proxy and returns its response straight through WhatsApp. It turns off and deactivates both n8n reply workflows.</small></span></label>:null}<button className="primary integration-submit" disabled={busy}>{busy?"Verifying proxy…":"Save and verify proxy"}</button></form></>:<><h3>Select services</h3><p>Choose a service to configure it for <b>{account.label}</b>.</p></>;
+  const detail=service==="n8n"?<><h3>n8n Automation</h3><p>Create Gakai’s standard automation template in your n8n instance. It contains no AI node.</p>{standardWorkflow?<div className="workflow-links"><a href={standardWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`n8n workflow (${standardWorkflow.workflowId})`}</span><b>{standardWorkflow.workflowName||"Gakai"}</b><em>Open in n8n ↗</em></a></div>:null}{standardWorkflow?.subscriptionId?<label className="checkbox-field"><input type="checkbox" checked={!!standardWorkflow.active} disabled={busy} onChange={e=>toggleAutomation(standardWorkflow.subscriptionId,e.currentTarget.checked,"n8n replies")}/><span><b>Enable n8n replies</b><small>Route direct messages, and group messages where you're tagged, through this n8n automation. Turns off native AI replies and n8n AI Agent replies.</small></span></label>:null}{standardWorkflow?.subscriptionId?<button type="button" className="secondary n8n-test-action" onClick={()=>{setTestModal({kind:"n8n",subscriptionId:standardWorkflow.subscriptionId});setTestResult(null)}}>Send test message</button>:null}<form key={`n8n-${n8n?.n8nUrl||"new"}`} className="integration-form integration-form-stacked" onSubmit={connectN8n}><label>n8n URL<input name="n8nUrl" type="url" defaultValue={n8n?.n8nUrl||""} placeholder="https://yourname.app.n8n.cloud" required/></label><label>n8n API key<input name="n8nApiKey" type="password" placeholder="Paste a replacement n8n API key" required={!n8n?.connected}/>{n8n?.connected&&<small className="saved-key-mask">Saved key: ••••…••{n8n.n8nApiKeyLast4}</small>}</label><button className="primary integration-submit" disabled={busy}>{busy?"Verifying authorization…":"Save and verify authorization"}</button></form></>:service==="llm"?<><h3>AI Responses</h3><p>Choose who writes your replies: your own LiteLLM proxy, Claude, or ChatGPT. Enter a key and Gakai lists the models available to it.</p>{agentWorkflow?<div className="workflow-links"><a href={agentWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`AI Agent workflow (${agentWorkflow.workflowId})`}</span><b>{agentWorkflow.workflowName||"Gakai AI Agent"}</b><em>Open in n8n ↗</em></a></div>:null}{llm?.configured?<button type="button" className="secondary llm-test-action" onClick={()=>{const useAgent=!!agentWorkflow?.active&&!!agentWorkflow?.subscriptionId;setTestModal(useAgent?{kind:"n8n",subscriptionId:agentWorkflow.subscriptionId}:{kind:"llm"});setTestResult(null)}}>Send test message{agentWorkflow?.active?" (via n8n AI Agent)":""}</button>:null}<form key={`llm-${llm?.provider||"new"}-${llm?.baseUrl||""}-${llm?.model||""}`} className="integration-form integration-form-stacked" ref={llmFormRef} onSubmit={saveLlm}><AiProviderFields llm={llm} base={base} busy={busy} onCommit={()=>llmFormRef.current?.requestSubmit()}/><label>Assistant instructions<textarea name="systemPrompt" rows="6" defaultValue={llm?.systemPrompt||""} onBlur={e=>{if(llm?.configured&&e.currentTarget.value.trim()!==String(llm.systemPrompt||"").trim())llmFormRef.current?.requestSubmit()}}/></label>{llm?.configured&&n8n?.connected?<label className="checkbox-field"><input type="checkbox" checked={!!agentWorkflow?.active} disabled={busy} onChange={e=>setN8nAgentEnabled(e.currentTarget.checked)}/><span><b>Enable n8n AI Agent replies</b><small>Creates or updates the n8n AI Agent workflow and replies through it — direct messages, and group messages where you're tagged. Turns off native AI replies and standard n8n replies.</small></span></label>:llm?.configured?<p className="hint-inline"><small>Connect n8n in the n8n Automation panel to enable AI Agent replies through n8n.</small></p>:null}</form>{llm?.configured?<AiReplyRules key={account.id} llm={llm} base={base} onNotice={onNotice} onSaved={result=>setLlm(current=>({...current,replyRules:result.replyRules,replyLabels:result.replyLabels}))}/>:null}{llm?.configured?<label className="checkbox-field"><input type="checkbox" checked={!!llm?.nativeEnabled} disabled={busy} onChange={e=>setNativeEnabled(e.currentTarget.checked)}/><span><b>Enable native AI replies (no n8n)</b><small>Gakai sends the incoming message to your AI provider and returns its response straight through WhatsApp. It turns off and deactivates both n8n reply workflows.</small></span></label>:null}</>:<><h3>Select services</h3><p>Choose a service to configure it for <b>{account.label}</b>.</p></>;
 
   return <div className="details" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <header className="details-head">
@@ -134,13 +138,13 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
         <section className="details-card"><h3>Integrations</h3><p>Connect automation, AI, or custom services with separate account-scoped settings.</p><small>Keys and configuration stay isolated to this WhatsApp account.</small></section>
       </div>
       <section className="details-card services"><div className="services-list"><h3>Services</h3>{Object.entries(services).map(([key,item])=><button key={key} data-service={key} type="button" className={(service===key?"on ":"")+(item.ready?"has-integration":"")} onClick={()=>{setService(key);setTestModal(null);setTestResult(null)}}>{item.title}<small>{item.subtitle}</small>{item.ready?<span className="integration-check" aria-label="Connected">✓</span>:null}</button>)}</div><div className="service-detail">{detail}{service==="n8n"&&n8n?.connected?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("n8n")}>Delete integration</button>:null}{service==="llm"&&llm?.configured?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("llm")}>Delete integration</button>:null}</div></section>
-      <section className="details-card security"><h3>Administrator profile</h3><p>Update your workspace username or password.</p><form onSubmit={saveProfile}><input name="username" defaultValue={profile?.username||""} placeholder="Username" minLength="3"/><input name="currentPassword" type="password" placeholder="Current password" required/><input name="newPassword" type="password" placeholder="New password (optional)" minLength="10"/><button className="primary" disabled={busy}>Save sign-in details</button></form></section>
+      <AdminProfileCard profile={profile} busy={busy} onSave={saveProfile}/>
       <div className="details-delete"><div><h3>Delete account</h3><p>Remove this WhatsApp account from Gakai. You can add and scan it again later.</p></div><button type="button" className="danger" disabled={busy} onClick={del}>{busy?"Deleting…":"Delete account"}</button></div>
     </main>
     {testModal&&<div className="modal-overlay" role="presentation" onClick={()=>setTestModal(null)}>
       <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="test-message-title" onClick={e=>e.stopPropagation()}>
         <h3 id="test-message-title">Send test message</h3>
-        <p>{testModal.kind==="n8n"?"Send a simulated WhatsApp message to your n8n automation.":"Send a test prompt to your LLM proxy. Add a phone number to also deliver the reply to WhatsApp."}</p>
+        <p>{testModal.kind==="n8n"?"Send a simulated WhatsApp message to your n8n automation.":"Send a test prompt to your AI provider. Add a phone number to also deliver the reply to WhatsApp."}</p>
         <form className="integration-form" onSubmit={sendTestMessage}>
           <label>Phone number<input name="phone" type="tel" placeholder="Optional — e.g. 15551234567"/></label>
           <label>Message<textarea name="text" rows="3" placeholder="This is a Gakai test event." required/></label>
@@ -206,6 +210,13 @@ function NewChatDialog({accountId,onClose,onOpened}){
 function App(){
   const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState(""),[newChat,setNewChat]=useState(false);
   const[chatFilter,setChatFilter]=useState("all");
+  // The vertical menu can shrink to just the logo and account avatars. The
+  // choice is remembered per browser; storage can be blocked, so it is optional.
+  const[sidebarCollapsed,setSidebarCollapsed]=useState(()=>{try{return window.localStorage.getItem("gakai.sidebar")==="collapsed"}catch{return false}});
+  const rememberSidebar=collapsed=>{try{window.localStorage.setItem("gakai.sidebar",collapsed?"collapsed":"expanded")}catch{}};
+  // Saved in the browser (instant, no flash on reload) and on the server, so the
+  // next login — in any browser — opens the menu the way it was left.
+  const toggleSidebar=()=>{const next=!sidebarCollapsed;setSidebarCollapsed(next);rememberSidebar(next);api("/api/app/preferences",{method:"PATCH",body:JSON.stringify({sidebarCollapsed:next})}).catch(()=>{})};
   const[archivedChats,setArchivedChats]=useState([]);
   const[starredMessages,setStarredMessages]=useState([]);
   const settingsRef=useRef(null);
@@ -302,7 +313,7 @@ function App(){
       const knownPictures=new Map((chatsCacheRef.current.get(id)||[]).filter(chat=>chat.picture).map(chat=>[chat.id,chat.picture]));
       const next=(Array.isArray(d)?d:d.chats||[])
         .map(chat=>!chat.picture&&knownPictures.get(chat.id)?{...chat,picture:knownPictures.get(chat.id)}:chat)
-        .sort((left,right)=>Number(right.timestamp||right.lastMessage?.timestamp||0)-Number(left.timestamp||left.lastMessage?.timestamp||0));
+        .sort(compareChats);
       chatsCacheRef.current.set(id,next);
       setChats(next);
       // A working inbox should open on a useful conversation, not a blank
@@ -412,6 +423,13 @@ function App(){
 
   useEffect(()=>{api("/api/app/auth/state").then(setAuth).catch(x=>fail(x.message))},[fail]);
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);
+  // Once signed in, the server's saved menu state wins over this browser's.
+  useEffect(()=>{
+    if(!auth?.authenticated)return undefined;
+    let live=true;
+    api("/api/app/preferences").then(saved=>{if(live&&typeof saved.sidebarCollapsed==="boolean"){setSidebarCollapsed(saved.sidebarCollapsed);rememberSidebar(saved.sidebarCollapsed)}}).catch(()=>{});
+    return()=>{live=false};
+  },[auth?.authenticated]);
   useEffect(()=>{suppressAutoSelectRef.current=false;setChat();setChats(chatsCacheRef.current.get(account?.id)||[]);if(account?.status==="WORKING")load(account.id)},[account?.id,account?.status,load]);
 
   const logout=async()=>{if(!await confirmDialog({title:"Log off?",message:"You'll need your administrator username and password to sign back in.",confirmLabel:"Log off"}))return;await api("/api/app/auth/logout",{method:"POST"}).catch(()=>{});window.location.assign("/")};
@@ -460,7 +478,7 @@ function App(){
     if(!newChatOverview?.id||!account)return;
     setNewChat(false);
     setChats(current=>{
-      const next=[newChatOverview,...current.filter(c=>c.id!==newChatOverview.id)];
+      const next=[newChatOverview,...current.filter(c=>c.id!==newChatOverview.id)].sort(compareChats);
       chatsCacheRef.current.set(account.id,next);
       return next;
     });
@@ -525,12 +543,12 @@ function App(){
       ...( 'pin' in body?{pinned:body.pin}:{}),
       ...( 'archive' in body?{archived:body.archive}:{}),
       ...( 'mute' in body?{muted:body.mute>0}:{})}:chatItem;
-    setChats(current=>{const next=current.map(patch).filter(c=>!c.archived);chatsCacheRef.current.set(account.id,next);return next;});
+    setChats(current=>{const next=current.map(patch).filter(c=>!c.archived).sort(compareChats);chatsCacheRef.current.set(account.id,next);return next;});
     setArchivedChats(current=>current.map(patch).filter(c=>c.archived));
     try{
       const {chat:updated}=await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(targetChat.id)+"/state",{method:"POST",body:JSON.stringify(body)});
       const merge=chatItem=>chatItem.id===updated.id?{...chatItem,...updated}:chatItem;
-      setChats(current=>{const next=current.map(merge).filter(c=>!c.archived);chatsCacheRef.current.set(account.id,next);return next;});
+      setChats(current=>{const next=current.map(merge).filter(c=>!c.archived).sort(compareChats);chatsCacheRef.current.set(account.id,next);return next;});
       setArchivedChats(current=>{const has=current.some(c=>c.id===updated.id);const merged=has?current.map(merge):[updated,...current];return merged.filter(c=>c.archived);});
       if(account)load(account.id);
     }catch(x){fail(x.message||"Could not update this conversation");if(account)load(account.id);}
@@ -554,6 +572,25 @@ function App(){
       setChats(current=>{const next=current.map(patch);chatsCacheRef.current.set(account.id,next);return next;});
       setChat(current=>current?.id===updated.id?{...current,...updated}:current);
     }catch(x){fail(x.message||"Could not update disappearing messages");}
+  },[account,fail]);
+
+  // Turn the AI on or off for one conversation (it joins or leaves the AI
+  // reply list). Optimistic, then reconciled with what the server stored.
+  const aiToggleAction=useCallback(async targetChat=>{
+    if(!account||!targetChat?.id)return;
+    const enabled=!targetChat.aiReply,label=targetChat.name||targetChat.id;
+    const patch=extra=>c=>c.id===targetChat.id?{...c,...extra}:c;
+    const apply=extra=>{
+      setChats(current=>{const next=current.map(patch(extra));chatsCacheRef.current.set(account.id,next);return next});
+      setChat(current=>current?.id===targetChat.id?{...current,...extra}:current);
+    };
+    apply({aiReply:enabled});
+    try{
+      const {chat:updated}=await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(targetChat.id)+"/ai",{method:"POST",body:JSON.stringify({enabled})});
+      apply({aiReply:updated.aiReply,aiActive:updated.aiActive});
+      setNote(enabled?(updated.aiActive?`AI replies on for ${label}`:`${label} added to the AI reply list — turn on AI replies in Settings to start`):`AI replies off for ${label}`);
+      setTimeout(()=>setNote(""),4500);
+    }catch(x){apply({aiReply:!enabled});fail(x.message||"Could not update AI replies for this conversation");}
   },[account,fail]);
 
   // Load the archived list only while that tab is active.
@@ -590,6 +627,17 @@ function App(){
     fail("Conversation deleted");
   },[account,fail]);
 
+  // Same delete the open conversation's menu offers, available from the list.
+  const deleteChatAction=useCallback(async targetChat=>{
+    if(!account||!targetChat?.id)return;
+    const confirmed=await confirmDialog({title:"Delete conversation?",message:`The conversation with ${targetChat.name||targetChat.id} will be removed from WhatsApp. This can't be undone.`,confirmLabel:"Delete conversation",danger:true});
+    if(!confirmed)return;
+    try{
+      await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(targetChat.id),{method:"DELETE"});
+      handleChatDeleted(targetChat.id);
+    }catch(x){fail(x.message||"Could not delete this conversation");}
+  },[account,fail,handleChatDeleted]);
+
   if(!auth)return <main className="pairing">Loading Gakai…</main>;
   if(!auth.authenticated)return <Login setup={!!auth.setup} done={()=>location.reload()} fail={fail}/>;
   if(!accountsReady)return <main className="pairing">Loading your workspace…</main>;
@@ -604,29 +652,41 @@ function App(){
     </div>)}
   </div>;
   const closeSettings=()=>{history.pushState({},"","/");setSettings(false)};
+  const openAccountSettings=x=>{history.pushState({},"","/details/"+slug(x.label));setAccount(x);setSettings(true)};
   const accountDeleted=async()=>{history.replaceState({},"","/");setSettings(false);setChat();await refresh()};
   if(settings&&account)return <><Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>{note?<div className="toast" role="status">{note}</div>:null}{mentionToastStack}</>;
 
   return (
     <>
-      <div className="app">
+      <div className={"app"+(sidebarCollapsed?" sidebar-collapsed":"")}>
         <aside className="sidebar">
-          <div className="logo"><b>G</b>Gakai</div>
+          <div className="sidebar-head">
+            <div className="logo" {...(sidebarCollapsed?{role:"button",tabIndex:0,title:"Expand menu","aria-label":"Expand menu","aria-expanded":false,onClick:toggleSidebar,onKeyDown:event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();toggleSidebar()}}}:{})}><img className="logo-mark" src="/logo.png" alt="" width="34" height="34" draggable="false"/><span className="logo-word">Gakai</span></div>
+            {!sidebarCollapsed&&<button type="button" className="sidebar-toggle" onClick={toggleSidebar} aria-expanded="true" aria-label="Collapse menu" title="Collapse menu">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M15 6l-6 6 6 6"/></svg>
+            </button>}
+          </div>
           <div className="account-switch">
-            {accounts.map(x=><div className="account-row" key={x.id}>
-              <button className={"account "+(x.id===account?.id?"selected":"")} onClick={()=>setAccount(x)}>
-                <i className={x.hasUnread?"good":""}/>
-                <Avatar item={x}/>
-                <span><b>{x.label}</b><small>{status(x.status)}</small></span>
-              </button>
-              <button type="button" className="account-cog" title="Account details" aria-label={"Open settings for "+x.label} onClick={()=>{history.pushState({},'','/details/'+slug(x.label));setAccount(x);setSettings(true)}}>⚙</button>
-            </div>)}
+            <h3 className="sidebar-title">WhatsApp accounts</h3>
+            {accounts.map(x=>sidebarCollapsed
+              ? <button type="button" key={x.id} className={"account-mini"+(x.id===account?.id?" selected":"")} title={x.label+" — account settings"} aria-label={"Open settings for "+x.label} onClick={()=>openAccountSettings(x)}>
+                  <span className="mini-avatar"><Avatar item={x}/>{x.hasUnread?<i className="good" aria-hidden="true"/>:null}</span>
+                  <small>{x.label}</small>
+                </button>
+              : <div className="account-row" key={x.id}>
+                  <button className={"account "+(x.id===account?.id?"selected":"")} onClick={()=>setAccount(x)}>
+                    <i className={x.hasUnread?"good":""}/>
+                    <Avatar item={x}/>
+                    <span><b>{x.label}</b><small>{status(x.status)}</small></span>
+                  </button>
+                  <button type="button" className="account-cog" title="Account details" aria-label={"Open settings for "+x.label} onClick={()=>openAccountSettings(x)}>⚙</button>
+                </div>)}
             {/* Mobile account switcher dropdown */}
             {accounts.length>1 && <select className="mobile-account-switcher" value={account?.id||""} onChange={e=>{const id=e.target.value; if(id) setAccount(accounts.find(a=>a.id===id))}} aria-label="Switch WhatsApp account">
               {accounts.map(a=><option key={a.id} value={a.id}>{a.label} {a.status==="WORKING"?"✓":""}</option>)}
             </select>}
           </div>
-          <button type="button" className="logout subtle-btn" onClick={logout}><IconLogout/> Log off</button>
+          <button type="button" className="logout subtle-btn" onClick={logout} title="Log off" aria-label="Log off"><IconLogout/><span className="logout-label"> Log off</span></button>
         </aside>
         <main className="main">
           <header>
@@ -659,6 +719,7 @@ function App(){
                   {x.unreadCount?<span className="unread-pill">{x.unreadCount}</span>:null}
                 </button>
                 <Menu label={"Actions for "+(x.name||x.id)} className="chat-row-menu">
+                  <MenuItem toggled={!!x.aiReply} onSelect={()=>aiToggleAction(x)}>AI replies - {x.aiReply?"On":"Off"}</MenuItem>
                   <MenuItem onSelect={()=>chatStateAction(x,{pin:!x.pinned})}>{x.pinned?"Unpin":"Pin"} chat</MenuItem>
                   {x.muted
                     ? <MenuItem onSelect={()=>chatStateAction(x,{mute:0})}>Unmute</MenuItem>
@@ -668,11 +729,12 @@ function App(){
                         <MenuItem onSelect={()=>chatStateAction(x,{mute:60*60*24*365})}>Mute always</MenuItem>
                       </>}
                   <MenuItem onSelect={()=>chatStateAction(x,{archive:!x.archived})}>{x.archived?"Unarchive":"Archive"}</MenuItem>
+                  <MenuItem danger onSelect={()=>deleteChatAction(x)}>Delete conversation</MenuItem>
                 </Menu>
               </div>)}
               {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">{chatFilter==="archived"?"No archived conversations.":chats.length?"No conversations match this filter.":"No conversations yet. Gakai is waiting for WhatsApp to finish syncing."}</p>:null}
             </section>
-            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} chats={chats} onBack={()=>setChat()} onSent={handleSent} onForwarded={handleForwarded} onChatState={chatStateAction} onBlock={blockAction} onDisappearing={disappearingAction} onDeleted={handleChatDeleted}/>:<div className="blank">Select a conversation</div>}</section>
+            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} chats={chats} onBack={()=>setChat()} onSent={handleSent} onForwarded={handleForwarded} onChatState={chatStateAction} onBlock={blockAction} onDisappearing={disappearingAction} onDeleted={handleChatDeleted} onAiToggle={aiToggleAction}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
         </main>
       </div>

@@ -23,7 +23,7 @@ const { server, store, dispatchAutomationEvent } = await import('../../server.mj
 after(() => { server.close(); mockLlmProxy.close(); });
 
 function llmConfigFor(accountId) {
-  return { accountId, provider: 'omniroute', baseUrl: `http://127.0.0.1:${mockLlmProxyPort}`, apiKey: 'test-key', model: 'test-model', systemPrompt: '', nativeEnabled: true, configuredAt: new Date().toISOString() };
+  return { accountId, provider: 'omniroute', baseUrl: `http://127.0.0.1:${mockLlmProxyPort}`, apiKey: 'test-key', model: 'test-model', systemPrompt: '', nativeEnabled: true, replyRules: { numbers: ['5511999999999'], groups: [] }, configuredAt: new Date().toISOString() };
 }
 
 async function dispatchMessage(accountId, messageId, overrides = {}) {

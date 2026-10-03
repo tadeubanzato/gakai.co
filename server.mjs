@@ -11,6 +11,10 @@ import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
 import { createBoundedCache } from './src/lib/lru-cache.mjs';
 import { decodeHtmlEntities } from './src/lib/html.mjs';
 import { isRecoverableStreamError } from './src/lib/process-guard.mjs';
+import { normalizeEmail, loginNamesAdmin } from './src/domain/admin-identity.mjs';
+import { normalizeReplyRules, shouldAiReply, isChatListed, setChatListed } from './src/domain/ai-reply-rules.mjs';
+import { searchPeople, searchGroups, resolveRuleLabels } from './src/domain/reply-targets.mjs';
+import { AI_PROVIDER_IDS, FIXED_BASE_URLS, usesFixedBaseUrl, listModels as listAiModels, complete as aiComplete } from './src/lib/ai-provider.mjs';
 
 const port = Number(process.env.PORT || 3000);
 // Encrypts secrets we must read back later (e.g. the n8n API key, to call n8n's
@@ -60,6 +64,7 @@ if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[
 if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
 let migratedN8nConnections=false;for(const connection of store.n8nConnections){if(!connection.kind){connection.kind='standard';migratedN8nConnections=true}}if(migratedN8nConnections)persist();
 if(!Array.isArray(store.llmConfigs))store.llmConfigs=[];
+if(!store.preferences||typeof store.preferences!=='object'||Array.isArray(store.preferences))store.preferences={};
 if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.automationSubscriptions?.length||legacy.deletingAccounts?.length))persist();
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
@@ -95,7 +100,7 @@ const admin=req=>{
   if(Date.now()-session.issuedAt>(session.remember?sessionRememberTtlMs:sessionTtlMs)){sessions.delete(token);return false}
   return true;
 };
-const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8' };
+const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.png':'image/png', '.svg':'image/svg+xml', '.ico':'image/x-icon', '.webp':'image/webp', '.jpg':'image/jpeg' };
 const send = (res, status, data) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'}); res.end(JSON.stringify(data)); };
 async function readBody(req) { const chunks=[]; let size=0; for await (const chunk of req){size+=chunk.length;if(size>1024*1024)throw Object.assign(new Error('Request body too large'),{status:413});chunks.push(chunk);} req.rawBody=Buffer.concat(chunks).toString('utf8'); return req.rawBody ? JSON.parse(req.rawBody) : {}; }
 // Raw binary body (media upload). Same streaming guard as readBody but no
@@ -287,7 +292,18 @@ async function enrichChatOverview(session,view,{pictures=true}={}){
       view={...view,lastMessage:{...view.lastMessage,body:resolveMentionLabels(view.lastMessage.body,labels),text:resolveMentionLabels(view.lastMessage.text,labels)}};
     }
   }
-  return view;
+  // Whether the AI answers this conversation (it is on the reply list), and
+  // whether AI replies are switched on at all — so the chat menu can say
+  // "on, but paused in Settings" instead of implying replies will go out.
+  const aiConfig=llmConfig(session);
+  return {...view,aiReply:isChatListed(aiConfig?.replyRules,{chatId:view.id,phone:chatAiPhone(session,view.id)}),aiActive:Boolean(aiConfig&&(aiConfig.nativeEnabled||hasEnabledAgenticN8n(session)))};
+}
+// The phone number identifying a direct chat's contact (digits), or null when
+// it cannot be told (a group, or a LID chat Gakai has not mapped to a number).
+function chatAiPhone(accountId,chatId){
+  if(isGroupChatId(chatId))return null;
+  const resolved=isLidJid(chatId)?provider.resolveLid(accountId,chatId):chatId;
+  return String(resolved||'').endsWith('@s.whatsapp.net')?bareJidUser(resolved):null;
 }
 // Mentions are extracted from message text as bare digit runs (@<number>),
 // but Baileys keys contacts/pictures by full JID — resolve by matching the
@@ -385,7 +401,7 @@ async function dispatchAutomationEvent(payload){
   // is not a "mention" (the whole message is already for you) — the browser
   // uses this flag to raise a mention toast, so it must mean the narrow thing.
   const mentionsYou=kind==="group"&&Array.isArray(message.mentionedJids)&&message.mentionedJids.length
-    ?mentionsIdentity(message.mentionedJids,provider.getAccount(accountId)?.ownJid)
+    ?mentionsIdentity(message.mentionedJids,provider.getAccount(accountId)?.ownJid,provider.getAccount(accountId)?.ownLid)
     :false;
   const event={id:`evt_${message.id}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id:accountId},chat,message,mentionsYou,source:"whatsapp"};
   // Persist before notifying the browser or downstream automation. This gives
@@ -394,14 +410,18 @@ async function dispatchAutomationEvent(payload){
   if (!recordAppEvent(event)) return;
   const ownMentioned=kind==="direct"||mentionsYou;
   const nativeEnabled=Boolean(llmConfig(accountId)?.nativeEnabled);
+  // AI replies are opt-in per sender: a listed phone number in a direct chat,
+  // or a listed group where this account is @-tagged. Everything else is ignored.
+  const directPhone=kind==='direct'?(chat.phone||(chatId.endsWith('@s.whatsapp.net')?bareJidUser(chatId):null)):null;
+  const aiAllowed=shouldAiReply(llmConfig(accountId)?.replyRules,{chatId,phone:directPhone,isGroup:kind==='group',mentionsYou});
   // Native mode is intentionally a hard boundary for Gakai-managed n8n
   // reply templates. This also protects an account that has stale persisted
   // subscriptions from producing a duplicate n8n reply while native mode is
   // selected. Hand-authored automations remain opt-in and untouched.
-  const subscriptions=store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)&&(!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)||ownMentioned)&&(!nativeEnabled||!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)));
+  const subscriptions=store.automationSubscriptions.filter(subscription=>subscription.accountId===accountId&&subscription.enabled&&subscription.events.includes(event.type)&&(!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)||(ownMentioned&&(subscription.name!=='n8n auto-connect (AI Agent)'||aiAllowed)))&&(!nativeEnabled||!N8N_REPLY_SUBSCRIPTION_NAMES.has(subscription.name)));
   await Promise.allSettled([
     ...subscriptions.map(subscription=>deliverAutomation(subscription,event)),
-    nativeEnabled?dispatchLLMReply(accountId,event):hasEnabledAgenticN8n(accountId)?Promise.resolve():dispatchLLMReply(accountId,event)
+    aiAllowed&&(nativeEnabled||!hasEnabledAgenticN8n(accountId))?dispatchLLMReply(accountId,event):Promise.resolve()
   ]);
 }
 
@@ -529,7 +549,9 @@ async function deactivateN8nReplyWorkflows(accountId){
     await unpublishN8nWorkflow(connection.n8nUrl,n8nApiKey,connection.workflowId);
   }
 }
-const llmProviders=new Set(['omniroute','litellm']);
+const llmProviders=new Set(AI_PROVIDER_IDS);
+// Configs saved before providers existed say 'omniroute'; for sharing a saved key it is the same OpenAI-compatible proxy family as LiteLLM.
+const aiFamily=value=>value==='omniroute'?'litellm':value;
 function inferLlmProvider(baseUrl,requested){
   if(llmProviders.has(requested))return requested;
   try{const url=new URL(baseUrl);return /(^|\.)litellm\b/i.test(url.hostname)||url.port==='4000'?'litellm':'omniroute';}catch{return 'omniroute';}
@@ -544,16 +566,6 @@ function normalizeLlmBaseUrl(value,provider){
   // LiteLLM's OpenAI-compatible API is served under /v1.
   if(provider==='litellm'&&!/(^|\/)v1$/i.test(url.pathname))url.pathname=`${url.pathname}/v1`.replace(/\/\/+/g,'/');
   return url.href;
-}
-function llmChatCompletionsUrl(baseUrl){
-  const url=new URL(baseUrl);
-  url.pathname=`${url.pathname.replace(/\/+$/,'')}/chat/completions`.replace(/\/\/+/g,'/');
-  return url.href;
-}
-function llmRequestBody(config,messages,extra={}){
-  // Both supported proxies use OpenAI Chat Completions. This shared adapter
-  // keeps native replies, connection verification, and n8n in agreement.
-  return {model:config.model,stream:false,messages,...extra};
 }
 const defaultAssistantInstructions=`You are the WhatsApp assistant for this business.
 
@@ -849,16 +861,11 @@ async function createAgenticN8nWorkflow(accountId){
   await persist();
   return built;
 }
-async function llmChat(config,messages){
-  // allowPrivate: an admin-configured LLM proxy is trusted input, and a
-  // self-hosted proxy on a private/local address is an expected setup here
-  // (unlike Instagram/link-preview URLs) — still resolve-once-and-pin to
-  // close the DNS-rebind gap without rejecting private targets.
-  const response=await fetchPinned(llmChatCompletionsUrl(config.baseUrl),{allowPrivate:true,method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify(llmRequestBody(config,messages)),signal:AbortSignal.timeout(30000)});
-  const text=await response.text();let data;try{data=JSON.parse(text)}catch{throw new Error('LLM proxy returned invalid JSON')}
-  if(!response.ok)throw new Error(data?.error?.message||data?.message||`LLM proxy error ${response.status}`);
-  return data?.choices?.[0]?.message?.content||'';
-}
+// Native AI replies and the settings "test" button both go through the
+// provider adapter, so ChatGPT, Claude, and a LiteLLM proxy behave the same.
+// An admin-configured proxy is trusted input and may be on a private address;
+// the adapter pins the resolved address either way.
+function llmChat(config,messages){return aiComplete({...config,provider:config.provider||inferLlmProvider(config.baseUrl)},messages,{timeoutMs:30000});}
 async function dispatchLLMReply(accountId,event){
   const config=llmConfig(accountId);if(!config||!config.nativeEnabled)return;
   const chatId=event.chat?.id;const userText=event.message?.body||event.message?.text||'';if(!chatId||!userText)return;
@@ -868,6 +875,20 @@ async function dispatchLLMReply(accountId,event){
     if(!reply.trim())return;
     await provider.sendText(accountId,chatId,reply.trim());
   }catch(err){console.error('Native LLM reply failed:',err.message);}
+}
+// Rows the reply-list type-ahead searches: the account's conversations with
+// their timestamps, plus its saved contacts.
+const MAX_REPLY_EXCLUDE=400;
+async function replyTargetSources(accountId){
+  const overview=await provider.getChatsOverview(accountId);
+  const chats=overview.map(chat=>({id:chat.id,name:chat.name||null,timestamp:chatTimestamp(chat)}));
+  const contacts=(provider.getContacts(accountId)||[]).map(contact=>({id:contact.id||contact.contact_id||null,name:contact.name||null,phone:contact.phone||null}));
+  return {chats,contacts};
+}
+// A saved rule list plus the display names its tags need.
+async function replyRulesView(accountId,rules){
+  const replyRules=normalizeReplyRules(rules);
+  return {replyRules,replyLabels:resolveRuleLabels(replyRules,await replyTargetSources(accountId))};
 }
 async function api(req, res, url) {
 function normalizedPreviewImage(value){
@@ -930,10 +951,25 @@ async function enrichMessage(session,view){
     store.username=username;store.password=passwordHash(password);await persist();
     const token=issueSession(input.remember);res.writeHead(201,{"set-cookie":sessionCookie(token,Boolean(input.remember)),"content-type":"application/json","cache-control":"no-store"});return res.end(JSON.stringify({ok:true,username}));
   }
-  if(url.pathname==="/api/app/auth/login"&&req.method==="POST"){const {username,password,remember}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&String(username||"").trim()!==expectedUsername)||!passwordMatches(password||""))return send(res,401,{message:"Incorrect username or password"});const token=issueSession(remember);res.writeHead(200,{"set-cookie":sessionCookie(token,Boolean(remember)),"content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
+  if(url.pathname==="/api/app/auth/login"&&req.method==="POST"){const {username,password,remember}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&!loginNamesAdmin(store,username))||!passwordMatches(password||""))return send(res,401,{message:"Incorrect username or password"});const token=issueSession(remember);res.writeHead(200,{"set-cookie":sessionCookie(token,Boolean(remember)),"content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==="/api/app/auth/logout"&&req.method==="POST"){const token=cookie(req).home_session;sessions.delete(token);res.writeHead(200,{"set-cookie":"home_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0","content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
-  if(url.pathname==="/api/app/auth/profile"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{username:store.username||null});}
-  if(url.pathname==="/api/app/auth/profile"&&req.method==="PATCH"){if(!admin(req))return send(res,401,{message:"Sign in required"});const input=await readBody(req),username=String(input.username||"").trim(),currentPassword=String(input.currentPassword||"");if(!currentPassword||!passwordMatches(currentPassword))return send(res,401,{message:"Current password is incorrect"});if(username&&(username.length<3||username.length>40))return send(res,400,{message:"Use a username between 3 and 40 characters"});if(input.newPassword&&String(input.newPassword).length<10)return send(res,400,{message:"Use a password with at least 10 characters"});if(username)store.username=username;
+  // Interface preferences that should follow the administrator across browsers
+  // and logins. A whitelist of boolean keys, so nothing else can be stored here.
+  if(url.pathname==="/api/app/preferences"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{sidebarCollapsed:typeof store.preferences.sidebarCollapsed==="boolean"?store.preferences.sidebarCollapsed:null});}
+  if(url.pathname==="/api/app/preferences"&&req.method==="PATCH"){
+    if(!admin(req))return send(res,401,{message:"Sign in required"});
+    const input=await readBody(req);
+    if("sidebarCollapsed" in input){if(typeof input.sidebarCollapsed!=="boolean")return send(res,400,{message:"sidebarCollapsed must be true or false"});store.preferences.sidebarCollapsed=input.sidebarCollapsed;}
+    await persist();
+    return send(res,200,{sidebarCollapsed:typeof store.preferences.sidebarCollapsed==="boolean"?store.preferences.sidebarCollapsed:null});
+  }
+  if(url.pathname==="/api/app/auth/profile"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{username:store.username||null,email:store.email||null});}
+  if(url.pathname==="/api/app/auth/profile"&&req.method==="PATCH"){if(!admin(req))return send(res,401,{message:"Sign in required"});const input=await readBody(req),username=String(input.username||"").trim(),currentPassword=String(input.currentPassword||"");
+    // Username and email changes need only the signed-in session — signing in still takes the password, so they cannot let anyone in.
+    // Setting a new password is the sensitive step, and it takes the current one.
+    if(input.newPassword&&(!currentPassword||!passwordMatches(currentPassword)))return send(res,401,{message:"Enter your current password to set a new one"});if(username&&(username.length<3||username.length>40))return send(res,400,{message:"Use a username between 3 and 40 characters"});if(input.newPassword&&String(input.newPassword).length<10)return send(res,400,{message:"Use a password with at least 10 characters"});let email;if("email" in input){email=normalizeEmail(input.email);if(email===null)return send(res,400,{message:"Enter a valid email address"});}
+    if(username)store.username=username;
+    if(email!==undefined)store.email=email||null;
     let freshCookie=null;
     if(input.newPassword){
       store.password=passwordHash(String(input.newPassword));
@@ -946,7 +982,7 @@ async function enrichMessage(session,view){
     }
     await persist();
     const headers={"content-type":"application/json"};if(freshCookie)headers["set-cookie"]=freshCookie;
-    res.writeHead(200,headers);return res.end(JSON.stringify({ok:true,username:store.username}));
+    res.writeHead(200,headers);return res.end(JSON.stringify({ok:true,username:store.username,email:store.email||null}));
   }
   if(!admin(req))return send(res,401,{message:'Sign in required'});
   if(req.method==='GET'&&url.pathname==='/api/app/events'){
@@ -1062,6 +1098,18 @@ async function enrichMessage(session,view){
     else return send(res,400,{message:'Provide one of pin, archive or mute'});
     const chat=await provider.setChatState(id,chatId,action,value);
     return send(res,200,{chat:await enrichChatOverview(id,chat,{pictures:false})});
+  }
+  // Turn the AI on or off for one conversation: adds or removes it on the AI
+  // reply list (the same list Settings edits).
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='ai'){
+    const chatId=decodeURIComponent(parts[5]),input=await readBody(req),config=llmConfig(id);
+    if(!config)return send(res,409,{message:'Set up AI Responses in Settings before turning AI on for a chat'});
+    const next=setChatListed(config.replyRules,{chatId,phone:chatAiPhone(id,chatId)},Boolean(input.enabled));
+    if(!next)return send(res,409,{message:"Gakai can't tell this contact's phone number yet, so it can't add them to the AI reply list"});
+    config.replyRules=next;
+    await persist();
+    const overview=(await provider.getChatsOverview(id)).find(chat=>chat.id===chatId)||{id:chatId};
+    return send(res,200,{chat:await enrichChatOverview(id,overview,{pictures:false})});
   }
   if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='block'){
     const chatId=decodeURIComponent(parts[5]),input=await readBody(req);
@@ -1260,10 +1308,48 @@ async function enrichMessage(session,view){
     catch(error){return send(res,502,{message:error.message||"Test delivery failed",subscription:automationSummary(subscription)})}}
   if(parts[4]==="automations"&&parts[5]&&req.method==="DELETE"){store.automationSubscriptions=store.automationSubscriptions.filter(item=>!(item.id===parts[5]&&item.accountId===id));await persist();return send(res,200,{ok:true});}
   if(parts[4]==='integration-keys'&&req.method==='DELETE'){const keyId=parts[5];store.keys=store.keys.filter(k=>!(k.id===keyId&&k.accountId===id));await persist();return send(res,200,{ok:true});}
+  // Type-ahead for the AI reply list: people or groups from this account's
+  // conversations (and contacts) matching what the user has typed so far.
+  if(parts[4]==='reply-targets'&&req.method==='GET'){
+    const kind=url.searchParams.get('kind')==='group'?'group':'person';
+    const query=String(url.searchParams.get('q')||'').slice(0,80);
+    const exclude=String(url.searchParams.get('exclude')||'').split(',').map(value=>value.trim()).filter(Boolean).slice(0,MAX_REPLY_EXCLUDE);
+    const {chats,contacts}=await replyTargetSources(id);
+    return send(res,200,{results:kind==='group'?searchGroups({chats,query,exclude}):searchPeople({chats,contacts,query,exclude})});
+  }
+  // Who the AI may answer. Saved on its own (like the native toggle) so
+  // editing the list never re-verifies the provider or touches its key.
+  if(parts[4]==='llm'&&parts[5]==='rules'&&req.method==='PUT'){
+    const config=llmConfig(id);
+    if(!config)return send(res,404,{message:'Set up AI Responses before choosing who it replies to'});
+    config.replyRules=normalizeReplyRules(await readBody(req));
+    await persist();
+    return send(res,200,await replyRulesView(id,config.replyRules));
+  }
   // LLM proxy config endpoints
+  // Live model list for the AI Responses dropdown. Nothing is saved: the
+  // browser sends what is in the form (or "__keep__" to reuse the stored key),
+  // and the provider itself says which models that key can use.
+  if(parts[4]==='llm'&&parts[5]==='models'&&req.method==='POST'){
+    const input=await readBody(req),existing=llmConfig(id);
+    const aiProvider=inferLlmProvider(String(input.baseUrl||''),String(input.provider||''));
+    let baseUrl=usesFixedBaseUrl(aiProvider)?FIXED_BASE_URLS[aiProvider]:String(input.baseUrl||'').trim();
+    if(!baseUrl)return send(res,400,{message:'Enter the proxy URL first'});
+    try{baseUrl=normalizeLlmBaseUrl(baseUrl,aiProvider)}catch{return send(res,400,{message:'Enter a valid proxy URL'});}
+    let apiKey=String(input.apiKey||'').trim();
+    if(apiKey==='__keep__'){
+      // Only reuse the stored key for the endpoint it was saved against, so a
+      // changed URL can never carry the saved key somewhere else.
+      const sameTarget=existing&&aiFamily(existing.provider||inferLlmProvider(existing.baseUrl))===aiFamily(aiProvider)&&(usesFixedBaseUrl(aiProvider)||existing.baseUrl===baseUrl);
+      apiKey=sameTarget?existing.apiKey:'';
+    }
+    if(!apiKey)return send(res,400,{message:'Enter an API key to load the available models'});
+    try{return send(res,200,{models:await listAiModels({provider:aiProvider,baseUrl,apiKey})});}
+    catch(error){return send(res,error.status===401||error.status===403?401:502,{message:'Could not load models: '+(error.message||'Unknown error')});}
+  }
   if(parts[4]==='llm'&&parts[5]==='test'&&req.method==='POST'){
     const cfg=llmConfig(id),input=await readBody(req),prompt=String(input.prompt||'').trim();
-    if(!cfg)return send(res,409,{message:'Save an LLM proxy before testing it'});
+    if(!cfg)return send(res,409,{message:'Set up AI Responses before testing it'});
     if(!prompt||prompt.length>4000)return send(res,400,{message:'Enter a test prompt up to 4,000 characters'});
     const phone=String(input.phone||'').replace(/[^0-9]/g,'');
     if(phone.length>30)return send(res,400,{message:'Invalid test phone number'});
@@ -1280,36 +1366,40 @@ async function enrichMessage(session,view){
     }
     return send(res,200,{reply,delivered:false});
   }
-  if(parts[4]==='llm'&&req.method==='GET'){const cfg=llmConfig(id);return send(res,200,cfg?{configured:true,provider:cfg.provider||inferLlmProvider(cfg.baseUrl),baseUrl:cfg.baseUrl,model:cfg.model,systemPrompt:cfg.systemPrompt||'',nativeEnabled:cfg.nativeEnabled||false,apiKeyLength:String(cfg.apiKey||'').length,apiKeyLast4:String(cfg.apiKey||'').slice(-4)}:{configured:false});}
+  if(parts[4]==='llm'&&req.method==='GET'){const cfg=llmConfig(id);return send(res,200,cfg?{...await replyRulesView(id,cfg.replyRules),configured:true,provider:cfg.provider||inferLlmProvider(cfg.baseUrl),baseUrl:cfg.baseUrl,model:cfg.model,systemPrompt:cfg.systemPrompt||'',nativeEnabled:cfg.nativeEnabled||false,apiKeyLength:String(cfg.apiKey||'').length,apiKeyLast4:String(cfg.apiKey||'').slice(-4)}:{configured:false});}
   if(parts[4]==='llm'&&req.method==='POST'){
     const input=await readBody(req);
-    let baseUrl=String(input.baseUrl||'').trim().replace(/\/+$/,'');
     const existing=llmConfig(id);
-    // __keep__ means "don't change the stored API key" (used by the skill/settings update form)
-    const apiKey=String(input.apiKey||'')==='__keep__'?(existing?.apiKey||''):String(input.apiKey||'').trim();
-    const model=String(input.model||'').trim();
+    const aiProvider=inferLlmProvider(String(input.baseUrl||''),String(input.provider||''));
+    let baseUrl=usesFixedBaseUrl(aiProvider)?FIXED_BASE_URLS[aiProvider]:String(input.baseUrl||'').trim().replace(/\/+$/,'');
     if(!baseUrl)return send(res,400,{message:'Proxy URL is required'});
-    const provider=inferLlmProvider(baseUrl,String(input.provider||''));
-    try{baseUrl=normalizeLlmBaseUrl(baseUrl,provider)}catch{return send(res,400,{message:'Enter a valid proxy URL'});}
+    try{baseUrl=normalizeLlmBaseUrl(baseUrl,aiProvider)}catch{return send(res,400,{message:'Enter a valid proxy URL'});}
+    // __keep__ means "don't change the stored API key" (used by the skill/settings update form).
+    // It only applies while the provider (and proxy URL) are the ones the key was saved for.
+    const keepKey=String(input.apiKey||'')==='__keep__';
+    const sameTarget=existing&&aiFamily(existing.provider||inferLlmProvider(existing.baseUrl))===aiFamily(aiProvider)&&existing.baseUrl===baseUrl;
+    if(keepKey&&!sameTarget)return send(res,400,{message:'Enter an API key for this provider'});
+    const apiKey=keepKey?(existing?.apiKey||''):String(input.apiKey||'').trim();
+    const model=String(input.model||'').trim();
     if(!apiKey)return send(res,400,{message:'API key is required'});
-    if(!model)return send(res,400,{message:'Model name is required'});
+    if(!model)return send(res,400,{message:'Choose a model'});
     // Skip connection test when only updating skill/settings (apiKey kept, baseUrl+model unchanged)
-    const settingsOnly=String(input.apiKey||'')==='__keep__'&&existing&&existing.baseUrl===baseUrl&&existing.model===model;
+    const settingsOnly=keepKey&&existing&&existing.model===model;
     if(!settingsOnly){
       try{
-        const test=await fetchPinned(llmChatCompletionsUrl(baseUrl),{allowPrivate:true,method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${apiKey}`},body:JSON.stringify(llmRequestBody({model},[{role:'user',content:'hi'}],{max_tokens:1})),signal:AbortSignal.timeout(15000)});
-        const td=await test.json().catch(()=>({}));
-        if(!test.ok&&test.status!==400)throw new Error(td?.error?.message||`Proxy returned ${test.status}`);
-      }catch(err){return send(res,400,{message:'Could not connect to LLM proxy: '+err.message});}
+        // A 400 is tolerated: it means the endpoint and key were accepted but
+        // this one-token probe was rejected for a model-specific reason.
+        await aiComplete({provider:aiProvider,baseUrl,apiKey,model},[{role:'user',content:'hi'}],{maxTokens:1,timeoutMs:15000}).catch(error=>{if(error.status!==400)throw error;});
+      }catch(err){return send(res,400,{message:'Could not connect to the AI provider: '+err.message});}
     }
     // nativeEnabled is managed by its own immediate PATCH /llm toggle below,
     // not this form — preserve whatever it's currently set to rather than
     // reading a stale/absent field from this save.
-    const nextConfig={accountId:id,provider,baseUrl,apiKey,model,systemPrompt:assistantInstructions(String(input.systemPrompt||'').slice(0,4000)),nativeEnabled:existing?.nativeEnabled||false,configuredAt:existing?.configuredAt||new Date().toISOString()};
+    const nextConfig={accountId:id,provider:aiProvider,baseUrl,apiKey,model,systemPrompt:assistantInstructions(String(input.systemPrompt||'').slice(0,4000)),nativeEnabled:existing?.nativeEnabled||false,replyRules:normalizeReplyRules(existing?.replyRules),configuredAt:existing?.configuredAt||new Date().toISOString()};
     const requestedWorkflowId=String(input.n8nWorkflowId||'').trim();
     if(requestedWorkflowId.length>120)return send(res,400,{message:'The n8n workflow ID is too long'});
     let n8nSync={synced:false,agentExampleAdded:false};
-    try{n8nSync=await syncAgenticN8nInstructions(id,nextConfig,{workflowId:requestedWorkflowId||undefined});}catch(error){return send(res,502,{message:'LLM proxy verified, but the n8n AI workflow was not updated: '+(error.message||'Unknown error')});}
+    try{n8nSync=await syncAgenticN8nInstructions(id,nextConfig,{workflowId:requestedWorkflowId||undefined});}catch(error){return send(res,502,{message:'AI provider verified, but the n8n AI workflow was not updated: '+(error.message||'Unknown error')});}
     store.llmConfigs=store.llmConfigs.filter(c=>c.accountId!==id);
     store.llmConfigs.push(nextConfig);
     await persist();
@@ -1320,7 +1410,7 @@ async function enrichMessage(session,view){
   // (no need to resubmit the whole proxy form just to flip this).
   if(parts[4]==='llm'&&parts[5]==='native'&&req.method==='PATCH'){
     const config=llmConfig(id);
-    if(!config)return send(res,404,{message:'Save an LLM proxy before enabling native replies'});
+    if(!config)return send(res,404,{message:'Set up AI Responses before enabling native replies'});
     const input=await readBody(req);
     const nativeEnabled=Boolean(input.nativeEnabled);
     let agentRepliesDisabled=false,standardRepliesDisabled=false,n8nWorkflowsDeactivated=false;
@@ -1405,7 +1495,7 @@ async function enrichMessage(session,view){
     if(n8nConnectLocks.has(lockKey))return send(res,409,{message:'A connection attempt is already in progress for this account'});
     const attempt=(async()=>{
       const config=llmConfig(id);
-      if(!config)return send(res,400,{message:'Connect an LLM proxy before enabling AI Agent replies'});
+      if(!config)return send(res,400,{message:'Set up AI Responses before enabling AI Agent replies'});
       try{
         let connection=store.n8nConnections.find(c=>c.accountId===id&&c.kind==='agentic');
         let activationWarning=null;

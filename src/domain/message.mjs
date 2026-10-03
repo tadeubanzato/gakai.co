@@ -143,13 +143,18 @@ export function resolveMentionLabels(text, labels) {
 // Whether a message's mentioned-JID list includes the account's own
 // identity — used to scope the Gakai-managed n8n reply automation to DMs and
 // explicit @-mentions in a group, never every message in every group.
-export function mentionsIdentity(mentionedJids, ownJid) {
-  if (!ownJid || !Array.isArray(mentionedJids) || !mentionedJids.length) return false;
-  const ownNumber = ownJid.replace(/@.*$/, '').replace(/^0+/, '');
+// True when any mentioned JID is this account. `ownJid` carries a device
+// suffix (`<number>:<device>@s.whatsapp.net`) that a mention never has, and a
+// group may tag the account by its LID instead of its phone number, so the
+// comparison drops the device part and accepts either identity.
+export function mentionsIdentity(mentionedJids, ownJid, ownLid = null) {
+  if (!Array.isArray(mentionedJids) || !mentionedJids.length) return false;
+  const bare = value => String(value || '').replace(/@.*$/, '').replace(/:\d+$/, '').replace(/^0+/, '');
+  const own = new Set([ownJid, ownLid].filter(Boolean).map(bare).filter(Boolean));
+  if (!own.size) return false;
   return mentionedJids.some(rawId => {
-    const id = String(rawId || '');
-    const number = id.replace(/@.*$/, '').replace(/^0+/, '');
-    return id === ownJid || (number && number === ownNumber);
+    const number = bare(rawId);
+    return Boolean(number) && own.has(number);
   });
 }
 
