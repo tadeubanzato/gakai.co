@@ -85,3 +85,30 @@ test('setChatListed adds and removes a chat without disturbing the rest, and nev
 test('setChatListed returns null when a direct chat has no known phone number', () => {
   assert.equal(setChatListed({ numbers: [], groups: [] }, { chatId: '2000111222333@lid', phone: null }, true), null);
 });
+
+import { voiceIdFor } from '../../src/domain/ai-reply-rules.mjs';
+
+test('a voice can be chosen for each listed person or group, in any phone format', () => {
+  const rules = normalizeReplyRules({ numbers: ['+1 (857) 707-5969', '5511999777057'], groups: ['120363025246125486'], assignments: { '+1 857 707 5969': 'vo_mom', '5511999777057': 'vo_friends', '120363025246125486@g.us': 'vo_group' } });
+  assert.deepEqual(rules.assignments, { '18577075969': 'vo_mom', '5511999777057': 'vo_friends', '120363025246125486@g.us': 'vo_group' });
+  assert.equal(voiceIdFor(rules, { chatId: '18577075969@s.whatsapp.net', phone: '18577075969', isGroup: false }), 'vo_mom');
+  assert.equal(voiceIdFor(rules, { chatId: '120363025246125486@g.us', isGroup: true }), 'vo_group');
+});
+
+test('a voice is only kept for someone still on the list, and only if it looks like an id', () => {
+  const rules = normalizeReplyRules({ numbers: ['18577075969'], groups: [], assignments: { '18577075969': 'vo_ok', '5511999777057': 'vo_orphan', 'bad': 'x' } });
+  assert.deepEqual(rules.assignments, { '18577075969': 'vo_ok' });
+  assert.equal('assignments' in normalizeReplyRules({ numbers: ['18577075969'], assignments: { '18577075969': 'has spaces!' } }), false);
+});
+
+test('with no voices chosen the rules look exactly as before, and an unassigned chat has no voice', () => {
+  assert.deepEqual(normalizeReplyRules({ numbers: ['18577075969'], groups: [] }), { numbers: ['18577075969'], groups: [] });
+  assert.equal(voiceIdFor({ numbers: ['18577075969'], groups: [] }, { chatId: 'x', phone: '18577075969', isGroup: false }), null);
+  assert.equal(voiceIdFor(undefined, { chatId: 'x', phone: null, isGroup: false }), null);
+});
+
+test('removing someone from the list also drops their voice', () => {
+  const rules = { numbers: ['18577075969', '5511999777057'], groups: [], assignments: { '18577075969': 'vo_a', '5511999777057': 'vo_b' } };
+  const after = setChatListed(rules, { chatId: '5511999777057@s.whatsapp.net', phone: '5511999777057' }, false);
+  assert.deepEqual(after.assignments, { '18577075969': 'vo_a' });
+});

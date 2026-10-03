@@ -23,12 +23,29 @@ export function normalizeGroupId(value) {
 
 const toList = value => (Array.isArray(value) ? value : String(value ?? '').split(/[\n,;]+/));
 
+// `assignments` says which voice profile each listed person or group uses: { "<phone digits or
+// group id>": "<voice id>" }. Only entries still on the list count, and it is left out when empty
+// so a list with no voices chosen looks exactly as it always did.
 export function normalizeReplyRules(input) {
   const unique = (values, normalize) => [...new Set(toList(values).map(normalize).filter(Boolean))].slice(0, MAX_RULE_ENTRIES);
-  return {
-    numbers: unique(input?.numbers, normalizePhoneNumber),
-    groups: unique(input?.groups, normalizeGroupId),
-  };
+  const numbers = unique(input?.numbers, normalizePhoneNumber);
+  const groups = unique(input?.groups, normalizeGroupId);
+  const listed = new Set([...numbers, ...groups]);
+  const given = input?.assignments && typeof input.assignments === 'object' && !Array.isArray(input.assignments) ? input.assignments : {};
+  const assignments = {};
+  for (const [rawKey, voiceId] of Object.entries(given)) {
+    const key = /@g\.us$/i.test(rawKey) ? normalizeGroupId(rawKey) : normalizePhoneNumber(rawKey);
+    if (key && listed.has(key) && typeof voiceId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(voiceId)) assignments[key] = voiceId;
+  }
+  return Object.keys(assignments).length ? { numbers, groups, assignments } : { numbers, groups };
+}
+
+// The voice profile chosen for this person or group, or null (then the account's default
+// instructions are used).
+export function voiceIdFor(rules, { chatId, phone, isGroup }) {
+  const { assignments = {} } = normalizeReplyRules(rules);
+  const key = isGroup ? String(chatId || '').toLowerCase() : normalizePhoneNumber(phone);
+  return (key && assignments[key]) || null;
 }
 
 // `phone` is the contact's resolved phone number (digits) for a direct chat;
@@ -58,10 +75,10 @@ export function setChatListed(rules, { chatId, phone }, enabled) {
   if (isGroupId(chatId)) {
     const id = String(chatId).toLowerCase();
     const groups = current.groups.filter(entry => entry !== id);
-    return { ...current, groups: enabled ? [...groups, id].slice(0, MAX_RULE_ENTRIES) : groups };
+    return normalizeReplyRules({ ...current, groups: enabled ? [...groups, id].slice(0, MAX_RULE_ENTRIES) : groups });
   }
   const number = normalizePhoneNumber(phone);
   if (!number) return null;
   const numbers = current.numbers.filter(entry => entry !== number);
-  return { ...current, numbers: enabled ? [...numbers, number].slice(0, MAX_RULE_ENTRIES) : numbers };
+  return normalizeReplyRules({ ...current, numbers: enabled ? [...numbers, number].slice(0, MAX_RULE_ENTRIES) : numbers });
 }

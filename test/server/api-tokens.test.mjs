@@ -349,3 +349,47 @@ test('deleting a token removes its stored copy with it', async () => {
   assert.equal(store.keys.some(item => item.id === key.id), false);
   assert.equal((await copyToken(key.id)).status, 404);
 });
+
+const platformKeys = (headers = { cookie }) => fetch(`${base}/api/app/integration-keys`, { headers });
+const platformCreate = (body, headers = { cookie }) => fetch(`${base}/api/app/integration-keys`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+
+test('the workspace token list spans every profile and says which profile each token belongs to', async () => {
+  const second = 'tokens-platform-second';
+  provider.__test.seedAccount(second);
+  const a = await create('platform-a');
+  const b = await (await fetch(keysUrl('', second), { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ name: 'platform-b' }) })).json();
+  const listed = (await (await platformKeys()).json()).keys;
+  assert.equal(listed.find(item => item.id === a.key.id).accountId, ACCOUNT);
+  assert.equal(listed.find(item => item.id === b.key.id).accountId, second);
+  assert.equal(JSON.stringify(listed).includes(a.token), false, 'still never the secret');
+  assert.equal(listed.some(item => item.name === 'n8n integration'), false, 'nor Gakai\'s own n8n key');
+});
+
+test('a token can be created from the workspace page for a chosen profile, and it sends from that profile', async () => {
+  const other = 'tokens-platform-sender';
+  provider.__test.seedAccount(other);
+  const response = await platformCreate({ accountId: other, name: 'from-settings', scopes: ['messages:send'] });
+  assert.equal(response.status, 201);
+  const { key, token } = await response.json();
+  assert.equal(key.accountId, other);
+  const before = sentMessages().length;
+  assert.equal((await send(token, { phone: '18577075969', text: 'sent from the chosen profile' })).status, 200);
+  assert.equal(sentMessages()[before].accountId, other);
+  assert.equal((await copyToken(key.id, other)).status, 200, 'the same copy window applies');
+});
+
+test('creating a workspace token needs a real profile, a valid request, and respects the per-profile limit', async () => {
+  assert.equal((await platformCreate({ name: 'no-profile' })).status, 404);
+  assert.equal((await platformCreate({ accountId: 'no-such-profile', name: 'x' })).status, 404);
+  assert.equal((await platformCreate({ accountId: ACCOUNT, name: '   ' })).status, 400);
+  assert.equal((await platformCreate({ accountId: ACCOUNT, name: 'bad', scopes: ['admin'] })).status, 400);
+  const crowded = 'tokens-platform-crowded';
+  provider.__test.seedAccount(crowded);
+  for (let index = 0; index < 20; index += 1) assert.equal((await platformCreate({ accountId: crowded, name: `app ${index}` })).status, 201);
+  assert.equal((await platformCreate({ accountId: crowded, name: 'one too many' })).status, 409);
+});
+
+test('the workspace token routes are for the signed-in administrator only', async () => {
+  assert.equal((await platformKeys({})).status, 401);
+  assert.equal((await platformCreate({ accountId: ACCOUNT, name: 'x' }, {})).status, 401);
+});

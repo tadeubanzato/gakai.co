@@ -105,3 +105,6 @@ export function Avatar({ item, picture, label, className = "avatar" }) {
     ? <img className={className} src={src} alt="" onError={() => setFailed(true)} />
     : <span className={`${className} ${className.includes("sender-avatar") ? "sender-letter" : "avatar-letter"}`} aria-hidden="true">{letter}</span>;
 }
+
+// Plain-language label for a WhatsApp account's connection state.
+export const status = value => ({ WORKING: "Connected", SCAN_QR_CODE: "Ready to scan", STARTING: "Starting WhatsApp", STOPPED: "Offline", FAILED: "Needs attention" })[value] || value || "Connecting";

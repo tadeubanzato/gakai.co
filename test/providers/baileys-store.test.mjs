@@ -167,7 +167,11 @@ test('mergeChat folds a LID chat into the canonical phone-JID chat', () => {
     waMessage: { key: { id: 'new', remoteJid: lid } },
     overviewMessage: { body: 'new reply', text: 'new reply', timestamp: 200, hasMedia: false, system: null },
   }]);
-  store.setChatUnread('acct-1', lid, 3);
+  store.upsertMessages('acct-1', ['u1', 'u2', 'u3'].map((id, index) => ({
+    chatId: lid, messageId: id, timestamp: 150 + index, fromMe: false, source: 'live',
+    waMessage: { key: { id, remoteJid: lid } },
+    overviewMessage: { body: id, text: id, timestamp: 150 + index, hasMedia: false, system: null },
+  })));
 
   store.mergeChat('acct-1', lid, pn);
 
@@ -178,7 +182,7 @@ test('mergeChat folds a LID chat into the canonical phone-JID chat', () => {
   assert.equal(chats[0].unreadCount, 3, 'the LID chat\'s unread count carries over');
 
   const messages = store.getMessagesPage('acct-1', pn, { limit: 10 });
-  assert.deepEqual(messages.map(m => m.key.id).sort(), ['new', 'old']);
+  assert.deepEqual(messages.map(m => m.key.id).sort(), ['new', 'old', 'u1', 'u2', 'u3']);
   assert.deepEqual(store.getMessagesPage('acct-1', lid, { limit: 10 }), []);
 });
 

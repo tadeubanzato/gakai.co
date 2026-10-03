@@ -33,6 +33,16 @@ Superseded. The previous notes in this section described a REST/webhook provider
 - **`messages.update` event** → `{ key: WAMessageKey, update: Partial<WAMessage> }[]`.
   Delivery/read progress arrives as `update.status`, a `proto.WebMessageInfo.Status`
   enum number: `ERROR 0, PENDING 1, SERVER_ACK 2, DELIVERY_ACK 3, READ 4, PLAYED 5`.
+- **Unread state is Gakai's own, never Baileys'.** `chats.update.unreadCount` is a *delta*
+  (+1 per incoming message, `-1`/`0`/`null` from app-state read marks) and
+  `messaging-history.set` carries absolute counts; treating either as the stored count makes
+  read chats reappear as unread. Gakai instead keeps `wa_chats.read_ts` (a forward-only read
+  cursor) and `wa_messages.unread` (set once, when a live incoming message is first stored;
+  history never sets it); the count is derived. `messages.upsert` types `notify` and `append`
+  both count, `append` being offline delivery. An incoming key with `status >= READ` in
+  `messages.update` means the owner read it on another device and clears it locally
+  (`isReadElsewhere`). `markChatRead(account, chat, { through })` moves the cursor first and
+  sends `sock.readMessages` only for messages that were still unread.
 - **Structured inbound types** — `normalizeMessageContent` already unwraps
   `viewOnceMessage*`, `ephemeralMessage`, `documentWithCaptionMessage`,
   `editedMessage`; `locationMessage`, `contactMessage`/`contactsArrayMessage`, and

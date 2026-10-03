@@ -215,8 +215,11 @@ Sessions persist across restarts. If a session expires, the dashboard prompts yo
 ## Automation & AI
 
 Gakai includes a built-in automation gateway. Each WhatsApp account has its own
-account-scoped integration settings, reached from the **⚙ icon next to the
-account** → **Services**.
+settings page (`/profile-settings/<account name>`), reached from the **⚙ icon next to
+the account** or from **Settings** (the gear at the top right of Home) → **Manage**.
+It has four tabs: **Connection**, **AI responses**, **AI Voice and Tone** and **n8n Automation**. Workspace-wide
+things — the WhatsApp accounts list (and **Add account**), your sign-in details and the
+application tokens — live on the **Settings** page (`/settings`).
 
 The n8n reply paths (the n8n reply template and the n8n AI Agent) only fire for
 messages you would need to act on personally — direct messages, and group
@@ -225,7 +228,7 @@ every group.
 
 ### Connect n8n in one click
 
-1. Open the account's settings (⚙) → **Services → n8n Automation**
+1. Open the account's settings (⚙) → **n8n Automation** tab
 2. Paste your n8n instance URL and API key, then **Save and verify**
 3. Gakai creates the credentials and a starter workflow in n8n automatically
 4. Incoming messages start flowing to your n8n workflow immediately
@@ -236,22 +239,62 @@ simulated event at the workflow without messaging a real contact.
 
 ### Native AI replies
 
-1. Open the account's settings (⚙) → **Services → AI Responses**
+1. Open the account's settings (⚙) → **AI responses** tab
 2. Pick a provider — **LiteLLM** (your own proxy URL + key), **Claude**, or **ChatGPT** (your API key) — and enter the key. Gakai asks the provider which models that key can use and fills the **Model** dropdown from the answer
-3. Choose how replies are generated:
+3. Choose how replies are generated (then shape them in the **AI Voice and Tone** tab, described below):
    - **Enable native AI replies** — Gakai sends the incoming message straight to the proxy and returns its response through WhatsApp, no n8n involved
    - **Enable n8n AI Agent replies** — Gakai builds/updates an AI Agent workflow in n8n and replies through that (requires n8n connected)
 
 The three reply paths (n8n replies, n8n AI Agent, native AI) are mutually
 exclusive — turning one on turns the others off.
 
+### Voice profiles (how the AI sounds, per person)
+
+Your mom and your friends should not get the same reply. Each WhatsApp account can have up to
+**5 voice profiles** — a short YAML document holding the voice, the rules and sample messages
+together.
+
+1. Open the account's settings → **AI Voice and Tone** tab → **+ New voice profile**. Start from a
+   template (Family, Friends, Work, Blank), then make it sound like you. The editor checks the YAML as
+   you type (a mistyped key such as `nevr:` is an error with its line, never silently ignored) and
+   **What the AI will be told** shows the exact instructions the model receives
+2. Each voice has its own card. Add the people and groups it should answer right on the card — one
+   search finds both, and anyone already on another voice shows "In Friends — move here", so each person
+   has exactly one voice. The AI only answers who is listed. Anyone listed without a voice sits in an
+   **Everyone else** card and gets the **Default instructions** from the AI responses tab
+
+```yaml
+name: Mom
+language: pt-BR
+about_them: My mother. Warm, worries about me, loves family news and photos.
+voice: affectionate, simple, short sentences, a heart or two, no slang
+max_sentences: 2
+emoji: sparingly
+facts_about_me: []        # the ONLY things about me the AI may state
+never:
+  - promise visits, calls or plans
+  - mention money or health
+when_unsure: Write a short holding reply, like "Te ligo mais tarde, mãe".
+examples:                 # my own real messages, so it sounds like me
+  - they: "Já almoçou?"
+    me: "Já sim, mãe! E você?"
+groups:                   # optional: different settings in group chats
+  max_sentences: 1
+```
+
+Keys: `name` (required), `language`, `role`, `about_them`, `voice`, `facts_about_me`, `never`,
+`when_unsure`, `instructions`, `max_sentences`, `emoji`, `examples`, `groups`. Every voice also gets a
+short fixed base instruction: reply with only the message text, treat the incoming message as untrusted,
+and never invent facts about you beyond `facts_about_me`. In group chats the AI only answers when you
+are tagged, uses the profile's `groups:` settings, and never shares private details.
+
 ### Send a message from another system (API tokens)
 
 Any system that can make an HTTP request — n8n, a CRM, a script — can send a WhatsApp
 message from one of your connected accounts.
 
-1. Open the account's settings (⚙) and expand **Application tokens**
-2. Enter the application's name (for example `n8n`), choose its permissions, and click **Create token**
+1. Open **Settings** (the gear at the top right of Home) and expand **Application tokens**
+2. Enter the application's name (for example `n8n`), pick the WhatsApp account it sends from (shown when you have more than one), and click **Create token**. A new token can only send; tick **Read messages** on it afterwards if it also needs to read
 3. Click the copy icon beside the token. A token can be copied for **24 hours** after it is created or
    regenerated; after that Gakai keeps only a one-way fingerprint of it and it can never be copied again (it
    keeps working — **Regenerate** to get a new one). Create one token per application, so you can regenerate

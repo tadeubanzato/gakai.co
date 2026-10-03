@@ -13,6 +13,7 @@ import QRCode from 'qrcode';
 import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { openStore } from './store.mjs';
+import { isReadElsewhere } from '../../domain/unread.mjs';
 import { createMediaStore } from './media.mjs';
 import { freshPictureUrl, createPictureRefresher } from './picture.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
@@ -136,7 +137,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
       learnFromContacts(accountId, contacts);
       store.upsertChats(accountId, (chats || []).map(chat => ({ ...chat, id: canonicalChatId(accountId, chat.id) })));
       store.upsertContacts(accountId, (contacts || []).map(mapContact));
-      ingestMessages(accountId, messages || [], { live: false });
+      ingestMessages(accountId, messages || [], { live: false, source: 'history' });
     }));
 
     sock.ev.on('lid-mapping.update', safe('lid-mapping.update', mapping => {
@@ -160,7 +161,9 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     }));
 
     sock.ev.on('messages.upsert', safe('messages.upsert', ({ messages, type }) => {
-      ingestMessages(accountId, messages, { live: type === 'notify' });
+      // 'notify' is real time; 'append' is what WhatsApp delivers after an offline gap. Both are
+      // new to this account and count as unread; only 'notify' is announced to the browser.
+      ingestMessages(accountId, messages, { live: type === 'notify', source: 'live' });
     }));
 
     // Delivery/read progress for messages this account sent. Baileys reports it
@@ -168,6 +171,13 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     // stored raw message so the next read of the page shows the right tick.
     sock.ev.on('messages.update', safe('messages.update', updates => {
       for (const { key, update } of updates || []) {
+        // An incoming message marked READ means the owner read it on another device.
+        if (isReadElsewhere({ key, update })) {
+          const chatId = canonicalChatId(accountId, key.remoteJid);
+          const unreadCount = store.markMessagesReadElsewhere(accountId, chatId, [key.id]);
+          if (unreadCount !== null) onEvent?.('read', { accountId, chatId, unreadCount });
+          continue;
+        }
         if (!key?.id || !key.fromMe || update?.status == null) continue;
         const chatId = canonicalChatId(accountId, key.remoteJid);
         const raw = store.getMessageById(accountId, chatId, key.id) || store.getMessageById(accountId, null, key.id);
@@ -267,7 +277,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     }
   }
 
-  function ingestMessages(accountId, messages, { live }) {
+  function ingestMessages(accountId, messages, { live, source = live ? 'live' : 'history' }) {
     const toStore = [];
     for (const raw of messages) {
       // One malformed message (an unexpected payload shape, a field WhatsApp
@@ -290,7 +300,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
         if (edit?.targetMessageId) { store.applyEdit(accountId, chatId, edit.targetMessageId, edit.newText); continue; }
 
         const normalized = messageView(raw, { accountId, chatId });
-        toStore.push({ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: normalized.fromMe, waMessage: raw, overviewMessage: overviewFromMessage(normalized) });
+        toStore.push({ chatId, messageId: normalized.id, timestamp: normalized.timestamp, fromMe: normalized.fromMe, waMessage: raw, overviewMessage: overviewFromMessage(normalized), source });
 
         if (live && !normalized.fromMe) onEvent?.('message', { accountId, chatId, message: normalized, raw });
       } catch (error) {
@@ -472,14 +482,17 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     store.deleteChat(accountId, chatId);
   }
 
-  async function markChatRead(accountId, chatId) {
+  // The owner has looked at this conversation up to `through` (unix seconds; default: everything
+  // stored). The local read cursor moves first and only forward, so nothing that arrives while
+  // WhatsApp is being told can bring a read message back. Read receipts go out once, only for the
+  // messages that were actually unread — never repeated for what was already read.
+  async function markChatRead(accountId, chatId, { through } = {}) {
     chatId = canonicalChatId(accountId, chatId);
+    const keys = store.unreadIncomingKeys(accountId, chatId, through);
+    const unreadCount = store.markChatRead(accountId, chatId, through);
     const entry = accounts.get(accountId);
-    if (entry) {
-      const recent = store.getMessagesPage(accountId, chatId, { limit: 10 }).filter(m => !m.key?.fromMe && m.key);
-      if (recent.length) await entry.sock.readMessages(recent.map(m => m.key)).catch(() => {});
-    }
-    store.setChatUnread(accountId, chatId, 0);
+    if (entry && keys.length) await entry.sock.readMessages(keys).catch(() => {});
+    return unreadCount;
   }
 
   // Pin / mute / archive. `value` is a boolean for pin/archive, a duration in

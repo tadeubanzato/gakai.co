@@ -1,17 +1,17 @@
 import React,{useCallback,useEffect,useMemo,useRef,useState}from"react";
 import{runExclusive,api,compareChats}from"./app-helpers.mjs";
-import{Avatar,IconLogout,Menu,MenuItem}from"./ui-helpers.jsx";
+import{createEventHub}from"./event-hub.mjs";
+// One live connection for the whole tab, shared by every view that wants events.
+const eventHub=createEventHub();
+import{Avatar,IconLogout,Menu,MenuItem,status}from"./ui-helpers.jsx";
 import{createRoot}from"react-dom/client";
 import{ChatPanel}from"./chat.jsx";
 import{ConfirmHost,confirmDialog}from"./confirm.jsx";
 import{AiProviderFields}from"./ai-responses.jsx";
-import{AiReplyRules}from"./ai-reply-rules.jsx";
-import{AdminProfileCard}from"./admin-profile.jsx";
-import{ApiTokensCard}from"./api-tokens.jsx";
+import{WorkspaceSettings}from"./workspace-settings.jsx";
+import{VoiceProfilesPanel}from"./voice-profiles.jsx";
+import{parseRoute,profilePath,accountSlug,findAccountBySlug}from"./routes.mjs";
 
-const slug=x=>String(x||"").trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
-const status=x=>({WORKING:"Connected",SCAN_QR_CODE:"Ready to scan",STARTING:"Starting WhatsApp",STOPPED:"Offline",FAILED:"Needs attention"})[x]||x||"Connecting";
-const detailsSlug=()=>{const match=window.location.pathname.match(/^\/details\/([^/]+)\/?$/);return match?decodeURIComponent(match[1]):null};
 const maskSecret=(length,last4)=>last4?`${"•".repeat(Math.max(0,Number(length||0)-String(last4).length))}${last4}`:"Saved — leave blank to keep";
 
 function Login({setup,done,fail}){
@@ -39,12 +39,12 @@ function Pairing({account,onLinked,onCancel}){
   return <main className="pairing"><section className="pair-card"><span className="eyebrow">CONNECT WHATSAPP</span><h1>Link {account.label}</h1><p>Open WhatsApp on your phone, then scan this code to link <b>{account.label}</b>.</p>{image?<img className="qr" src={image} alt="WhatsApp pairing QR code"/>:<div className="qr loading" role="status">{message}</div>}<ol><li>Open WhatsApp on your phone</li><li>Choose <b>Linked devices</b></li><li>Tap <b>Link a device</b> and scan this code</li></ol><p className="pair-status"><i/>{message}</p><button className="pairing-cancel" onClick={onCancel}>Cancel</button></section></main>
 }
 
-function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
-  const[llm,setLlm]=useState(null),[n8n,setN8n]=useState(null),[profile,setProfile]=useState(null),[service,setService]=useState(null),[busy,setBusy]=useState(false),[testModal,setTestModal]=useState(null),[testResult,setTestResult]=useState(null);
+function Settings({account,tab,onTab,onAllSettings,onReconnect,onClose,onDeleted,onNotice,onRenamed}){
+  const[llm,setLlm]=useState(null),[n8n,setN8n]=useState(null),[voices,setVoices]=useState({voices:[],limit:5,templates:[]}),[busy,setBusy]=useState(false),[testModal,setTestModal]=useState(null),[testResult,setTestResult]=useState(null);
   const base="/api/app/accounts/"+encodeURIComponent(account.id);
   const llmFormRef=useRef(null);
   const[n8nWorkflowId,setN8nWorkflowId]=useState("");
-  const refresh=useCallback(()=>Promise.all([api(base+"/llm"),api(base+"/n8n/connect"),api("/api/app/auth/profile")]).then(x=>{setLlm(x[0]);setN8n(x[1]);setProfile(x[2])}).catch(x=>onNotice(x.message)),[base,onNotice]);
+  const refresh=useCallback(()=>Promise.all([api(base+"/llm"),api(base+"/n8n/connect"),api(base+"/voices")]).then(x=>{setLlm(x[0]);setN8n(x[1]);setVoices(x[2])}).catch(x=>onNotice(x.message)),[base,onNotice]);
   useEffect(()=>{refresh()},[refresh]);
   
   // Escape key to close
@@ -67,7 +67,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
   };
   const connectN8n=async e=>{e.preventDefault();const f=e.currentTarget;const n8nUrl=f.n8nUrl.value.trim().replace(/\/+$/,"");const enteredKey=f.n8nApiKey.value.trim();setBusy(true);try{const result=await api(base+"/n8n/connect",{method:"POST",body:JSON.stringify({n8nUrl,n8nApiKey:enteredKey||"__keep__"})});setN8n(current=>({...current,connected:true,n8nUrl,n8nApiKeyLength:enteredKey.length||current?.n8nApiKeyLength||0,n8nApiKeyLast4:enteredKey?enteredKey.slice(-4):current?.n8nApiKeyLast4||"",workflows:result.workflowId?[...(current?.workflows||[]).filter(workflow=>workflow.kind!=="standard"),{kind:"standard",workflowId:result.workflowId,workflowName:result.workflowName,workflowUrl:result.workflowUrl}]:current?.workflows||[]}));await refresh();onNotice(result.reused?"n8n connection verified.":"n8n workflow created and connected.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const saveName=async e=>{e.preventDefault();const label=e.currentTarget.label.value.trim();if(!label)return;setBusy(true);try{await api(base+"/label",{method:"PATCH",body:JSON.stringify({label})});onRenamed?.(account.id,label);onNotice("Account name saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
-  const saveProfile=async payload=>{setBusy(true);try{const result=await api("/api/app/auth/profile",{method:"PATCH",body:JSON.stringify(payload)});setProfile(current=>({...current,username:result.username,email:result.email}));onNotice("Sign-in details saved.");return true}catch(x){onNotice(x.message);return false}finally{setBusy(false)}};
+
   const del=async()=>{if(!await confirmDialog({title:"Delete this account?",message:`${account.label} will be removed from Gakai and its linked WhatsApp session cleared. You can add and scan it again later.`,confirmLabel:"Delete account",danger:true}))return;setBusy(true);try{await api(base,{method:"DELETE"});onDeleted()}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   // "Enable n8n AI Agent replies": one action for both first-time setup
   // (creates the n8n workflow) and re-enabling an existing one — the server
@@ -116,32 +116,39 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
   const deleteIntegration=async kind=>{const label=kind==="n8n"?"n8n automation":"AI Responses";if(!await confirmDialog({title:`Delete ${label} integration?`,message:`The ${label} integration for ${account.label} will be removed.`,confirmLabel:"Delete integration",danger:true}))return;setBusy(true);try{await api(base+(kind==="n8n"?"/n8n/connect":"/llm"),{method:"DELETE"});await refresh();onNotice(`${label} integration deleted.`)}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const toggleAutomation=async(subscriptionId,enabled,label)=>{if(!subscriptionId)return;setBusy(true);try{const result=await api(base+"/automations/"+encodeURIComponent(subscriptionId),{method:"PATCH",body:JSON.stringify({enabled})});await refresh();onNotice(enabled&&result.aiWorkflowUnpublished?"n8n replies are on. The AI Agent workflow is now inactive.":enabled&&result.aiWorkflowMissing?"n8n replies are on. The old AI Agent workflow no longer exists in n8n.":enabled&&result.standardWorkflowRecreated?"n8n replies are on. A new standard workflow was created and activated.":enabled?"n8n replies are on and the workflow is active.":result.n8nWorkflowsDeactivated?"n8n replies are off. Both n8n workflows are inactive.":"n8n replies are off.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
 
-  const services={
-    llm:{title:"AI Responses",subtitle:"AI replies",ready:!!llm?.configured},
-    n8n:{title:"n8n Automation",subtitle:"Automation",ready:!!n8n?.connected},
-  };
+  // The tab picks which panel shows; the two integration panels keep their existing content.
+  const service=tab==="ai"?"llm":tab==="automation"?"n8n":null;
+  const tabs=[{id:"connection",label:"Connection"},{id:"ai",label:"AI responses",ready:!!llm?.configured},{id:"voices",label:"AI Voice and Tone",ready:voices.voices.length>0},{id:"automation",label:"n8n Automation",ready:!!n8n?.connected}];
+  const goTab=id=>{setTestModal(null);setTestResult(null);onTab(id)};
   const agentWorkflow=n8n?.workflows?.find(workflow=>workflow.kind==="agentic");
   const standardWorkflow=n8n?.workflows?.find(workflow=>workflow.kind==="standard");
   useEffect(()=>{if(agentWorkflow?.workflowId)setN8nWorkflowId(agentWorkflow.workflowId)},[agentWorkflow?.workflowId]);
-  const detail=service==="n8n"?<><h3>n8n Automation</h3><p>Create Gakai’s standard automation template in your n8n instance. It contains no AI node.</p>{standardWorkflow?<div className="workflow-links"><a href={standardWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`n8n workflow (${standardWorkflow.workflowId})`}</span><b>{standardWorkflow.workflowName||"Gakai"}</b><em>Open in n8n ↗</em></a></div>:null}{standardWorkflow?.subscriptionId?<label className="checkbox-field"><input type="checkbox" checked={!!standardWorkflow.active} disabled={busy} onChange={e=>toggleAutomation(standardWorkflow.subscriptionId,e.currentTarget.checked,"n8n replies")}/><span><b>Enable n8n replies</b><small>Route direct messages, and group messages where you're tagged, through this n8n automation. Turns off native AI replies and n8n AI Agent replies.</small></span></label>:null}{standardWorkflow?.subscriptionId?<button type="button" className="secondary n8n-test-action" onClick={()=>{setTestModal({kind:"n8n",subscriptionId:standardWorkflow.subscriptionId});setTestResult(null)}}>Send test message</button>:null}<form key={`n8n-${n8n?.n8nUrl||"new"}`} className="integration-form integration-form-stacked" onSubmit={connectN8n}><label>n8n URL<input name="n8nUrl" type="url" defaultValue={n8n?.n8nUrl||""} placeholder="https://yourname.app.n8n.cloud" required/></label><label>n8n API key<input name="n8nApiKey" type="password" placeholder="Paste a replacement n8n API key" required={!n8n?.connected}/>{n8n?.connected&&<small className="saved-key-mask">Saved key: ••••…••{n8n.n8nApiKeyLast4}</small>}</label><button className="primary integration-submit" disabled={busy}>{busy?"Verifying authorization…":"Save and verify authorization"}</button></form></>:service==="llm"?<><h3>AI Responses</h3><p>Choose who writes your replies: your own LiteLLM proxy, Claude, or ChatGPT. Enter a key and Gakai lists the models available to it.</p>{agentWorkflow?<div className="workflow-links"><a href={agentWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`AI Agent workflow (${agentWorkflow.workflowId})`}</span><b>{agentWorkflow.workflowName||"Gakai AI Agent"}</b><em>Open in n8n ↗</em></a></div>:null}{llm?.configured?<button type="button" className="secondary llm-test-action" onClick={()=>{const useAgent=!!agentWorkflow?.active&&!!agentWorkflow?.subscriptionId;setTestModal(useAgent?{kind:"n8n",subscriptionId:agentWorkflow.subscriptionId}:{kind:"llm"});setTestResult(null)}}>Send test message{agentWorkflow?.active?" (via n8n AI Agent)":""}</button>:null}<form key={`llm-${llm?.provider||"new"}-${llm?.baseUrl||""}-${llm?.model||""}`} className="integration-form integration-form-stacked" ref={llmFormRef} onSubmit={saveLlm}><AiProviderFields llm={llm} base={base} busy={busy} onCommit={()=>llmFormRef.current?.requestSubmit()}/><label>Assistant instructions<textarea name="systemPrompt" rows="6" defaultValue={llm?.systemPrompt||""} onBlur={e=>{if(llm?.configured&&e.currentTarget.value.trim()!==String(llm.systemPrompt||"").trim())llmFormRef.current?.requestSubmit()}}/></label>{llm?.configured&&n8n?.connected?<label className="checkbox-field"><input type="checkbox" checked={!!agentWorkflow?.active} disabled={busy} onChange={e=>setN8nAgentEnabled(e.currentTarget.checked)}/><span><b>Enable n8n AI Agent replies</b><small>Creates or updates the n8n AI Agent workflow and replies through it — direct messages, and group messages where you're tagged. Turns off native AI replies and standard n8n replies.</small></span></label>:llm?.configured?<p className="hint-inline"><small>Connect n8n in the n8n Automation panel to enable AI Agent replies through n8n.</small></p>:null}</form>{llm?.configured?<AiReplyRules key={account.id} llm={llm} base={base} onNotice={onNotice} onSaved={result=>setLlm(current=>({...current,replyRules:result.replyRules,replyLabels:result.replyLabels}))}/>:null}{llm?.configured?<label className="checkbox-field"><input type="checkbox" checked={!!llm?.nativeEnabled} disabled={busy} onChange={e=>setNativeEnabled(e.currentTarget.checked)}/><span><b>Enable native AI replies (no n8n)</b><small>Gakai sends the incoming message to your AI provider and returns its response straight through WhatsApp. It turns off and deactivates both n8n reply workflows.</small></span></label>:null}</>:<><h3>Select services</h3><p>Choose a service to configure it for <b>{account.label}</b>.</p></>;
+  const detail=service==="n8n"?<><h3>n8n Automation</h3><p>Create Gakai’s standard automation template in your n8n instance. It contains no AI node.</p>{standardWorkflow?<div className="workflow-links"><a href={standardWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`n8n workflow (${standardWorkflow.workflowId})`}</span><b>{standardWorkflow.workflowName||"Gakai"}</b><em>Open in n8n ↗</em></a></div>:null}{standardWorkflow?.subscriptionId?<label className="checkbox-field"><input type="checkbox" checked={!!standardWorkflow.active} disabled={busy} onChange={e=>toggleAutomation(standardWorkflow.subscriptionId,e.currentTarget.checked,"n8n replies")}/><span><b>Enable n8n replies</b><small>Route direct messages, and group messages where you're tagged, through this n8n automation. Turns off native AI replies and n8n AI Agent replies.</small></span></label>:null}{standardWorkflow?.subscriptionId?<button type="button" className="secondary n8n-test-action" onClick={()=>{setTestModal({kind:"n8n",subscriptionId:standardWorkflow.subscriptionId});setTestResult(null)}}>Send test message</button>:null}<form key={`n8n-${n8n?.n8nUrl||"new"}`} className="integration-form integration-form-stacked" onSubmit={connectN8n}><label>n8n URL<input name="n8nUrl" type="url" defaultValue={n8n?.n8nUrl||""} placeholder="https://yourname.app.n8n.cloud" required/></label><label>n8n API key<input name="n8nApiKey" type="password" placeholder="Paste a replacement n8n API key" required={!n8n?.connected}/>{n8n?.connected&&<small className="saved-key-mask">Saved key: ••••…••{n8n.n8nApiKeyLast4}</small>}</label><button className="primary integration-submit" disabled={busy}>{busy?"Verifying authorization…":"Save and verify authorization"}</button></form></>:service==="llm"?<><h3>AI Responses</h3><p>Choose who writes your replies: your own LiteLLM proxy, Claude, or ChatGPT. Enter a key and Gakai lists the models available to it.</p>{agentWorkflow?<div className="workflow-links"><a href={agentWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`AI Agent workflow (${agentWorkflow.workflowId})`}</span><b>{agentWorkflow.workflowName||"Gakai AI Agent"}</b><em>Open in n8n ↗</em></a></div>:null}{llm?.configured?<button type="button" className="secondary llm-test-action" onClick={()=>{const useAgent=!!agentWorkflow?.active&&!!agentWorkflow?.subscriptionId;setTestModal(useAgent?{kind:"n8n",subscriptionId:agentWorkflow.subscriptionId}:{kind:"llm"});setTestResult(null)}}>Send test message{agentWorkflow?.active?" (via n8n AI Agent)":""}</button>:null}<form key={`llm-${llm?.provider||"new"}-${llm?.baseUrl||""}-${llm?.model||""}`} className="integration-form integration-form-stacked" ref={llmFormRef} onSubmit={saveLlm}><AiProviderFields llm={llm} base={base} busy={busy} onCommit={()=>llmFormRef.current?.requestSubmit()}/><label>Default instructions<small className="field-hint">Used for anyone without a voice profile. A voice profile is the better way to shape replies.</small><textarea name="systemPrompt" rows="6" defaultValue={llm?.systemPrompt||""} onBlur={e=>{if(llm?.configured&&e.currentTarget.value.trim()!==String(llm.systemPrompt||"").trim())llmFormRef.current?.requestSubmit()}}/></label>{llm?.configured&&n8n?.connected?<label className="checkbox-field"><input type="checkbox" checked={!!agentWorkflow?.active} disabled={busy} onChange={e=>setN8nAgentEnabled(e.currentTarget.checked)}/><span><b>Enable n8n AI Agent replies</b><small>Creates or updates the n8n AI Agent workflow and replies through it — direct messages, and group messages where you're tagged. Turns off native AI replies and standard n8n replies.</small></span></label>:llm?.configured?<p className="hint-inline"><small>Connect n8n in the n8n Automation tab to enable AI Agent replies through n8n.</small></p>:null}</form>{llm?.configured?<div className="ai-next"><b>Next: shape the replies</b><p>Give the AI a voice for each kind of conversation, and choose who each voice answers, in AI Voice and Tone.</p><div className="ai-next-actions"><button type="button" className="secondary" onClick={()=>goTab("voices")}>AI Voice and Tone{voices.voices.length?` (${voices.voices.length})`:""}</button></div></div>:null}{llm?.configured?<label className="checkbox-field"><input type="checkbox" checked={!!llm?.nativeEnabled} disabled={busy} onChange={e=>setNativeEnabled(e.currentTarget.checked)}/><span><b>Enable native AI replies (no n8n)</b><small>Gakai sends the incoming message to your AI provider and returns its response straight through WhatsApp. It turns off and deactivates both n8n reply workflows.</small></span></label>:null}</>:<><h3>Select services</h3><p>Choose a service to configure it for <b>{account.label}</b>.</p></>;
 
   return <div className="details" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <header className="details-head">
       <div className="details-identity">
         <Avatar item={account}/>
-        <div><span className="eyebrow">ACCOUNT DETAILS</span><h2 id="settings-title">{account.label}</h2><small>Phone: {account.phone||"Not connected"} · {status(account.status)}</small></div>
+        <div><span className="eyebrow">PROFILE SETTINGS</span><h2 id="settings-title">{account.label}</h2><small>{account.phone?`+${account.phone} · `:""}{status(account.status)}</small></div>
       </div>
-      <button className="secondary" onClick={onClose} aria-label="Back to inbox">‹ Inbox</button>
+      <div className="details-head-actions">
+        <button className="secondary" onClick={onAllSettings}>All settings</button>
+        <button className="secondary" onClick={onClose} aria-label="Back to inbox">‹ Inbox</button>
+      </div>
     </header>
     <main className="details-main">
-      <div className="details-top">
-        <section className="details-card"><h3>Account name</h3><p>Name this WhatsApp account for your workspace.</p><form onSubmit={saveName}><input name="label" defaultValue={account.label} maxLength="80" required/><button className="primary" disabled={busy}>Save</button></form></section>
-        <section className="details-card"><h3>Integrations</h3><p>Connect automation, AI, or custom services with separate account-scoped settings.</p><small>Keys and configuration stay isolated to this WhatsApp account.</small></section>
+      <nav className="settings-tabs" role="tablist" aria-label="Profile settings">
+        {tabs.map(item=><button key={item.id} type="button" role="tab" id={"tab-"+item.id} aria-selected={tab===item.id} aria-controls="settings-panel" className={tab===item.id?"on":""} onClick={()=>goTab(item.id)}>{item.label}{item.ready?<span className="tab-check" aria-label="Set up">✓</span>:null}</button>)}
+      </nav>
+      <div id="settings-panel" role="tabpanel" aria-labelledby={"tab-"+tab}>
+        {tab==="connection"&&<>
+          <section className="details-card"><h3>Account name</h3><p>Name this WhatsApp account for your workspace.</p><form onSubmit={saveName}><input name="label" defaultValue={account.label} maxLength="80" required/><button className="primary" disabled={busy}>Save</button></form></section>
+          {account.status!=="WORKING"&&<section className="details-card"><h3>Connection</h3><p>This WhatsApp account is not connected right now ({status(account.status).toLowerCase()}). Reconnect it to send and receive messages.</p><button type="button" className="primary" onClick={()=>onReconnect(account)}>Reconnect with QR code</button></section>}
+          <div className="details-delete"><div><h3>Delete account</h3><p>Remove this WhatsApp account from Gakai. You can add and scan it again later.</p></div><button type="button" className="danger" disabled={busy} onClick={del}>{busy?"Deleting…":"Delete account"}</button></div>
+        </>}
+        {tab==="voices"&&<VoiceProfilesPanel base={base} data={voices} llm={llm} onLlmSaved={result=>setLlm(current=>({...current,replyRules:result.replyRules,replyLabels:result.replyLabels}))} onOpenAi={()=>goTab("ai")} onChanged={refresh} onNotice={onNotice}/>}
+        {service&&<section className="details-card service-panel"><div className="service-detail">{detail}{service==="n8n"&&n8n?.connected?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("n8n")}>Delete integration</button>:null}{service==="llm"&&llm?.configured?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("llm")}>Delete integration</button>:null}</div></section>}
       </div>
-      <section className="details-card services"><div className="services-list"><h3>Services</h3>{Object.entries(services).map(([key,item])=><button key={key} data-service={key} type="button" className={(service===key?"on ":"")+(item.ready?"has-integration":"")} onClick={()=>{setService(key);setTestModal(null);setTestResult(null)}}>{item.title}<small>{item.subtitle}</small>{item.ready?<span className="integration-check" aria-label="Connected">✓</span>:null}</button>)}</div><div className="service-detail">{detail}{service==="n8n"&&n8n?.connected?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("n8n")}>Delete integration</button>:null}{service==="llm"&&llm?.configured?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("llm")}>Delete integration</button>:null}</div></section>
-      <AdminProfileCard profile={profile} busy={busy} onSave={saveProfile}/>
-      <ApiTokensCard key={account.id} account={account} base={base} onNotice={onNotice}/>
-      <div className="details-delete"><div><h3>Delete account</h3><p>Remove this WhatsApp account from Gakai. You can add and scan it again later.</p></div><button type="button" className="danger" disabled={busy} onClick={del}>{busy?"Deleting…":"Delete account"}</button></div>
     </main>
     {testModal&&<div className="modal-overlay" role="presentation" onClick={()=>setTestModal(null)}>
       <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="test-message-title" onClick={e=>e.stopPropagation()}>
@@ -210,7 +217,7 @@ function NewChatDialog({accountId,onClose,onOpened}){
 }
 
 function App(){
-  const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[settings,setSettings]=useState(false),[note,setNote]=useState(""),[newChat,setNewChat]=useState(false);
+  const[auth,setAuth]=useState(),[accounts,setAccounts]=useState([]),[accountsReady,setAccountsReady]=useState(false),[account,setAccount]=useState(),[chats,setChats]=useState([]),[chatsLoading,setChatsLoading]=useState(false),[chat,setChat]=useState(),[q,setQ]=useState(""),[add,setAdd]=useState(false),[pair,setPair]=useState(),[pairCreated,setPairCreated]=useState(false),[route,setRoute]=useState(()=>parseRoute(window.location.pathname)),[note,setNote]=useState(""),[newChat,setNewChat]=useState(false);
   const[chatFilter,setChatFilter]=useState("all");
   // The vertical menu can shrink to just the logo and account avatars. The
   // choice is remembered per browser; storage can be blocked, so it is optional.
@@ -224,6 +231,11 @@ function App(){
   const settingsRef=useRef(null);
   const chatListRef=useRef(null);
   const suppressAutoSelectRef=useRef(false);
+  // A conversation the app opened by itself (the first one, when the page loads) is not one the
+  // reader has looked at, so it is not marked read until they click or scroll in it.
+  const [autoOpened,setAutoOpened]=useState(false);
+  const autoPickedRef=useRef(false);
+  const engageChat=useCallback(()=>setAutoOpened(false),[]);
   const autoPairStartedRef=useRef(false);
   const accountsRequestRef=useRef(0);
   const chatsRequestRef=useRef(0);
@@ -239,6 +251,12 @@ function App(){
 
   const fail=useCallback(x=>{setNote(x);setTimeout(()=>setNote(""),4500)},[]);
 
+  // Screens live at real addresses (/settings, /profile-settings/<name>), so refresh, the
+  // back button and shared links all work. navigate() changes the address and the screen together.
+  const navigate=useCallback((path,{replace=false}={})=>{history[replace?"replaceState":"pushState"]({},"",path);setRoute(parseRoute(path))},[]);
+  useEffect(()=>{const onPop=()=>setRoute(parseRoute(window.location.pathname));window.addEventListener("popstate",onPop);return()=>window.removeEventListener("popstate",onPop)},[]);
+  const accountsRef=useRef([]);
+
   // Mention toasts: raised from the account's live SSE stream when a group
   // message @-tags this account and that chat isn't already open. Kept in a
   // ref-mirrored open-chat id and a seen-event set so the stream handler
@@ -250,6 +268,7 @@ function App(){
   const seenEventIdsRef=useRef(new Set());
   useEffect(()=>{chatsRef.current=chats},[chats]);
   useEffect(()=>{openChatIdRef.current=chat?.id||null},[chat?.id]);
+  useEffect(()=>{if(autoPickedRef.current&&chat){autoPickedRef.current=false;setAutoOpened(true)}},[chat]);
   const dismissMentionToast=useCallback(toastId=>setMentionToasts(current=>current.filter(item=>item.id!==toastId)),[]);
 
   const refresh=useCallback(async()=>{
@@ -261,7 +280,7 @@ function App(){
     try{
       const d=await api("/api/app/accounts"),a=d.accounts||[];
       if(accountsRequestRef.current!==version)return;
-      const requestedDetails=detailsSlug(),requestedAccount=requestedDetails?a.find(item=>slug(item.label)===requestedDetails||slug(item.id)===requestedDetails):null;setAccounts(a);if(requestedAccount){setAccount(requestedAccount);if(requestedAccount.status!=="WORKING"){history.replaceState({},"","/");setSettings(false);setPairCreated(false);setPair(requestedAccount)}else setSettings(true)}else setAccount(old=>a.find(x=>x.id===old?.id)||a.find(x=>x.status==="WORKING")||a[0])
+      setAccounts(a);setAccount(old=>a.find(x=>x.id===old?.id)||a.find(x=>x.status==="WORKING")||a[0])
       // Only a genuinely successful read may mark accounts "ready" — the
       // auto-pair effect below treats accountsReady+zero accounts as "this
       // is a brand-new workspace" and auto-creates one. A failed fetch (the
@@ -321,15 +340,18 @@ function App(){
       // A working inbox should open on a useful conversation, not a blank
       // "Select a conversation" placeholder. Keep the reader's existing chat
       // selected during refreshes, otherwise open the newest one.
-      setChat(current=>current?next.find(item=>item.id===current.id):suppressAutoSelectRef.current?undefined:next[0]);
+      setChat(current=>{if(current)return next.find(item=>item.id===current.id);if(suppressAutoSelectRef.current)return undefined;if(next[0])autoPickedRef.current=true;return next[0]});
       hydratePictures(id,version,next);
     }catch(x){if(chatsRequestRef.current===version)fail(x.message)}finally{if(chatsRequestRef.current===version)setChatsLoading(false)}
   },[fail,hydratePictures]);
 
   const handleAccountRenamed=useCallback((id,label)=>{
+    // The page address is built from the name, so a rename moves the address with it.
+    const renamed=accountsRef.current.map(item=>item.id===id?{...item,label}:item),current=renamed.find(item=>item.id===id),here=parseRoute(window.location.pathname);
+    if(current&&here.view==="profile")navigate(profilePath(accountSlug(current,renamed),here.tab),{replace:true});
     setAccounts(current=>current.map(item=>item.id===id?{...item,label}:item));
     setAccount(current=>current?.id===id?{...current,label}:current);
-  },[]);
+  },[navigate]);
 
   // SSE carries normalized Gakai events. Keep a low-frequency fallback for
   // provider changes that do not emit a webhook (for example, a QR lifecycle).
@@ -344,7 +366,6 @@ function App(){
   useEffect(()=>{chatsLengthRef.current=chats.length},[chats.length]);
   useEffect(()=>{
     if(!account || account.status!=="WORKING") return;
-    const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(account.id));
     const update=event=>{
       try{
         const change=JSON.parse(event.data);
@@ -369,11 +390,12 @@ function App(){
         }
       }catch{}
     };
-    stream.addEventListener("gakai",update);
+    // A tab that was hidden holds no connection; catch up on what it missed when it returns.
+    const unsubscribe=eventHub.subscribe([account.id],update,()=>loadRef.current(account.id));
     let timer;
-    const schedule=()=>{timer=window.setTimeout(()=>{loadRef.current(account.id);schedule()},chatsLengthRef.current?60000:10000)};
+    const schedule=()=>{timer=window.setTimeout(()=>{if(!document.hidden)loadRef.current(account.id);schedule()},chatsLengthRef.current?60000:10000)};
     schedule();
-    return()=>{stream.removeEventListener("gakai",update);stream.close();window.clearTimeout(timer)};
+    return()=>{unsubscribe();window.clearTimeout(timer)};
   },[account?.id, account?.status]);
 
   // The sidebar's unread dot must reflect every connected account, not just
@@ -402,29 +424,36 @@ function App(){
   useEffect(()=>{
     const ids=workingAccountsKey?workingAccountsKey.split(","):[];
     if(!ids.length)return undefined;
-    const streams=ids.map(id=>{
-      // after=now: this stream already has the true current unread state
-      // from the regular /accounts fetch — without opting out, every fresh
-      // connection replays recent history (for reconnect catch-up), and
-      // this handler has no way to tell that apart from something genuinely
-      // new, so it pinned the dot on immediately regardless of real state.
-      const stream=new EventSource("/api/app/events?accountId="+encodeURIComponent(id)+"&after=now");
-      const update=()=>setAccounts(current=>current.map(item=>item.id===id?{...item,hasUnread:true}:item));
-      stream.addEventListener("gakai",update);
-      stream._gakaiUpdate=update;
-      return stream;
+    const unsubscribers=ids.map(id=>{
+      // Only a newly received message can make the dot appear. Everything else on the stream
+      // (a read elsewhere, a status change) re-asks the server instead of guessing.
+      const update=(_event,change)=>{
+        const type=change?.type;
+        if(type==="message.received")setAccounts(current=>current.map(item=>item.id===id?{...item,hasUnread:true}:item));
+        else if(type==="chat.read")refreshRef.current();
+      };
+      return eventHub.subscribe([id],update,()=>refreshRef.current());
     });
     // A rare, low-frequency fallback: a read that happens entirely outside
     // Gakai (another linked device) never emits a webhook, so this alone
     // still needs an eventual-consistency check — deliberately infrequent
     // now that turning the dot on (above) and off (see handleChatClick)
     // no longer depend on it for the normal case.
-    const timer=window.setInterval(()=>refreshRef.current(),5*60*1000);
-    return()=>{streams.forEach(stream=>{stream.removeEventListener("gakai",stream._gakaiUpdate);stream.close()});window.clearInterval(timer)};
+    const timer=window.setInterval(()=>{if(!document.hidden)refreshRef.current()},5*60*1000);
+    return()=>{unsubscribers.forEach(unsubscribe=>unsubscribe());window.clearInterval(timer)};
   },[workingAccountsKey]);
 
   useEffect(()=>{api("/api/app/auth/state").then(setAuth).catch(x=>fail(x.message))},[fail]);
   useEffect(()=>{if(auth?.authenticated)refresh()},[auth,refresh]);
+  useEffect(()=>{accountsRef.current=accounts},[accounts]);
+  // A profile page resolves its WhatsApp account from the address.
+  const profileTarget=route.view==="profile"?findAccountBySlug(accounts,route.slug):null;
+  useEffect(()=>{
+    if(!accountsReady||route.view!=="profile")return;
+    if(!profileTarget){navigate("/settings",{replace:true});fail("That WhatsApp profile doesn't exist.");return}
+    if(route.legacy)navigate(profilePath(accountSlug(profileTarget,accounts),route.tab),{replace:true});   // the old /details/<name> address
+    else if(account?.id!==profileTarget.id)setAccount(profileTarget);
+  },[accountsReady,route,profileTarget,accounts,account?.id,navigate,fail]);
   // Once signed in, the server's saved menu state wins over this browser's.
   useEffect(()=>{
     if(!auth?.authenticated)return undefined;
@@ -445,34 +474,33 @@ function App(){
     });
   },[chats,archivedChats,q,chatFilter]);
 
-  // Keep unread state server-authoritative. The badge clears only after the
-  // provider has accepted the read receipt; no arbitrary client timer.
-  const markingReadRef=useRef(new Set());
-  const handleChatClick=useCallback((chatItem)=>{
+  // Unread state lives on the server: a conversation is read only when the reader has actually
+  // seen its newest message (ChatPanel reports that), never merely because it was opened. Each
+  // report names the newest message seen; the server's answer is the authoritative count. Answers
+  // can arrive out of order, so only the latest report for a conversation is applied.
+  const readVersionRef=useRef(new Map());
+  const handleChatClick=useCallback(chatItem=>{
     suppressAutoSelectRef.current=false;
+    setAutoOpened(false);
     setChat(chatItem);
-    if(chatItem.unreadCount && account){
-      // A rapid double-click (or clicking away and back before the first
-      // POST resolves) must not fire two concurrent mark-as-read requests.
-      runExclusive(markingReadRef.current,chatItem.id,async()=>{
-        try{
-          await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(chatItem.id)+"/read",{method:"POST"});
-          setChats(current=>{
-            const next=current.map(c=>c.id===chatItem.id?{...c,unreadCount:0}:c);
-            chatsCacheRef.current.set(account.id,next);
-            // The sidebar's unread dot should clear the moment the reader
-            // actually reads the last unread conversation, not on some
-            // later poll — computed straight from the list already in
-            // hand (no extra provider round trip needed to know this).
-            const stillUnread=next.some(c=>c.unreadCount>0);
-            setAccounts(list=>list.map(a=>a.id===account.id?{...a,hasUnread:stillUnread}:a));
-            return next;
-          });
-          load(account.id);
-        }catch(x){fail(x.message||"Could not mark this conversation as read");}
+  },[]);
+  const handleSeen=useCallback(async(chatId,through)=>{
+    if(!account)return;
+    const version=(readVersionRef.current.get(chatId)||0)+1;
+    readVersionRef.current.set(chatId,version);
+    try{
+      const result=await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(chatId)+"/read",{method:"POST",body:JSON.stringify({through})});
+      if(readVersionRef.current.get(chatId)!==version)return;
+      const unreadCount=Number(result.unreadCount)||0;
+      setChats(current=>{
+        const next=current.map(c=>c.id===chatId?{...c,unreadCount}:c);
+        chatsCacheRef.current.set(account.id,next);
+        const stillUnread=next.some(c=>c.unreadCount>0);
+        setAccounts(list=>list.map(a=>a.id===account.id?{...a,hasUnread:stillUnread}:a));
+        return next;
       });
-    }
-  },[account,fail,load]);
+    }catch(x){fail(x.message||"Could not mark this conversation as read");}
+  },[account,fail]);
 
   // Drop a freshly-opened conversation into the inbox list (deduped) and select
   // it, so a brand-new chat behaves exactly like clicking an existing one.
@@ -653,10 +681,13 @@ function App(){
       <button type="button" className="mention-toast-dismiss" aria-label="Dismiss" onClick={()=>dismissMentionToast(toast.id)}>×</button>
     </div>)}
   </div>;
-  const closeSettings=()=>{history.pushState({},"","/");setSettings(false)};
-  const openAccountSettings=x=>{history.pushState({},"","/details/"+slug(x.label));setAccount(x);setSettings(true)};
-  const accountDeleted=async()=>{history.replaceState({},"","/");setSettings(false);setChat();await refresh()};
-  if(settings&&account)return <><Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>{note?<div className="toast" role="status">{note}</div>:null}{mentionToastStack}</>;
+  const closeSettings=()=>navigate("/");
+  const openAccountSettings=x=>{setAccount(x);navigate(profilePath(accountSlug(x,accounts)))};
+  const accountDeleted=async()=>{navigate("/",{replace:true});setChat();await refresh()};
+  const toasts=<>{note?<div className="toast" role="status">{note}</div>:null}{mentionToastStack}</>;
+  if(route.view==="settings")return <><WorkspaceSettings accounts={accounts} onClose={closeSettings} onManage={openAccountSettings} onAddAccount={beginPairing} onNotice={fail}/>{toasts}</>;
+  if(route.view==="profile"&&profileTarget)return <><Settings account={profileTarget} tab={route.tab} onTab={tab=>navigate(profilePath(accountSlug(profileTarget,accounts),tab),{replace:true})} onAllSettings={()=>navigate("/settings")} onReconnect={x=>{setPairCreated(false);setPair(x)}} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>{toasts}</>;
+  if(route.view==="profile")return <main className="pairing">Opening profile…</main>;
 
   return (
     <>
@@ -695,7 +726,7 @@ function App(){
             <div><h2>Inbox</h2><small>{account?.label} · {status(account?.status)}</small></div>
             <div className="header-actions">
               {account?.status==="WORKING"&&<button type="button" className="subtle-btn" onClick={()=>setNewChat(true)}>+ New chat</button>}
-              <button type="button" className="subtle-btn" onClick={beginPairing}>+ Add account</button>
+              <button type="button" className="subtle-btn settings-gear" onClick={()=>navigate("/settings")} aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
             </div>
           </header>
           {account?.status!=="WORKING"?<div className="empty"><div><h1>Account needs attention</h1><p>Reconnect this account to continue.</p><button className="primary" onClick={()=>{setPairCreated(false);setPair(account)}}>Reconnect with QR code</button></div></div>:<div className="inbox">
@@ -736,11 +767,10 @@ function App(){
               </div>)}
               {chatsLoading&&!chats.length?<p className="hint loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading conversations from WhatsApp…</p>:!visible.length?<p className="hint">{chatFilter==="archived"?"No archived conversations.":chats.length?"No conversations match this filter.":"No conversations yet. Gakai is waiting for WhatsApp to finish syncing."}</p>:null}
             </section>
-            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} chats={chats} onBack={()=>setChat()} onSent={handleSent} onForwarded={handleForwarded} onChatState={chatStateAction} onBlock={blockAction} onDisappearing={disappearingAction} onDeleted={handleChatDeleted} onAiToggle={aiToggleAction}/>:<div className="blank">Select a conversation</div>}</section>
+            <section className={"conversation "+(!chat?"mobile-hide":"")}>{chat?<ChatPanel key={account.id+"/"+chat.id} accountId={account.id} accountLabel={account.label} accountPicture={account.picture} chat={chat} chats={chats} onSeen={handleSeen} seenHeld={autoOpened} onEngage={engageChat} onBack={()=>setChat()} onSent={handleSent} onForwarded={handleForwarded} onChatState={chatStateAction} onBlock={blockAction} onDisappearing={disappearingAction} onDeleted={handleChatDeleted} onAiToggle={aiToggleAction}/>:<div className="blank">Select a conversation</div>}</section>
           </div>}
         </main>
       </div>
-      {settings&&account?<Settings account={account} onClose={closeSettings} onDeleted={accountDeleted} onNotice={fail} onRenamed={handleAccountRenamed}/>:null}
       {newChat&&account?<NewChatDialog accountId={account.id} onClose={()=>setNewChat(false)} onOpened={openNewConversation}/>:null}
       {note?<div className="toast" role="status">{note}</div>:null}
       {mentionToastStack}
