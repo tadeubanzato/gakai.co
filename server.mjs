@@ -10,6 +10,7 @@ import { chatTimestamp, extractMentionIds, hasMessageContent, mentionsIdentity, 
 import { fetchPinned, validatePublicUrl } from './src/lib/safe-fetch.mjs';
 import { createBoundedCache } from './src/lib/lru-cache.mjs';
 import { decodeHtmlEntities } from './src/lib/html.mjs';
+import { isRecoverableStreamError } from './src/lib/process-guard.mjs';
 
 const port = Number(process.env.PORT || 3000);
 // Encrypts secrets we must read back later (e.g. the n8n API key, to call n8n's
@@ -1510,9 +1511,22 @@ async function shutdown(signal){
   forceExit.unref();
   try{await provider.shutdown();}catch(error){console.error('Provider shutdown failed:',error.message);}
   await new Promise(resolve=>setTimeout(resolve,500));
-  server.close(()=>{clearTimeout(forceExit);process.exit(0);});
+  server.close(()=>{clearTimeout(forceExit);process.exit(process.exitCode||0);});
 }
 process.on('SIGTERM',()=>{shutdown('SIGTERM')});
 process.on('SIGINT',()=>{shutdown('SIGINT')});
+// A media download whose connection drops mid-body raises an 'error' on a
+// stream nothing listens to, which Node's default turns into an immediate
+// process exit — every account disconnected and every admin session lost
+// over one failed attachment. Log that case and carry on (the download's own
+// timeout fails the request). Anything else is a real fault: still exit, but
+// through the same graceful path a signal takes, so a credential write
+// already in flight can finish.
+process.on('uncaughtException',error=>{
+  if(isRecoverableStreamError(error)){console.error('Recovered from a dropped network stream:',error?.message,error?.cause?.code||error?.code||'');return;}
+  console.error('Uncaught exception; shutting down',error);
+  process.exitCode=1;
+  shutdown('uncaughtException');
+});
 
 export { server, readBody, store, sessions, buildN8nWorkflowGraph, sendAutomationReply, describeWebhookFailure, provider, dispatchAutomationEvent };

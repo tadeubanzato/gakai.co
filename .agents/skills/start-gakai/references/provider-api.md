@@ -51,6 +51,16 @@ Superseded. The previous notes in this section described a REST/webhook provider
   events.
 - **Disappearing messages** — `sock.sendMessage(jid, { disappearingMessagesInChat: seconds })`
   (`0` off, `86400` 24h, `604800` 7d, `7776000` 90d).
+- **Profile pictures** — `sock.profilePictureUrl(jid, 'preview')` returns a signed
+  CDN link whose `oe` query parameter is the expiry (hex epoch seconds); the CDN
+  answers 403 after it. A stored link is a cache only — see `picture.mjs`.
+- **Media download waits are unbounded** — `sock.updateMediaMessage` (the
+  re-upload request `downloadMediaMessage` makes on a 404/410) waits for the
+  phone's `messages.media-update` with no timeout, and `downloadEncryptedContent`
+  pipes the HTTP body without forwarding its errors, so a connection dropped
+  mid-body raises an unhandled stream `'error'` and the buffer read never
+  settles. Gakai bounds both in `media.mjs` and survives the stream error via
+  `src/lib/process-guard.mjs`.
 - **Group** (deferred feature) — `groupCreate(subject, participants[])`,
   `groupParticipantsUpdate(jid, participants[], 'add'|'remove'|'promote'|'demote')`,
   `groupUpdateSubject(jid, subject)`, `groupUpdateDescription(jid, desc?)`,
