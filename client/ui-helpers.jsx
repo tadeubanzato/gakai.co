@@ -49,16 +49,21 @@ export function Menu({ trigger = "⋯", label = "More actions", align = "right",
 
   return <span className={`menu ${className}${open ? " open" : ""}`} ref={ref}>
     <button type="button" className="menu-trigger" aria-haspopup="menu" aria-expanded={open} aria-label={label} onClick={() => setOpen(value => !value)}>{trigger}</button>
-    {open && <div ref={popRef} className="menu-popover" role="menu" style={coords ? { position: "fixed", ...coords } : { position: "fixed", visibility: "hidden" }}>
+    {open && <div ref={popRef} className="menu-popover" role="menu" onClick={event => { if (event.target.closest(".menu-item:not(:disabled)")) setOpen(false); }} style={coords ? { position: "fixed", ...coords } : { position: "fixed", visibility: "hidden" }}>
       {typeof children === "function" ? children(() => setOpen(false)) : children}
     </div>}
   </span>;
 }
 
-export function MenuItem({ onSelect, danger = false, disabled = false, checked, children }) {
-  return <button type="button" role="menuitem" className={`menu-item${danger ? " danger" : ""}`} disabled={disabled} onClick={onSelect}>
+// `checked` is a selection marker in a leading column (one of several options);
+// `toggled` is an on/off switch: green with a ✓ at the end while on, amber
+// while off, and the label stays aligned with the other items either way.
+export function MenuItem({ onSelect, danger = false, disabled = false, checked, toggled, children }) {
+  const isSwitch = toggled !== undefined;
+  return <button type="button" role={isSwitch ? "menuitemcheckbox" : "menuitem"} aria-checked={isSwitch ? toggled : undefined} className={`menu-item${danger ? " danger" : ""}${isSwitch ? (toggled ? " is-on" : " is-off") : ""}`} disabled={disabled} onClick={onSelect}>
     {checked !== undefined && <span className="menu-check" aria-hidden="true">{checked ? "✓" : ""}</span>}
-    <span>{children}</span>
+    <span className="menu-label">{children}</span>
+    {isSwitch && toggled && <span className="menu-toggle-check" aria-hidden="true">✓</span>}
   </button>;
 }
 

@@ -296,7 +296,7 @@ function ForwardDialog({ message, chats, currentChatId, busy, onForward, onClose
 
 const DISAPPEARING_OPTIONS = [["Off", 0], ["24 hours", 86400], ["7 days", 604800], ["90 days", 7776000]];
 
-export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats, onBack, onSent, onForwarded, onChatState, onBlock, onDisappearing, onDeleted }) {
+export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats, onBack, onSent, onForwarded, onChatState, onBlock, onDisappearing, onDeleted, onAiToggle }) {
   const paneRef = useRef(null);
   const requestRef = useRef(0);
   const initialChatRef = useRef(null);
@@ -320,6 +320,9 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
   const [newMessageCount, setNewMessageCount] = useState(0);
+  const [atBottom, setAtBottom] = useState(true); // the newest message is in view
+  const [toast, setToast] = useState("");
+  const toastTimerRef = useRef(null);
   const [participants, setParticipants] = useState([]);
   const [mentionMenu, setMentionMenu] = useState(null); // { query, index } while the reader is typing "@…"
   const mentionPicksRef = useRef([]); // { jid, name, number } the reader chose from the menu this compose
@@ -526,13 +529,32 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
 
   const maybeLoadOlder = useCallback(event => {
     if (event.currentTarget.scrollTop <= 120) loadOlder();
-    if (isNearBottom()) setNewMessageCount(0);
+    const near = isNearBottom();
+    setAtBottom(near);
+    if (near) setNewMessageCount(0);
   }, [loadOlder, isNearBottom]);
+
+  // Layout changes without a scroll (new messages, media finishing loading,
+  // opening a chat) can move the bottom out of — or back into — view.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setAtBottom(isNearBottom()));
+    return () => cancelAnimationFrame(frame);
+  }, [messages, loading, isNearBottom]);
+
+  // Short-lived message at the bottom of the conversation, always in view
+  // (the error banner at the top of the thread is not, once you have scrolled).
+  const showToast = useCallback(text => {
+    setToast(text);
+    clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(""), 4000);
+  }, []);
+  useEffect(() => () => clearTimeout(toastTimerRef.current), []);
 
   const jumpToLatest = useCallback(() => {
     setNewMessageCount(0);
+    setAtBottom(true);
     const pane = paneRef.current;
-    if (pane) pane.scrollTop = pane.scrollHeight;
+    if (pane) pane.scrollTo({ top: pane.scrollHeight, behavior: "smooth" });
   }, []);
 
   // Group @-mentions: the participant list backs the suggestion menu, fetched
@@ -721,12 +743,21 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   }, [attachment, editingMessage, submitEdit, send, sendMedia]);
 
   const reactToMessage = useCallback(async (message, emoji) => {
-    const messageId=serializedId(message?.id);if(!messageId)return;
-    const previous=reactionOverrides[messageId]||"",next=previous===emoji?"":emoji;
-    setReactionOverrides(current=>({...current,[messageId]:next}));
-    try{await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(messageId)}/reaction`,{method:"POST",body:JSON.stringify({reaction:next})});}
-    catch(cause){setReactionOverrides(current=>({...current,[messageId]:previous}));setError(cause.message||"Could not update reaction.");}
-  },[accountId,reactionOverrides]);
+    const messageId = serializedId(message?.id);
+    if (!messageId) return;
+    // What the reader sees now: a reaction they just set, else the stored one.
+    // Tapping the same emoji again removes it, as in WhatsApp.
+    const previous = reactionOverrides[messageId] ?? message.reaction ?? "";
+    const next = previous === emoji ? "" : emoji;
+    setReactionOverrides(current => ({ ...current, [messageId]: next }));
+    try {
+      await api(`/api/app/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(messageId)}/reaction?chatId=${encodeURIComponent(chatId || "")}`, { method: "POST", body: JSON.stringify({ reaction: next }) });
+      showToast(next ? `Reacted ${next} — sent to WhatsApp` : "Reaction removed");
+    } catch (cause) {
+      setReactionOverrides(current => ({ ...current, [messageId]: previous }));
+      showToast(`Couldn't send the reaction: ${cause.message || "unknown error"}`);
+    }
+  }, [accountId, chatId, reactionOverrides, showToast]);
   const handleComposerInput=useCallback(event=>{const active=Boolean(event.currentTarget.value.trim());sendPresence(active?"typing":"paused");if(typingTimerRef.current)clearTimeout(typingTimerRef.current);if(active)typingTimerRef.current=setTimeout(()=>sendPresence("paused"),1800);autoGrowComposer(event.currentTarget);syncMentionMenu(event.currentTarget)},[sendPresence,syncMentionMenu,autoGrowComposer]);
 
   // "Delete for me": removes the message from this account's own view. Does
@@ -813,6 +844,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
       {onBack && <button type="button" className="back" onClick={onBack} aria-label="Back to conversations">‹</button>}
       <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small>Chat ID: {chatId || "Unavailable"}</small></span>
       <Menu label="Conversation actions" className="conversation-menu">
+        {onAiToggle && chat && <MenuItem toggled={!!chat.aiReply} onSelect={()=>onAiToggle(chat)}>AI replies - {chat.aiReply ? "On" : "Off"}</MenuItem>}
         {onChatState && chat && <>
           <MenuItem onSelect={()=>onChatState(chat,{pin:!chat.pinned})}>{chat.pinned ? "Unpin" : "Pin"} chat</MenuItem>
           {chat.muted
@@ -832,8 +864,10 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
       {loading && !messages.length ? <p className="chat-loading loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading messages…</p> : <div className="message-list">
         {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onForward={setForwarding} onEdit={beginEdit} onStar={toggleStar} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
+      {!atBottom && newMessageCount === 0 && messages.length > 0 && <button type="button" className="jump-to-bottom" onClick={jumpToLatest} aria-label="Scroll to the latest message" title="Scroll to the latest message"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M6 13l6 6 6-6"/></svg></button>}
       {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
     </div>
+    {toast && <div className="chat-toast" role="status">{toast}</div>}
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}
     {chat?.blocked
       ? <div className="composer blocked-banner" role="status">You blocked this contact. <button type="button" onClick={()=>onBlock?.(chat,false)}>Unblock</button> to message them.</div>

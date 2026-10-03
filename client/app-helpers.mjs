@@ -25,3 +25,11 @@ export async function api(path, options = {}) {
   if (!response.ok) throw new Error(data.message || "Request failed");
   return data;
 }
+
+// Inbox order: pinned chats first, then newest activity first. Every place that
+// builds or patches the chat list sorts with this, so a pinned chat stays on
+// top after a refresh, a background poll, or the moment it is pinned.
+export function compareChats(left, right) {
+  const recency = chat => Number(chat.timestamp || chat.lastMessage?.timestamp || 0);
+  return (right.pinned ? 1 : 0) - (left.pinned ? 1 : 0) || recency(right) - recency(left);
+}
