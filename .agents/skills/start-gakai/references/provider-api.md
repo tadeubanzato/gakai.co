@@ -61,6 +61,21 @@ Superseded. The previous notes in this section described a REST/webhook provider
   mid-body raises an unhandled stream `'error'` and the buffer read never
   settles. Gakai bounds both in `media.mjs` and survives the stream error via
   `src/lib/process-guard.mjs`.
+- **Delete a message** — your own: `sock.sendMessage(jid, { delete: key })` (a revoke,
+  "delete for everyone"). Someone else's: WhatsApp ignores a revoke, so use
+  `sock.chatModify({ deleteForMe: { deleteMedia, key, timestamp } }, jid)` — `timestamp` is
+  Unix **seconds** as a plain number — which also removes it on the phone and linked devices.
+- **Delete a conversation** — `sock.chatModify({ delete: true, lastMessages: [{ key, messageTimestamp }] }, jid)`.
+  `getMessageRange` throws on a key without `id`/`remoteJid`, on a missing/zero timestamp, and
+  on a group message from someone else with no `participant`. A stored message has been through
+  JSON, so flatten its `messageTimestamp` to a number first. Gakai asks WhatsApp first and only
+  then removes the chat locally, so a refused delete is reported rather than hidden.
+- **Deletions made elsewhere** — `messages.delete` → `{ keys: WAMessageKey[] }` or
+  `{ jid, all: true }` (chat cleared); `chats.delete` → `string[]` of chat ids (not emitted
+  during initial sync). Gakai mirrors both, so a delete on the phone or another linked device
+  disappears here too.
+- **Presence** — `presence.update` reports a contact by whatever id WhatsApp uses (possibly a
+  LID); relay it under the canonical chat id or it will not match the open chat.
 - **Group** (deferred feature) — `groupCreate(subject, participants[])`,
   `groupParticipantsUpdate(jid, participants[], 'add'|'remove'|'promote'|'demote')`,
   `groupUpdateSubject(jid, subject)`, `groupUpdateDescription(jid, desc?)`,

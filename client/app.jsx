@@ -7,6 +7,7 @@ import{ConfirmHost,confirmDialog}from"./confirm.jsx";
 import{AiProviderFields}from"./ai-responses.jsx";
 import{AiReplyRules}from"./ai-reply-rules.jsx";
 import{AdminProfileCard}from"./admin-profile.jsx";
+import{ApiTokensCard}from"./api-tokens.jsx";
 
 const slug=x=>String(x||"").trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
 const status=x=>({WORKING:"Connected",SCAN_QR_CODE:"Ready to scan",STARTING:"Starting WhatsApp",STOPPED:"Offline",FAILED:"Needs attention"})[x]||x||"Connecting";
@@ -139,6 +140,7 @@ function Settings({account,onClose,onDeleted,onNotice,onRenamed}){
       </div>
       <section className="details-card services"><div className="services-list"><h3>Services</h3>{Object.entries(services).map(([key,item])=><button key={key} data-service={key} type="button" className={(service===key?"on ":"")+(item.ready?"has-integration":"")} onClick={()=>{setService(key);setTestModal(null);setTestResult(null)}}>{item.title}<small>{item.subtitle}</small>{item.ready?<span className="integration-check" aria-label="Connected">✓</span>:null}</button>)}</div><div className="service-detail">{detail}{service==="n8n"&&n8n?.connected?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("n8n")}>Delete integration</button>:null}{service==="llm"&&llm?.configured?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("llm")}>Delete integration</button>:null}</div></section>
       <AdminProfileCard profile={profile} busy={busy} onSave={saveProfile}/>
+      <ApiTokensCard key={account.id} account={account} base={base} onNotice={onNotice}/>
       <div className="details-delete"><div><h3>Delete account</h3><p>Remove this WhatsApp account from Gakai. You can add and scan it again later.</p></div><button type="button" className="danger" disabled={busy} onClick={del}>{busy?"Deleting…":"Delete account"}</button></div>
     </main>
     {testModal&&<div className="modal-overlay" role="presentation" onClick={()=>setTestModal(null)}>
@@ -630,7 +632,7 @@ function App(){
   // Same delete the open conversation's menu offers, available from the list.
   const deleteChatAction=useCallback(async targetChat=>{
     if(!account||!targetChat?.id)return;
-    const confirmed=await confirmDialog({title:"Delete conversation?",message:`The conversation with ${targetChat.name||targetChat.id} will be removed from WhatsApp. This can't be undone.`,confirmLabel:"Delete conversation",danger:true});
+    const confirmed=await confirmDialog({title:"Delete conversation?",message:`The conversation with ${targetChat.name||targetChat.id} will be deleted from WhatsApp on your phone and every linked app. This can't be undone.`,confirmLabel:"Delete conversation",danger:true});
     if(!confirmed)return;
     try{
       await api("/api/app/accounts/"+encodeURIComponent(account.id)+"/chats/"+encodeURIComponent(targetChat.id),{method:"DELETE"});

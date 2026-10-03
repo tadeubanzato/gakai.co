@@ -245,6 +245,37 @@ simulated event at the workflow without messaging a real contact.
 The three reply paths (n8n replies, n8n AI Agent, native AI) are mutually
 exclusive — turning one on turns the others off.
 
+### Send a message from another system (API tokens)
+
+Any system that can make an HTTP request — n8n, a CRM, a script — can send a WhatsApp
+message from one of your connected accounts.
+
+1. Open the account's settings (⚙) and expand **Application tokens**
+2. Enter the application's name (for example `n8n`), choose its permissions, and click **Create token**
+3. Click the copy icon beside the token. A token can be copied for **24 hours** after it is created or
+   regenerated; after that Gakai keeps only a one-way fingerprint of it and it can never be copied again (it
+   keeps working — **Regenerate** to get a new one). Create one token per application, so you can regenerate
+   (the old token stops working immediately) or **Delete** one without touching the others. Tick **Send
+   messages** and/or **Read messages** on each token to choose what it may do
+
+```bash
+curl -X POST https://your-gakai-host/api/integrations/v1/messages \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"phone": "15551234567", "text": "Hello from Gakai"}'
+```
+
+| Field | Notes |
+|---|---|
+| `phone` (or `to`) | The number in any format. `+1 (857) 707-5969`, `+55 11 99977-7057`, `0055 11 99977 7057`, `18577075969` and `5511999777057` all work as written. Gakai sends into the existing chat with that number, or starts a new chat if the number is on WhatsApp. A number that is not on WhatsApp returns `404` and nothing is sent. |
+| `countryCode` | Optional, for a number written **without** its country code — `1`, `+1`, `55`, `+55`, or a country such as `US` or `BR`. `{"phone": "(11) 99977-7057", "countryCode": "55"}` is sent to `+55 11 99977-7057`. If you leave it out, Gakai assumes the country of the connected WhatsApp account's own number. If it still cannot tell, the call returns `400` instead of guessing. |
+| `chatId` | Use instead of `phone` to target a chat directly, for example a group (`120363…@g.us`). Wins if both are sent. |
+| `text` | Required, up to 4096 characters. |
+
+A successful call returns `{"ok": true, "chatId": "…", "to": "+18577075969", "newChat": false, "message": {…}}` — `to` is the normalized number Gakai used. A token is tied to one
+WhatsApp account and only sends from it. Permissions: **Send messages** (`POST /api/integrations/v1/messages`) and
+**Read messages** (`GET /api/integrations/v1/chats`, `GET /api/integrations/v1/messages?chatId=…`).
+
 ### Custom webhook subscriptions
 
 Additional webhook subscriptions can be registered per account through the

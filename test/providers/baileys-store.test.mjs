@@ -280,3 +280,47 @@ test('setChatFlags stores the ephemeral (disappearing-messages) duration', () =>
   const [chat] = store.getChatsOverview('acct-1');
   assert.equal(chat.ephemeral, 604800);
 });
+
+const seed = (store, id, timestamp, body) => store.upsertMessages('acct-1', [{
+  chatId: 'chat-1', messageId: id, timestamp, fromMe: false,
+  waMessage: { key: { id }, messageTimestamp: timestamp, body },
+  overviewMessage: { body, text: body, timestamp, hasMedia: false, system: null },
+}]);
+const overviewOf = raw => ({ body: raw.body, text: raw.body, timestamp: raw.messageTimestamp, hasMedia: false, system: null });
+
+test('deleting the newest message points the chat preview at the one before it', () => {
+  const store = freshStore();
+  seed(store, 'old', 100, 'first');
+  seed(store, 'new', 200, 'second');
+  store.deleteMessageAndRefreshPreview('acct-1', 'chat-1', 'new', overviewOf);
+  const [chat] = store.getChatsOverview('acct-1');
+  assert.equal(chat.lastMessage.body, 'first', 'the deleted text must not linger as the preview');
+  assert.equal(chat.lastMessageTimestamp, 100);
+  assert.equal(store.getMessageById('acct-1', 'chat-1', 'new'), null);
+});
+
+test('deleting an older message leaves the preview alone', () => {
+  const store = freshStore();
+  seed(store, 'old', 100, 'first');
+  seed(store, 'new', 200, 'second');
+  store.deleteMessageAndRefreshPreview('acct-1', 'chat-1', 'old', overviewOf);
+  assert.equal(store.getChatsOverview('acct-1')[0].lastMessage.body, 'second');
+});
+
+test('deleting the only message empties the preview but keeps the chat row', () => {
+  const store = freshStore();
+  seed(store, 'only', 100, 'hello');
+  store.deleteMessageAndRefreshPreview('acct-1', 'chat-1', 'only', overviewOf);
+  const [chat] = store.getChatsOverview('acct-1');
+  assert.equal(chat.id, 'chat-1');
+  assert.equal(chat.lastMessage, null);
+});
+
+test('clearChatMessages removes every message and empties the preview, keeping the conversation', () => {
+  const store = freshStore();
+  seed(store, 'a', 100, 'one');
+  seed(store, 'b', 200, 'two');
+  store.clearChatMessages('acct-1', 'chat-1');
+  assert.deepEqual(store.getMessagesPage('acct-1', 'chat-1', { limit: 10 }), []);
+  assert.equal(store.getChatsOverview('acct-1')[0].lastMessage, null);
+});
