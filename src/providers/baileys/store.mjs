@@ -14,6 +14,8 @@
  * same file.
  */
 
+import { startsUnread } from '../../domain/unread.mjs';
+
 export function openStore(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS wa_chats (
@@ -92,6 +94,17 @@ export function openStore(db) {
     ['ephemeral', 'INTEGER NOT NULL DEFAULT 0'],
   ]) if (!chatColumns.has(name)) db.exec(`ALTER TABLE wa_chats ADD COLUMN ${name} ${ddl}`);
 
+  // Read state. A conversation has a monotonic read cursor (`read_ts`: everything at or before it is
+  // read) and each stored message carries an `unread` flag; the number shown is COUNTED from those
+  // flags. The old `unread_count` column is no longer written or read.
+  if (!chatColumns.has('read_ts')) {
+    db.exec(`ALTER TABLE wa_chats ADD COLUMN read_ts INTEGER NOT NULL DEFAULT 0`);
+    const messageColumns = new Set(db.prepare(`PRAGMA table_info(wa_messages)`).all().map(column => column.name));
+    if (!messageColumns.has('unread')) db.exec(`ALTER TABLE wa_messages ADD COLUMN unread INTEGER NOT NULL DEFAULT 0`);
+    backfillReadState(db);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_wa_messages_unread ON wa_messages(account_id, chat_id) WHERE unread=1`);
+
   const stmt = {
     upsertChat: db.prepare(`
       INSERT INTO wa_chats(account_id, chat_id, name, picture, unread_count, last_message_timestamp, last_message_json, updated_at)
@@ -99,7 +112,6 @@ export function openStore(db) {
       ON CONFLICT(account_id, chat_id) DO UPDATE SET
         name=COALESCE(excluded.name, wa_chats.name),
         picture=COALESCE(excluded.picture, wa_chats.picture),
-        unread_count=excluded.unread_count,
         updated_at=excluded.updated_at
     `),
     bumpChatLastMessage: db.prepare(`
@@ -115,11 +127,15 @@ export function openStore(db) {
     listChats: db.prepare(`SELECT * FROM wa_chats WHERE account_id=? ORDER BY last_message_timestamp DESC LIMIT ?`),
     deleteChat: db.prepare(`DELETE FROM wa_chats WHERE account_id=? AND chat_id=?`),
     deleteChatMessages: db.prepare(`DELETE FROM wa_messages WHERE account_id=? AND chat_id=?`),
-    setUnread: db.prepare(`UPDATE wa_chats SET unread_count=? WHERE account_id=? AND chat_id=?`),
+    getMessageRow: db.prepare(`SELECT unread FROM wa_messages WHERE account_id=? AND chat_id=? AND message_id=?`),
+    countUnread: db.prepare(`SELECT COUNT(*) AS n FROM wa_messages WHERE account_id=? AND chat_id=? AND unread=1`),
+    newestTimestamp: db.prepare(`SELECT MAX(timestamp) AS ts FROM wa_messages WHERE account_id=? AND chat_id=?`),
+    advanceCursor: db.prepare(`UPDATE wa_chats SET read_ts=MAX(read_ts, ?) WHERE account_id=? AND chat_id=?`),
+    clearUnreadThrough: db.prepare(`UPDATE wa_messages SET unread=0 WHERE account_id=? AND chat_id=? AND unread=1 AND timestamp<=?`),
 
     upsertMessage: db.prepare(`
-      INSERT INTO wa_messages(account_id, chat_id, message_id, timestamp, from_me, payload_json, created_at)
-      VALUES (?,?,?,?,?,?,?)
+      INSERT INTO wa_messages(account_id, chat_id, message_id, timestamp, from_me, payload_json, created_at, unread)
+      VALUES (?,?,?,?,?,?,?,?)
       ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
         timestamp=excluded.timestamp, from_me=excluded.from_me, payload_json=excluded.payload_json
     `),
@@ -206,7 +222,7 @@ export function openStore(db) {
         accountId, chat.id,
         chat.name ?? null,
         chat.picture ?? null,
-        Number(chat.unreadCount || 0) || 0,
+        0,
         Number(chat.conversationTimestamp) || 0,
         null,
         now(),
@@ -234,9 +250,51 @@ export function openStore(db) {
     return new Set(db.prepare(`SELECT jid FROM wa_blocklist WHERE account_id=?`).all(accountId).map(row => row.jid));
   }
 
-  function setChatUnread(accountId, chatId, unreadCount) {
-    stmt.ensureChat.run(accountId, chatId, now());
-    stmt.setUnread.run(Math.max(0, Number(unreadCount) || 0), accountId, chatId);
+  // Read state. The cursor only ever moves forward, so a late or repeated "read" can never
+  // un-read anything, and a message is judged unread once, when it is first stored.
+  function unreadCountOf(accountId, chatId) {
+    return stmt.countUnread.get(accountId, chatId).n;
+  }
+
+  // Mark everything at or before `through` (unix seconds; default: the newest message) as read.
+  // Returns the conversation's new unread count.
+  function markChatRead(accountId, chatId, through) {
+    const row = stmt.getChat.get(accountId, chatId);
+    if (!row) return 0;
+    const boundary = Number.isFinite(Number(through)) && Number(through) > 0
+      ? Math.floor(Number(through))
+      : (stmt.newestTimestamp.get(accountId, chatId).ts || 0);
+    db.exec('BEGIN');
+    try {
+      stmt.advanceCursor.run(boundary, accountId, chatId);
+      stmt.clearUnreadThrough.run(accountId, chatId, boundary);
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+    return unreadCountOf(accountId, chatId);
+  }
+
+  // Another of the owner's devices read these incoming messages: that reads them here too, along
+  // with everything before the newest of them. Returns the new count, or null if nothing matched.
+  function markMessagesReadElsewhere(accountId, chatId, messageIds) {
+    let newest = 0;
+    for (const id of messageIds) {
+      const found = db.prepare(`SELECT timestamp FROM wa_messages WHERE account_id=? AND chat_id=? AND message_id=? AND from_me=0`).get(accountId, chatId, id);
+      if (found) newest = Math.max(newest, found.timestamp || 0);
+    }
+    return newest ? markChatRead(accountId, chatId, newest) : null;
+  }
+
+  // WhatsApp keys of the still-unread incoming messages up to `through`, for read receipts.
+  function unreadIncomingKeys(accountId, chatId, through) {
+    const boundary = Number.isFinite(Number(through)) && Number(through) > 0 ? Math.floor(Number(through)) : Number.MAX_SAFE_INTEGER;
+    return db.prepare(`SELECT payload_json FROM wa_messages WHERE account_id=? AND chat_id=? AND unread=1 AND from_me=0 AND timestamp<=? ORDER BY timestamp DESC LIMIT 100`)
+      .all(accountId, chatId, boundary)
+      .map(row => { try { return JSON.parse(row.payload_json).key; } catch { return null; } })
+      .filter(key => key?.id && key.remoteJid);
+  }
+
+  function hasUnread(accountId) {
+    return Boolean(db.prepare(`SELECT 1 FROM wa_messages WHERE account_id=? AND unread=1 LIMIT 1`).get(accountId));
   }
 
   function setChatPicture(accountId, chatId, pictureUrl) {
@@ -253,7 +311,14 @@ export function openStore(db) {
       const { chatId, messageId, timestamp, fromMe, waMessage, overviewMessage } = row;
       if (!chatId || !messageId) continue;
       stmt.ensureChat.run(accountId, chatId, now());
-      stmt.upsertMessage.run(accountId, chatId, messageId, timestamp, fromMe ? 1 : 0, JSON.stringify(waMessage), now());
+      // Only a message seen for the first time can start unread; a replay keeps its verdict.
+      const seen = stmt.getMessageRow.get(accountId, chatId, messageId);
+      const unread = !seen && startsUnread({
+        source: row.source,
+        message: { ...overviewMessage, fromMe, timestamp },
+        readCursor: stmt.getChat.get(accountId, chatId)?.read_ts || 0,
+      }) ? 1 : 0;
+      stmt.upsertMessage.run(accountId, chatId, messageId, timestamp, fromMe ? 1 : 0, JSON.stringify(waMessage), now(), unread);
       stmt.bumpChatLastMessage.run(timestamp, JSON.stringify(overviewMessage), now(), accountId, chatId, timestamp);
     }
   }
@@ -351,8 +416,8 @@ export function openStore(db) {
     if (!fromChatId || !toChatId || fromChatId === toChatId) return;
     stmt.ensureChat.run(accountId, toChatId, now());
     db.prepare(`
-      INSERT INTO wa_messages(account_id, chat_id, message_id, timestamp, from_me, payload_json, created_at)
-      SELECT account_id, ?, message_id, timestamp, from_me, payload_json, created_at
+      INSERT INTO wa_messages(account_id, chat_id, message_id, timestamp, from_me, payload_json, created_at, unread)
+      SELECT account_id, ?, message_id, timestamp, from_me, payload_json, created_at, unread
       FROM wa_messages WHERE account_id=? AND chat_id=?
       ON CONFLICT(account_id, chat_id, message_id) DO NOTHING
     `).run(toChatId, accountId, fromChatId);
@@ -363,9 +428,9 @@ export function openStore(db) {
         UPDATE wa_chats SET
           name=COALESCE(name, ?),
           picture=COALESCE(picture, ?),
-          unread_count=MAX(unread_count, ?)
+          read_ts=MAX(read_ts, ?)
         WHERE account_id=? AND chat_id=?
-      `).run(from.name ?? null, from.picture ?? null, from.unread_count ?? 0, accountId, toChatId);
+      `).run(from.name ?? null, from.picture ?? null, from.read_ts ?? 0, accountId, toChatId);
       if ((from.last_message_timestamp || 0) > (to?.last_message_timestamp || 0)) {
         db.prepare(`UPDATE wa_chats SET last_message_timestamp=?, last_message_json=? WHERE account_id=? AND chat_id=?`)
           .run(from.last_message_timestamp, from.last_message_json, accountId, toChatId);
@@ -380,7 +445,7 @@ export function openStore(db) {
       id: row.chat_id,
       name: row.name,
       picture: row.picture,
-      unreadCount: row.unread_count,
+      unreadCount: unreadCountOf(accountId, row.chat_id),
       lastMessageTimestamp: row.last_message_timestamp,
       lastMessage: row.last_message_json ? JSON.parse(row.last_message_json) : null,
       pinned: Boolean(row.pinned),
@@ -463,8 +528,9 @@ export function openStore(db) {
   }
 
   return {
-    upsertChats, setChatUnread, setChatPicture, setChatFlags, deleteChat, getChatsOverview,
+    upsertChats, setChatPicture, setChatFlags, deleteChat, getChatsOverview,
     listChatIds, chatExists, ensureChat, mergeChat,
+    unreadCountOf, unreadIncomingKeys, markChatRead, markMessagesReadElsewhere, hasUnread,
     upsertMessages, deleteMessage, deleteMessageAndRefreshPreview, clearChatMessages, applyEdit, getMessagesPage, getMessageById,
     setStarred, isStarred, starredMessageIds, listStarred,
     replaceBlocklist, setBlocked, isBlocked, blockedJids,
@@ -473,4 +539,23 @@ export function openStore(db) {
     applyReaction, getReaction,
     deleteAccountData,
   };
+}
+
+
+// One-time upgrade from the old stored counter: the newest N incoming messages of a chat that had
+// N unread become flagged, and the cursor sits just before the oldest of them (or at the newest
+// message when nothing was unread). Chats that were fully read stay read.
+function backfillReadState(db) {
+  const chats = db.prepare(`SELECT account_id, chat_id, unread_count FROM wa_chats`).all();
+  const newest = db.prepare(`SELECT MAX(timestamp) AS ts FROM wa_messages WHERE account_id=? AND chat_id=?`);
+  const recentIncoming = db.prepare(`SELECT message_id, timestamp FROM wa_messages WHERE account_id=? AND chat_id=? AND from_me=0 ORDER BY timestamp DESC LIMIT ?`);
+  const flag = db.prepare(`UPDATE wa_messages SET unread=1 WHERE account_id=? AND chat_id=? AND message_id=?`);
+  const cursor = db.prepare(`UPDATE wa_chats SET read_ts=? WHERE account_id=? AND chat_id=?`);
+  for (const chat of chats) {
+    const want = Math.max(0, Number(chat.unread_count) || 0);
+    const rows = want ? recentIncoming.all(chat.account_id, chat.chat_id, want) : [];
+    for (const row of rows) flag.run(chat.account_id, chat.chat_id, row.message_id);
+    const boundary = rows.length ? Math.max(0, rows[rows.length - 1].timestamp - 1) : (newest.get(chat.account_id, chat.chat_id).ts || 0);
+    cursor.run(boundary, chat.account_id, chat.chat_id);
+  }
 }

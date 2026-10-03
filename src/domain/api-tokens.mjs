@@ -61,7 +61,7 @@ export function pruneExpiredTokens(keys, now = Date.now()) {
 export function publicToken(key, now = Date.now()) {
   const copyable = isCopyable(key, now);
   return {
-    id: key.id, name: key.name, scopes: key.scopes || [], createdAt: key.createdAt || null,
+    id: key.id, accountId: key.accountId || null, name: key.name, scopes: key.scopes || [], createdAt: key.createdAt || null,
     lastUsedAt: key.lastUsedAt || null, rotatedAt: key.rotatedAt || null, last4: key.last4 || null,
     copyable, copyableUntil: copyable ? new Date(copyDeadline(key)).toISOString() : null,
   };

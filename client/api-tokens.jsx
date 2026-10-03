@@ -73,31 +73,37 @@ function CopyTokenButton({ base, token, onNotice, onExpired }) {
   </>;
 }
 
-// Application tokens: one per system that sends WhatsApp messages through
-// Gakai's API (n8n, a CRM, a script). A token is bound to this WhatsApp
-// account, is shown once when made, and can be regenerated or deleted at any
-// time. The card also carries the request to copy and paste.
-export function ApiTokensCard({ account, base, onNotice }) {
+const accountBase = id => `/api/app/accounts/${encodeURIComponent(id)}`;
+
+// Application tokens (Settings): one per system that sends WhatsApp messages through
+// Gakai's API (n8n, a CRM, a script). For now each token names the one WhatsApp
+// profile it sends from. It can be copied for 24 hours, then regenerated or deleted
+// at any time. The card also carries the request to copy and paste.
+export function ApiTokensCard({ accounts, onNotice }) {
   const panelId = useId();
   const nameId = useId();
   const [open, setOpen] = useState(false);
   const [tokens, setTokens] = useState(null);
   const [name, setName] = useState("");
+  const [accountId, setAccountId] = useState(accounts[0]?.id || "");
   const [busy, setBusy] = useState(false);
   const [sampleTab, setSampleTab] = useState("curl");
   const origin = window.location.origin;
 
-  const load = useCallback(() => api(base + "/integration-keys").then(result => setTokens(result.keys || [])).catch(error => { setTokens([]); onNotice(error.message); }), [base, onNotice]);
+  const load = useCallback(() => api("/api/app/integration-keys").then(result => setTokens(result.keys || [])).catch(error => { setTokens([]); onNotice(error.message); }), [onNotice]);
   useEffect(() => { load(); }, [load]);
+  // Keep the chosen profile valid as profiles come and go.
+  useEffect(() => { if (!accounts.some(account => account.id === accountId)) setAccountId(accounts[0]?.id || ""); }, [accounts, accountId]);
+  const accountLabel = id => accounts.find(account => account.id === id)?.label || "Removed profile";
 
   const toggle = () => setOpen(current => !current);
 
   const create = async event => {
     event.preventDefault();
-    if (!name.trim() || busy) return;
+    if (!name.trim() || !accountId || busy) return;
     setBusy(true);
     try {
-      const result = await api(base + "/integration-keys", { method: "POST", body: JSON.stringify({ name: name.trim(), scopes: NEW_TOKEN_SCOPES }) });
+      const result = await api("/api/app/integration-keys", { method: "POST", body: JSON.stringify({ accountId, name: name.trim(), scopes: NEW_TOKEN_SCOPES }) });
       setName("");
       onNotice(`${result.key.name} token created — copy it with the copy icon within 24 hours.`);
       await load();
@@ -110,7 +116,7 @@ export function ApiTokensCard({ account, base, onNotice }) {
     if (!next.length) return;
     setTokens(current => current.map(item => (item.id === token.id ? { ...item, scopes: next } : item)));
     try {
-      await api(`${base}/integration-keys/${encodeURIComponent(token.id)}`, { method: "PATCH", body: JSON.stringify({ scopes: next }) });
+      await api(`${accountBase(token.accountId)}/integration-keys/${encodeURIComponent(token.id)}`, { method: "PATCH", body: JSON.stringify({ scopes: next }) });
       onNotice("Auto saved");
     } catch (error) {
       setTokens(current => current.map(item => (item.id === token.id ? { ...item, scopes: token.scopes } : item)));
@@ -127,7 +133,7 @@ export function ApiTokensCard({ account, base, onNotice }) {
     if (!confirmed) return;
     setBusy(true);
     try {
-      const result = await api(`${base}/integration-keys/${encodeURIComponent(token.id)}/regenerate`, { method: "POST" });
+      const result = await api(`${accountBase(token.accountId)}/integration-keys/${encodeURIComponent(token.id)}/regenerate`, { method: "POST" });
       onNotice(`${result.key.name} token regenerated — copy the new one with the copy icon within 24 hours.`);
       await load();
     } catch (error) { onNotice(error.message); } finally { setBusy(false); }
@@ -142,7 +148,7 @@ export function ApiTokensCard({ account, base, onNotice }) {
     if (!confirmed) return;
     setBusy(true);
     try {
-      await api(`${base}/integration-keys/${encodeURIComponent(token.id)}`, { method: "DELETE" });
+      await api(`${accountBase(token.accountId)}/integration-keys/${encodeURIComponent(token.id)}`, { method: "DELETE" });
       await load();
     } catch (error) { onNotice(error.message); } finally { setBusy(false); }
   };
@@ -159,7 +165,7 @@ export function ApiTokensCard({ account, base, onNotice }) {
             <svg className="profile-chevron" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg>
           </button>
         </h3>
-        <p>Let other systems — n8n, a CRM, a script — send WhatsApp messages from {account.label} through the API.</p>
+        <p>Let other systems — n8n, a CRM, a script — send WhatsApp messages through the Gakai API.</p>
       </div>
       <span className="token-count">{tokens === null ? "…" : `${count} ${count === 1 ? "token" : "tokens"}`}</span>
     </div>
@@ -168,7 +174,10 @@ export function ApiTokensCard({ account, base, onNotice }) {
 
       <form className="token-create" onSubmit={create}>
         <input id={nameId} value={name} onChange={event => setName(event.currentTarget.value)} placeholder="Application name" aria-label="Application name" maxLength={80} autoComplete="off"/>
-        <button className="primary token-create-button" disabled={busy || !name.trim()}>{busy ? "Working…" : "Create token"}</button>
+        {accounts.length > 1 && <select value={accountId} onChange={event => setAccountId(event.currentTarget.value)} aria-label="WhatsApp profile this token sends from">
+          {accounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}
+        </select>}
+        <button className="primary token-create-button" disabled={busy || !name.trim() || !accountId}>{busy ? "Working…" : "Create token"}</button>
       </form>
 
       <div className="token-list" aria-live="polite">
@@ -179,10 +188,11 @@ export function ApiTokensCard({ account, base, onNotice }) {
             <div className="token-title">
               <b>{token.name}</b>
               <small>Created {when(token.createdAt)}</small>
+              <span className="token-account" title="The WhatsApp profile this token sends from">{accountLabel(token.accountId)}</span>
             </div>
             <div className="token-secret-row">
               <span className="token-secret">wh_live_••••{token.last4 || "••••"}</span>
-              <CopyTokenButton base={base} token={token} onNotice={onNotice} onExpired={load}/>
+              <CopyTokenButton base={accountBase(token.accountId)} token={token} onNotice={onNotice} onExpired={load}/>
             </div>
             <div className="token-perm-options">
               {SCOPE_OPTIONS.map(option => {

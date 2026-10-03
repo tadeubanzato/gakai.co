@@ -14,7 +14,8 @@ import { isRecoverableStreamError } from './src/lib/process-guard.mjs';
 import { normalizeEmail, loginNamesAdmin } from './src/domain/admin-identity.mjs';
 import { callingCodeOf } from './src/domain/phone.mjs';
 import { INTERNAL_KEY_NAMES, MAX_TOKENS_PER_ACCOUNT, isCopyable, newToken, pruneExpiredTokens, publicToken, sendTarget, tokenLast4, validMessageText, validateScopes, validateTokenRequest } from './src/domain/api-tokens.mjs';
-import { normalizeReplyRules, shouldAiReply, isChatListed, setChatListed } from './src/domain/ai-reply-rules.mjs';
+import { normalizeReplyRules, shouldAiReply, isChatListed, setChatListed, voiceIdFor } from './src/domain/ai-reply-rules.mjs';
+import { MAX_VOICES_PER_ACCOUNT, TEMPLATES as VOICE_TEMPLATES, compileVoicePrompt, parseVoiceYaml } from './src/domain/voice-profile.mjs';
 import { searchPeople, searchGroups, resolveRuleLabels } from './src/domain/reply-targets.mjs';
 import { AI_PROVIDER_IDS, FIXED_BASE_URLS, usesFixedBaseUrl, listModels as listAiModels, complete as aiComplete } from './src/lib/ai-provider.mjs';
 
@@ -66,6 +67,7 @@ if(!Array.isArray(store.automationSubscriptions))store.automationSubscriptions=[
 if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
 let migratedN8nConnections=false;for(const connection of store.n8nConnections){if(!connection.kind){connection.kind='standard';migratedN8nConnections=true}}if(migratedN8nConnections)persist();
 if(!Array.isArray(store.llmConfigs))store.llmConfigs=[];
+if(!Array.isArray(store.voiceProfiles))store.voiceProfiles=[];
 if(!store.preferences||typeof store.preferences!=='object'||Array.isArray(store.preferences))store.preferences={};
 // An application token can be copied back out for 24 hours after it is made; after that
 // the stored (encrypted) copy is deleted for good and only its one-way hash remains.
@@ -123,7 +125,7 @@ function recordAppEvent(event) {
   if (!result.changes) return false;
   db.prepare("DELETE FROM app_events WHERE id IN (SELECT id FROM app_events ORDER BY created_at DESC LIMIT -1 OFFSET 5000)").run();
   for (const stream of liveEventStreams) {
-    if (stream.accountId === event.account.id) writeSseEvent(stream.res, event, event.id);
+    if (stream.accountIds.has(event.account.id)) writeSseEvent(stream.res, event, event.id);
   }
   return true;
 }
@@ -143,7 +145,14 @@ function gakaiPresenceFrom(presences){
 // local state authoritative; this just fans a live provider event out to any
 // open browser WebSocket for that chat, and (for messages) into the same
 // automation pipeline a webhook used to feed.
+// Tell every open browser (not the durable event log) that a conversation's unread count changed
+// somewhere else — another tab, or another WhatsApp device — so lists and badges follow.
+function broadcastChatRead(accountId,chatId,unreadCount){
+  const event={type:'chat.read',account:{id:accountId},chat:{id:chatId},unreadCount,occurredAt:new Date().toISOString()};
+  for(const stream of liveEventStreams)if(stream.accountIds.has(accountId))stream.res.write(`event: gakai\ndata: ${JSON.stringify(event)}\n\n`);
+}
 function handleProviderEvent(kind,payload){
+  if(kind==='read'){broadcastChatRead(payload.accountId,payload.chatId,payload.unreadCount);return;}
   if(kind==='message'){
     dispatchAutomationEvent(payload).catch(error=>console.error('Automation dispatch failed',error));
     return;
@@ -873,10 +882,29 @@ async function createAgenticN8nWorkflow(accountId){
 // An admin-configured proxy is trusted input and may be on a private address;
 // the adapter pins the resolved address either way.
 function llmChat(config,messages){return aiComplete({...config,provider:config.provider||inferLlmProvider(config.baseUrl)},messages,{timeoutMs:30000});}
+// The instructions for the voice profile picked for this conversation, or null when none is.
+function voiceSystemPrompt(accountId,event){
+  const isGroup=event.chat?.kind==='group',chatId=event.chat?.id;
+  const phone=isGroup?null:(event.chat?.phone||(String(chatId||'').endsWith('@s.whatsapp.net')?bareJidUser(chatId):null));
+  const voiceId=voiceIdFor(llmConfig(accountId)?.replyRules,{chatId,phone,isGroup});
+  const voice=voiceId&&store.voiceProfiles.find(item=>item.id===voiceId&&item.accountId===accountId);
+  const parsed=voice?parseVoiceYaml(voice.yaml):null;
+  return parsed?.ok?compileVoicePrompt(parsed.profile,{chat:isGroup?'group':'direct'}):null;
+}
+// Forget a voice choice that points at a voice that no longer exists on this account.
+function withKnownVoices(accountId,rules){
+  const known=new Set(store.voiceProfiles.filter(item=>item.accountId===accountId).map(item=>item.id));
+  const normalized=normalizeReplyRules(rules);
+  if(!normalized.assignments)return normalized;
+  const assignments=Object.fromEntries(Object.entries(normalized.assignments).filter(([,voiceId])=>known.has(voiceId)));
+  const {assignments:_dropped,...rest}=normalized;
+  return Object.keys(assignments).length?{...rest,assignments}:rest;
+}
 async function dispatchLLMReply(accountId,event){
   const config=llmConfig(accountId);if(!config||!config.nativeEnabled)return;
   const chatId=event.chat?.id;const userText=event.message?.body||event.message?.text||'';if(!chatId||!userText)return;
-  const systemPrompt=assistantInstructions(config.systemPrompt);
+  // The voice chosen for this person or group; without one, the account's default instructions.
+  const systemPrompt=voiceSystemPrompt(accountId,event)||assistantInstructions(config.systemPrompt);
   try{
     const reply=await llmChat(config,[{role:'system',content:systemPrompt},{role:'user',content:userText}]);
     if(!reply.trim())return;
@@ -896,6 +924,16 @@ async function replyTargetSources(accountId){
 async function replyRulesView(accountId,rules){
   const replyRules=normalizeReplyRules(rules);
   return {replyRules,replyLabels:resolveRuleLabels(replyRules,await replyTargetSources(accountId))};
+}
+// Issue a new application token for an account. One path for every route that creates one.
+async function issueToken(accountId,input){
+  const request=validateTokenRequest(input);
+  if(request.error)return {status:400,body:{message:request.error}};
+  if(store.keys.filter(k=>k.accountId===accountId&&!INTERNAL_KEY_NAMES.has(k.name)).length>=MAX_TOKENS_PER_ACCOUNT)return {status:409,body:{message:`An account can have up to ${MAX_TOKENS_PER_ACCOUNT} tokens. Delete one you no longer use first.`}};
+  const token=newToken();
+  const key={id:randomBytes(8).toString("hex"),accountId,name:request.name,scopes:request.scopes,createdAt:new Date().toISOString(),lastUsedAt:null,rotatedAt:null,last4:tokenLast4(token),hash:hash(token),tokenEnc:encryptSecret(token)};
+  store.keys.push(key);await persist();
+  return {status:201,body:{key:publicToken(key),token}};
 }
 async function api(req, res, url) {
 function normalizedPreviewImage(value){
@@ -975,6 +1013,16 @@ async function enrichMessage(session,view){
   }
   if(url.pathname==="/api/app/auth/login"&&req.method==="POST"){const {username,password,remember}=await readBody(req);const expectedUsername=store.username;if(!store.password||(expectedUsername&&!loginNamesAdmin(store,username))||!passwordMatches(password||""))return send(res,401,{message:"Incorrect username or password"});const token=issueSession(remember);res.writeHead(200,{"set-cookie":sessionCookie(token,Boolean(remember)),"content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
   if(url.pathname==="/api/app/auth/logout"&&req.method==="POST"){const token=cookie(req).home_session;sessions.delete(token);res.writeHead(200,{"set-cookie":"home_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0","content-type":"application/json"});return res.end(JSON.stringify({ok:true}));}
+  // Application tokens across the whole workspace (Settings → Application tokens). Each token
+  // still names the one WhatsApp profile it sends from; per-token actions use the account routes.
+  if(url.pathname==="/api/app/integration-keys"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});pruneTokenSecrets();return send(res,200,{keys:store.keys.filter(k=>!INTERNAL_KEY_NAMES.has(k.name)).map(key=>publicToken(key))});}
+  if(url.pathname==="/api/app/integration-keys"&&req.method==="POST"){
+    if(!admin(req))return send(res,401,{message:"Sign in required"});
+    const input=await readBody(req),accountId=String(input.accountId||"");
+    if(!accountId||!provider.getAccount(accountId))return send(res,404,{message:"Choose one of your WhatsApp profiles for this token"});
+    const result=await issueToken(accountId,input);
+    return send(res,result.status,result.body);
+  }
   // Interface preferences that should follow the administrator across browsers
   // and logins. A whitelist of boolean keys, so nothing else can be stored here.
   if(url.pathname==="/api/app/preferences"&&req.method==="GET"){if(!admin(req))return send(res,401,{message:"Sign in required"});return send(res,200,{sidebarCollapsed:typeof store.preferences.sidebarCollapsed==="boolean"?store.preferences.sidebarCollapsed:null});}
@@ -1008,8 +1056,10 @@ async function enrichMessage(session,view){
   }
   if(!admin(req))return send(res,401,{message:'Sign in required'});
   if(req.method==='GET'&&url.pathname==='/api/app/events'){
-    const accountId=String(url.searchParams.get('accountId')||'');
-    if(!accountId)return send(res,400,{message:'accountId is required'});
+    // One connection can follow several accounts (comma-separated): a browser allows only a handful
+    // of simultaneous connections per host, and every open tab used to spend one per account.
+    const accountIds=new Set(String(url.searchParams.get('accountId')||'').split(',').map(item=>item.trim()).filter(Boolean).slice(0,20));
+    if(!accountIds.size)return send(res,400,{message:'accountId is required'});
     const afterId=String(req.headers['last-event-id']||url.searchParams.get('after')||'');
     // A subscriber that already knows the true current state from a regular
     // REST fetch (the sidebar's per-account unread indicator) and only wants
@@ -1021,13 +1071,13 @@ async function enrichMessage(session,view){
     // normally: that header takes priority over this literal sentinel.
     const skipHistory=afterId==='now';
     const after=(!skipHistory&&afterId)?db.prepare('SELECT created_at FROM app_events WHERE id=?').get(afterId)?.created_at:null;
-    const rows=skipHistory?[]:(after
-      ?db.prepare('SELECT id,payload FROM app_events WHERE account_id=? AND created_at>? ORDER BY created_at ASC LIMIT 250').all(accountId,after)
-      :db.prepare('SELECT id,payload FROM app_events WHERE account_id=? ORDER BY created_at DESC LIMIT 50').all(accountId).reverse());
+    const rows=skipHistory?[]:[...accountIds].flatMap(accountId=>after
+      ?db.prepare('SELECT id,payload,created_at FROM app_events WHERE account_id=? AND created_at>? ORDER BY created_at ASC LIMIT 250').all(accountId,after)
+      :db.prepare('SELECT id,payload,created_at FROM app_events WHERE account_id=? ORDER BY created_at DESC LIMIT 50').all(accountId).reverse()).sort((x,y)=>String(x.created_at).localeCompare(String(y.created_at)));
     res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
     res.write(': connected\n\n');
     for(const row of rows){try{writeSseEvent(res,JSON.parse(row.payload),row.id)}catch{}}
-    const stream={res,accountId};liveEventStreams.add(stream);
+    const stream={res,accountIds};liveEventStreams.add(stream);
     const heartbeat=setInterval(()=>res.write(': keepalive\n\n'),25000);
     req.on('close',()=>{clearInterval(heartbeat);liveEventStreams.delete(stream)});
     return;
@@ -1105,11 +1155,18 @@ async function enrichMessage(session,view){
     return send(res,201,{account:account(provider.getAccount(id)||{id,status:'STARTING'})});
   }
   const id=decodeURIComponent(parts[3] || '');
-  if (req.method==="DELETE" && parts.length===4) {await provider.deleteAccount(id).catch(()=>null);delete store.accountLabels[id];store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);store.keys=(store.keys||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
+  if (req.method==="DELETE" && parts.length===4) {await provider.deleteAccount(id).catch(()=>null);delete store.accountLabels[id];store.n8nConnections=(store.n8nConnections||[]).filter(item=>item.accountId!==id);store.llmConfigs=(store.llmConfigs||[]).filter(item=>item.accountId!==id);store.automationSubscriptions=(store.automationSubscriptions||[]).filter(item=>item.accountId!==id);store.keys=(store.keys||[]).filter(item=>item.accountId!==id);store.voiceProfiles=(store.voiceProfiles||[]).filter(item=>item.accountId!==id);await persist();return send(res,200,{ok:true});}
   if (req.method==='GET' && parts[4]==='qr') return send(res,200,(await provider.getQr(id))||{});
   if (req.method==='POST' && parts[4]==='start') {await provider.startAccount(id,{label:store.accountLabels[id]}); return send(res,200,{ok:true});}
   if (req.method==='POST' && parts[4]==='restart') {await provider.restartAccount(id); return send(res,200,{ok:true});}
-  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){await provider.markChatRead(id,decodeURIComponent(parts[5]));return send(res,200,{ok:true});}
+  // The reader has seen this conversation up to `through` (unix seconds of the newest message
+  // on screen). Omitted = everything stored. The count returned is the authoritative remainder.
+  if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='read'){
+    const chatId=decodeURIComponent(parts[5]),input=await readBody(req).catch(()=>({})),through=Number(input.through)>0?Math.floor(Number(input.through)):undefined;
+    const unreadCount=Number(await provider.markChatRead(id,chatId,{through}))||0;
+    broadcastChatRead(id,chatId,unreadCount);
+    return send(res,200,{ok:true,chatId,unreadCount});
+  }
   // Pin / mute / archive a chat. Body: { pin: bool } | { archive: bool } | { mute: seconds }.
   if(req.method==='POST'&&parts[4]==='chats'&&parts[5]&&parts[6]==='state'){
     const chatId=decodeURIComponent(parts[5]),input=await readBody(req);
@@ -1331,15 +1388,7 @@ async function enrichMessage(session,view){
     await persist();
     return send(res,200,{key:publicToken(key)});
   }
-  if(parts[4]==="integration-keys"&&req.method==="POST"){
-    const request=validateTokenRequest(await readBody(req));
-    if(request.error)return send(res,400,{message:request.error});
-    if(store.keys.filter(k=>k.accountId===id&&!INTERNAL_KEY_NAMES.has(k.name)).length>=MAX_TOKENS_PER_ACCOUNT)return send(res,409,{message:`An account can have up to ${MAX_TOKENS_PER_ACCOUNT} tokens. Delete one you no longer use first.`});
-    const token=newToken();
-    const key={id:randomBytes(8).toString("hex"),accountId:id,name:request.name,scopes:request.scopes,createdAt:new Date().toISOString(),lastUsedAt:null,rotatedAt:null,last4:tokenLast4(token),hash:hash(token),tokenEnc:encryptSecret(token)};
-    store.keys.push(key);await persist();
-    return send(res,201,{key:publicToken(key),token});
-  }
+  if(parts[4]==="integration-keys"&&req.method==="POST"){const result=await issueToken(id,await readBody(req));return send(res,result.status,result.body);}
   if(parts[4]==="automations"&&req.method==="GET")return send(res,200,{subscriptions:store.automationSubscriptions.filter(subscription=>subscription.accountId===id).map(automationSummary)});
   if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await n8nWebhookUrl(input.url||""),secret=String(input.secret||"").trim();if(!url)return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@s.whatsapp.net",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await automationFetch({secret,url:url.href},event);if(!response.ok)return send(res,502,{message:await describeWebhookFailure(response)});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
   if(parts[4]==="automations"&&!parts[5]&&req.method==="POST"){const input=await readBody(req),production=await n8nWebhookUrl(input.productionUrl||input.url||""),test=await n8nWebhookUrl(input.testUrl||""),requestedSecret=String(input.secret||"").trim();if(!production)return send(res,400,{message:"Use an HTTPS n8n production webhook URL"});if(input.testUrl&&!test)return send(res,400,{message:"Use an HTTPS n8n test webhook URL"});if(requestedSecret.length>256)return send(res,400,{message:"Invalid Header Auth secret"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:production.href,productionUrl:production.href,testUrl:test?.href||null,testPhone:String(input.testPhone||"").replace(/[^0-9]/g,"")||null,enabled:true,events:["message.received"],secret:requestedSecret||ensureN8nKey(id),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}
@@ -1378,12 +1427,45 @@ async function enrichMessage(session,view){
     const {chats,contacts}=await replyTargetSources(id);
     return send(res,200,{results:kind==='group'?searchGroups({chats,query,exclude}):searchPeople({chats,contacts,query,exclude})});
   }
+  // Voice profiles: how the AI sounds for a person or group — a small YAML each, up to 5 per account.
+  if(parts[4]==='voices'){
+    const mine=()=>store.voiceProfiles.filter(item=>item.accountId===id);
+    const shown=item=>({id:item.id,name:item.name,yaml:item.yaml,updatedAt:item.updatedAt});
+    if(parts.length===5&&req.method==='GET')return send(res,200,{voices:mine().map(shown),limit:MAX_VOICES_PER_ACCOUNT,templates:VOICE_TEMPLATES});
+    // Live check for the editor: problems with their lines, or a preview of what the AI will be told.
+    if(parts[5]==='validate'&&req.method==='POST'){
+      const parsed=parseVoiceYaml((await readBody(req)).yaml);
+      return send(res,200,parsed.ok?{ok:true,name:parsed.profile.name,preview:{direct:compileVoicePrompt(parsed.profile,{chat:'direct'}),group:compileVoicePrompt(parsed.profile,{chat:'group'})}}:{ok:false,errors:parsed.errors});
+    }
+    if(parts.length===5&&req.method==='POST'||(parts.length===6&&req.method==='PUT')){
+      const editing=parts.length===6?mine().find(item=>item.id===parts[5]):null;
+      if(parts.length===6&&!editing)return send(res,404,{message:'Voice profile not found'});
+      const yaml=String((await readBody(req)).yaml??''),parsed=parseVoiceYaml(yaml);
+      if(!parsed.ok)return send(res,400,{message:'Fix the problems in the voice profile before saving.',errors:parsed.errors});
+      const name=parsed.profile.name.trim();
+      if(mine().some(item=>item!==editing&&item.name.toLowerCase()===name.toLowerCase()))return send(res,409,{message:`You already have a voice called "${name}". Give this one a different name.`});
+      if(!editing&&mine().length>=MAX_VOICES_PER_ACCOUNT)return send(res,409,{message:`An account can have up to ${MAX_VOICES_PER_ACCOUNT} voice profiles. Delete one you no longer use first.`});
+      const now=new Date().toISOString();
+      if(editing){editing.name=name;editing.yaml=yaml;editing.updatedAt=now;await persist();return send(res,200,{voice:shown(editing)});}
+      const created={id:`vo_${randomBytes(6).toString('hex')}`,accountId:id,name,yaml,createdAt:now,updatedAt:now};
+      store.voiceProfiles.push(created);await persist();
+      return send(res,201,{voice:shown(created)});
+    }
+    if(parts.length===6&&req.method==='DELETE'){
+      const target=mine().find(item=>item.id===parts[5]);
+      if(!target)return send(res,404,{message:'Voice profile not found'});
+      store.voiceProfiles=store.voiceProfiles.filter(item=>item!==target);
+      const config=llmConfig(id);if(config?.replyRules)config.replyRules=withKnownVoices(id,config.replyRules);   // anyone using it falls back to the default
+      await persist();
+      return send(res,200,{ok:true});
+    }
+  }
   // Who the AI may answer. Saved on its own (like the native toggle) so
   // editing the list never re-verifies the provider or touches its key.
   if(parts[4]==='llm'&&parts[5]==='rules'&&req.method==='PUT'){
     const config=llmConfig(id);
     if(!config)return send(res,404,{message:'Set up AI Responses before choosing who it replies to'});
-    config.replyRules=normalizeReplyRules(await readBody(req));
+    config.replyRules=withKnownVoices(id,await readBody(req));
     await persist();
     return send(res,200,await replyRulesView(id,config.replyRules));
   }
@@ -1621,7 +1703,7 @@ const server=http.createServer(async (req,res)=>{ const url=new URL(req.url,`htt
   if (url.pathname === '/healthz' || url.pathname === '/readyz' || url.pathname.startsWith('/api/')) return await api(req,res,url);
   // React owns application routes. Serve the shell for deep links so a direct
   // visit to an account details page does not get treated as a missing file.
-  const requested=(url.pathname==='/'||url.pathname.startsWith('/accounts/')||url.pathname.startsWith('/details/'))?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
+  const requested=(url.pathname==='/'||url.pathname==='/settings'||url.pathname==='/settings/'||url.pathname.startsWith('/accounts/')||url.pathname.startsWith('/details/')||url.pathname.startsWith('/profile-settings/'))?'/index.html':url.pathname, file=normalize(join(publicDir,requested));
   if (!file.startsWith(publicDir)) return send(res,403,{message:'Forbidden'});
   const content=await readFile(file); res.writeHead(200,{'content-type':types[extname(file)]||'application/octet-stream','cache-control':'no-cache'}); res.end(content);
 } catch(error) { console.error(error); send(res,error.status||502,{message:error.message||'Service unavailable'}); }});

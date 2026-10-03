@@ -82,9 +82,20 @@ export function createMockProvider({ onEvent } = {}) {
     chatsFor(accountId).delete(chatId);
     messagesFor(accountId).delete(chatId);
   }
-  async function markChatRead(accountId, chatId) {
+  // Mirrors the real provider's contract: reading up to `through` leaves only the incoming
+  // messages after it unread, and never un-reads anything (the cursor only moves forward).
+  const readCursors = new Map();
+  async function markChatRead(accountId, chatId, { through } = {}) {
     const chat = chatsFor(accountId).get(chatId);
-    if (chat) chat.unreadCount = 0;
+    if (!chat) return 0;
+    const list = messagesFor(accountId).get(chatId) || [];
+    const key = `${accountId}\u0000${chatId}`;
+    const boundary = Number(through) > 0 ? Math.floor(Number(through)) : (list.length ? list[list.length - 1].timestamp : 0);
+    const cursor = Math.max(readCursors.get(key) || 0, boundary);
+    readCursors.set(key, cursor);
+    const after = list.filter(m => !m.fromMe && m.timestamp > cursor).length;
+    chat.unreadCount = Math.min(Number(chat.unreadCount) || 0, after || 0);
+    return chat.unreadCount;
   }
   const blocked = new Map(); // accountId -> Set(jid)
   const blockedFor = accountId => { if (!blocked.has(accountId)) blocked.set(accountId, new Set()); return blocked.get(accountId); };
@@ -201,8 +212,16 @@ export function createMockProvider({ onEvent } = {}) {
   function simulateIncomingMessage(accountId, chatId, message) {
     const full = { id: message.id, timestamp: message.timestamp ?? Math.floor(Date.now() / 1000), fromMe: false, body: message.body ?? '', text: message.text ?? message.body ?? '', hasMedia: Boolean(message.hasMedia), media: message.media || null, mediaUrl: message.mediaUrl || null, system: message.system || null, replyTo: message.replyTo || null, sender: message.sender || null, mentionedJids: message.mentionedJids || [] };
     seedMessage(accountId, chatId, full);
+    // Idempotent like the real store: a replay of the same message id never counts twice.
+    const chat = chatsFor(accountId).get(chatId);
+    if (chat && !(seenIncoming.get(accountId)?.has(`${chatId}/${full.id}`))) {
+      if (!seenIncoming.has(accountId)) seenIncoming.set(accountId, new Set());
+      seenIncoming.get(accountId).add(`${chatId}/${full.id}`);
+      if (full.body || full.hasMedia) chat.unreadCount = (Number(chat.unreadCount) || 0) + 1;
+    }
     if (onEvent) onEvent('message', { accountId, chatId, message: full, raw: full });
   }
+  const seenIncoming = new Map();
   function getSentMessages() { return sent; }
   function getReaction(accountId, messageId) { return reactionsFor(accountId).get(messageId) || null; }
 

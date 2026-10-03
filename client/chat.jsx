@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, staleMessageIds, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending, messageIsEditable } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
+import { aspectOf, compensation, distanceFromBottom, entryNeedsCorrection, followsIncoming, isAtBottom, modeAfterIntent, modeAfterScroll, settlesToBottom } from "./thread-scroll.mjs";
 import { Avatar, Menu, MenuItem } from "./ui-helpers.jsx";
 import { confirmDialog } from "./confirm.jsx";
 
@@ -31,7 +32,7 @@ function mediaTime(value) {
   const minutes = Math.floor(value / 60), seconds = Math.floor(value % 60);
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
-function PlayableMedia({ kind, src, filename }) {
+function PlayableMedia({ kind, src, filename, ratio }) {
   const playerRef = useRef(null);
   const [duration, setDuration] = useState(0), [position, setPosition] = useState(0), [playing, setPlaying] = useState(false);
   const [playError, setPlayError] = useState("");
@@ -59,7 +60,7 @@ function PlayableMedia({ kind, src, filename }) {
   const download = <a className={kind === "audio" ? "audio-download" : "video-download"} href={src} download={filename || kind} aria-label={`Download ${filename || kind}`} title={`Download ${filename || kind}`}>⇩</a>;
   const progress = <input className={kind === "audio" ? "audio-progress" : "video-progress"} type="range" min="0" max={duration || 0} step="0.01" value={Math.min(position, duration || 0)} onChange={seek} aria-label={`${kind} playback position`} disabled={!duration}/>;
   if (kind === "audio") return <div className={`audio-player${playing ? " playing" : ""}`}><audio {...mediaProps}/><button type="button" className="audio-play" onClick={toggle} aria-label={playing ? "Pause audio" : "Play audio"}>{playing ? "Ⅱ" : "▶"}</button><div className="audio-main">{progress}<div className="audio-meta"><span>{mediaTime(position)}</span><span>{mediaTime(duration)}</span></div></div>{download}</div>;
-  return <div className={`video-player${playing ? " playing" : ""}`}><div className="video-stage" onClick={toggle}><video {...mediaProps} playsInline/><button type="button" className="video-play" onClick={event => { event.stopPropagation(); toggle(); }} aria-label={playing ? "Pause video" : "Play video"}>{playing ? "Ⅱ" : "▶"}</button></div><div className="video-controls"><button type="button" onClick={toggle} aria-label={playing ? "Pause video" : "Play video"}>{playing ? "Ⅱ" : "▶"}</button>{progress}<span className="video-time">{mediaTime(position)} / {mediaTime(duration)}</span>{download}</div></div>;
+  return <div className={`video-player${playing ? " playing" : ""}`} style={ratio ? { "--ar": ratio } : undefined}><div className="video-stage" onClick={toggle}><video {...mediaProps} playsInline/><button type="button" className="video-play" onClick={event => { event.stopPropagation(); toggle(); }} aria-label={playing ? "Pause video" : "Play video"}>{playing ? "Ⅱ" : "▶"}</button></div><div className="video-controls"><button type="button" onClick={toggle} aria-label={playing ? "Pause video" : "Play video"}>{playing ? "Ⅱ" : "▶"}</button>{progress}<span className="video-time">{mediaTime(position)} / {mediaTime(duration)}</span>{download}</div></div>;
 }
 function MediaCard({ message, accountId, chatId, onResolved }) {
   const src = mediaSrc(message);
@@ -85,8 +86,9 @@ function MediaCard({ message, accountId, chatId, onResolved }) {
   const failedNotice = <p className="media-unavailable media-failed">Couldn't load attachment <button type="button" onClick={retry}>Retry</button></p>;
   if (!src) return resolveFailed ? failedNotice : <p className="media-unavailable">Loading attachment…</p>;
   if (displayFailed) return failedNotice;
-  if (kind === "image") return <img className="message-media media image" src={src} alt={message.body || message.text || "Image attachment"} loading="lazy" onError={() => setDisplayFailed(true)} />;
-  if (kind === "video") return <PlayableMedia kind="video" src={src} filename={filename||"video"}/>;
+  const ratio = aspectOf(message?.media);   // the size WhatsApp reported: the box is right before the bytes arrive
+  if (kind === "image") return <img className="message-media media image" style={ratio ? { "--ar": ratio } : undefined} width={message?.media?.width || undefined} height={message?.media?.height || undefined} src={src} alt={message.body || message.text || "Image attachment"} loading="lazy" onError={() => setDisplayFailed(true)} />;
+  if (kind === "video") return <PlayableMedia kind="video" src={src} filename={filename||"video"} ratio={ratio}/>;
   if (kind === "audio") return <PlayableMedia kind="audio" src={src} filename={filename||"audio"}/>;
   const ext = (filename.match(/\.([a-z0-9]{2,5})$/i)?.[1] || "").toUpperCase();
   return <a className="message-document" href={src} target="_blank" rel="noreferrer" download={filename}>
@@ -131,7 +133,7 @@ function LinkPreview({ body, preview }) {
   const match = String(body || "").match(/https?:\/\/[^\s]+/i);
   const url = preview?.url || match?.[0];
   const [fetched, setFetched] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(Boolean(url));   // true from the first render, so the card reserves its picture area at once
   
   // Fetch OG data for ANY URL in the message (like old vanilla version)
   useEffect(() => {
@@ -183,7 +185,7 @@ function LinkPreview({ body, preview }) {
   // below it, same card — this whole card renders above the message text
   // (see MessageCard). Keep the full info block even without an image, so
   // the card doesn't jump between a tiny fallback and a tall image card.
-  if (instagram) return <a className="link-preview instagram-native-preview" href={url} target="_blank" rel="noreferrer">{previewImage || <div className="site-preview-mark instagram-mark" aria-hidden="true">◎</div>}<span><em>Instagram</em><b>{readable(data.title || "Instagram post", 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}<small className="instagram-open">Open on Instagram ↗</small></span></a>;
+  if (instagram) return <a className="link-preview instagram-native-preview" href={url} target="_blank" rel="noreferrer">{previewImage || (loading ? <div className="link-preview-image-slot" aria-hidden="true"/> : <div className="site-preview-mark instagram-mark" aria-hidden="true">◎</div>)}<span><em>Instagram</em><b>{readable(data.title || "Instagram post", 120)}</b>{data.description && <small>{readable(data.description, 240)}</small>}<small className="instagram-open">Open on Instagram ↗</small></span></a>;
   if (!hasContent) {
     let hostname = "Website", label = "Open website";
     try {
@@ -294,13 +296,30 @@ function ForwardDialog({ message, chats, currentChatId, busy, onForward, onClose
   </div>;
 }
 
+// Scroll trace, off unless localStorage["gakai.debug.scroll"] = "1". It records the lifecycle moments
+// that decide where a conversation lands; nothing in the scroll logic reads it back.
+const visitedChats = new Set();
+const scrollDebug = () => { try { return window.localStorage.getItem("gakai.debug.scroll") === "1"; } catch { return false; } };
+function traceScroll(event, pane, chatId, state) {
+  if (!scrollDebug()) return;
+  console.log("[Scroll]", event, { chatId, scrollTop: pane ? Math.round(pane.scrollTop) : null, scrollHeight: pane?.scrollHeight ?? null, clientHeight: pane?.clientHeight ?? null, isAtBottom: pane ? isAtBottom(distanceFromBottom(pane)) : null, initialBottomLock: state.mode === "entry", userIsReadingHistory: state.mode === "reading", mode: state.mode });
+}
+
 const DISAPPEARING_OPTIONS = [["Off", 0], ["24 hours", 86400], ["7 days", 604800], ["90 days", 7776000]];
 
-export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats, onBack, onSent, onForwarded, onChatState, onBlock, onDisappearing, onDeleted, onAiToggle }) {
+export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats, onSeen, seenHeld, onEngage, onBack, onSent, onForwarded, onChatState, onBlock, onDisappearing, onDeleted, onAiToggle }) {
   const paneRef = useRef(null);
   const requestRef = useRef(0);
   const initialChatRef = useRef(null);
-  const restoreAnchorRef = useRef(null);
+  // Scroll state lives in refs: it changes on every frame and must never be a stale closure.
+  // mode is 'pinned' (following the newest message) or 'reading' (the reader scrolled up).
+  const scrollState = useRef({ mode: "entry", lastTop: 0 });   // every conversation starts in the entry lock
+  const pointerHeldRef = useRef(false);                          // the reader holds the mouse/scrollbar on the thread
+  const rowHeightsRef = useRef(new WeakMap());   // last known height of every observed message row
+  const observerRef = useRef(null);
+  const touchYRef = useRef(null);
+  const chatIdRef = useRef(null);
+  const settleTimerRef = useRef(0);
   const historyRestoreRef = useRef(null);
   const olderRequestRef = useRef(false);
   const followLatestRef = useRef(false);
@@ -321,6 +340,9 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   const [remoteTyping, setRemoteTyping] = useState(false);
   const [newMessageCount, setNewMessageCount] = useState(0);
   const [atBottom, setAtBottom] = useState(true); // the newest message is in view
+  const messagesOwnerRef = useRef(null);             // the chat the messages in state belong to
+  const seenThroughRef = useRef(0);                  // newest incoming timestamp already reported as seen
+  const [windowActive, setWindowActive] = useState(() => typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus()));
   const [toast, setToast] = useState("");
   const toastTimerRef = useRef(null);
   const [participants, setParticipants] = useState([]);
@@ -367,19 +389,37 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     };
   },[accountId,chatId]);
 
-  const isNearBottom = useCallback(() => {
+  const distance = useCallback(() => { const pane = paneRef.current; return pane ? distanceFromBottom(pane) : 0; }, []);
+  // Our own scroll writes record where they left the position, so the next scroll event is not
+  // mistaken for the reader moving.
+  const snapToBottom = useCallback(() => {
     const pane = paneRef.current;
-    if (!pane) return true;
-    return pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
+    if (!pane) return;
+    pane.scrollTop = pane.scrollHeight;
+    scrollState.current.lastTop = pane.scrollTop;
+  }, []);
+  const pin = useCallback((entering = false) => { scrollState.current.mode = entering ? "entry" : "pinned"; snapToBottom(); }, [snapToBottom]);
+
+
+  // The reader is actually looking: the tab is visible and focused.
+  useEffect(() => {
+    const update = () => setWindowActive(document.visibilityState === "visible" && document.hasFocus());
+    document.addEventListener("visibilitychange", update);
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    return () => { document.removeEventListener("visibilitychange", update); window.removeEventListener("focus", update); window.removeEventListener("blur", update); };
   }, []);
 
-  const captureAnchor = useCallback(() => {
-    const pane = paneRef.current;
-    if (!pane) return null;
-    const paneTop = pane.getBoundingClientRect().top;
-    const row = [...pane.querySelectorAll("[data-message-key]")].find(node => node.getBoundingClientRect().bottom > paneTop);
-    return row ? { key: row.dataset.messageKey, offset: row.getBoundingClientRect().top - paneTop } : null;
-  }, []);
+  // A conversation is read when its newest incoming message is on screen: scrolled to the bottom,
+  // with the window in front, and the chat opened on purpose (not auto-opened at page load).
+  // Reports only move forward, so re-renders, refreshes and polling never repeat one.
+  const newestIncoming = useMemo(() => messages.reduce((newest, message) => (message?.fromMe || message?.pending) ? newest : Math.max(newest, Number(stamp(message)) || 0), 0), [messages]);
+  useEffect(() => {
+    if (!onSeen || seenHeld || !chatId || loading || !atBottom || !windowActive || messagesOwnerRef.current !== chatId) return;
+    if (!newestIncoming || newestIncoming <= seenThroughRef.current) return;
+    seenThroughRef.current = newestIncoming;
+    onSeen(chatId, newestIncoming);
+  }, [onSeen, seenHeld, chatId, loading, atBottom, windowActive, newestIncoming]);
 
   // Sender avatars for a group page are fetched after the messages have
   // painted (the server shapes the page without any picture lookup), so
@@ -403,15 +443,24 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   useEffect(() => {
     const version = ++requestRef.current;
     initialChatRef.current = null;
-    restoreAnchorRef.current = null;
     historyRestoreRef.current = null;
     olderRequestRef.current = false;
+    // Conversation boundary: a complete reset. Nothing from a previous conversation (or an earlier
+    // visit to this one) takes part in where it opens: it always starts locked to the newest message.
+    scrollState.current = { mode: "entry", lastTop: 0 };
+    pointerHeldRef.current = false;
+    chatIdRef.current = chatId;
+    traceScroll(visitedChats.has(`${accountId}/${chatId}`) ? "same conversation reopened" : "conversation selected", paneRef.current, chatId, scrollState.current);
+    visitedChats.add(`${accountId}/${chatId}`);
+    setAtBottom(true);
     hydratedSendersRef.current = new Set();
+    messagesOwnerRef.current = null; seenThroughRef.current = 0;
     setMessages([]); setExhausted(false); setError(""); setReplyingTo(null); setEditingMessage(null); setForwarding(null); setReactionOverrides({}); setNewMessageCount(0); setLoading(Boolean(chatId));
     if (!accountId || !chatId) return undefined;
     api(endpoint(accountId, chatId)).then(result => {
       if (requestRef.current !== version) return;
       const page = pageOf(result).sort((a, b) => stamp(a) - stamp(b));
+      messagesOwnerRef.current = chatId;
       setMessages(page); setExhausted(page.length < PAGE_SIZE);
       hydrateSenderPictures(version, page);
     }).catch(cause => {
@@ -419,7 +468,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     }).finally(() => {
       if (requestRef.current === version) setLoading(false);
     });
-    return () => { if (requestRef.current === version) requestRef.current += 1; };
+    return () => { traceScroll("conversation left", paneRef.current, chatId, scrollState.current); if (requestRef.current === version) requestRef.current += 1; };
   }, [accountId, chatId, hydrateSenderPictures]);
 
   // Keep the active conversation live without fanning requests out across the
@@ -444,7 +493,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
         const stale = staleMessageIds(messagesRef.current, page);
         if (!newCount && !stale.size) return;
         if (newCount) {
-          if (isNearBottom()) followLatestRef.current = true;
+          if (followsIncoming({ mode: scrollState.current.mode, distance: distance() })) followLatestRef.current = true;
           else setNewMessageCount(count => count + newCount);
         }
         setMessages(current => merge(current.filter(message => !stale.has(serializedId(message?.id))), page));
@@ -458,55 +507,77 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     return () => { active = false; window.clearInterval(timer); };
   }, [accountId, chatId, hydrateSenderPictures]);
 
+  // One observer sees every size change in the thread — a picture arriving, a card resolving, the
+  // composer growing — and applies the rule for the current mode: pinned stays on the real bottom;
+  // a reader is only compensated for rows that sit above what they are looking at.
   useLayoutEffect(() => {
-    if (!messages.length || initialChatRef.current === chatId) return undefined;
-    initialChatRef.current = chatId;
-    const frame = requestAnimationFrame(() => { if (paneRef.current) paneRef.current.scrollTop = paneRef.current.scrollHeight; });
-    return () => cancelAnimationFrame(frame);
-  }, [chatId, messages.length]);
-
-  // Sending is an explicit reader intent. Keep the new pending/final message in
-  // view without fighting scrolling while the reader is browsing older history.
-  useLayoutEffect(() => {
-    if (!followLatestRef.current || !messages.length) return;
-    followLatestRef.current = false;
-    const frame = requestAnimationFrame(() => { if (paneRef.current) paneRef.current.scrollTop = paneRef.current.scrollHeight; });
-    return () => cancelAnimationFrame(frame);
-  }, [messages.length]);
-
-  useLayoutEffect(() => {
-    const anchor = restoreAnchorRef.current;
-    if (!anchor || !paneRef.current) return undefined;
-    const frame = requestAnimationFrame(() => {
-      const pane = paneRef.current;
-      const row = pane?.querySelector(`[data-message-key="${CSS.escape(anchor.key)}"]`);
-      if (restoreAnchorRef.current !== anchor || !pane || !row) return;
-      pane.scrollTop += row.getBoundingClientRect().top - pane.getBoundingClientRect().top - anchor.offset;
-      restoreAnchorRef.current = null;
+    const pane = paneRef.current;
+    if (!pane || typeof ResizeObserver === "undefined") return undefined;
+    const heights = rowHeightsRef.current;
+    const observer = new ResizeObserver(entries => {
+      const state = scrollState.current;
+      const top = pane.scrollTop;
+      let shift = 0;
+      for (const entry of entries) {
+        if (entry.target === pane) continue;
+        const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+        const before = heights.get(entry.target);
+        heights.set(entry.target, height);
+        if (before !== undefined) shift += compensation({ mode: state.mode, rowTop: entry.target.offsetTop, scrollTop: top, delta: height - before });
+      }
+      if (state.mode !== "reading") snapToBottom();
+      else if (shift) { pane.scrollTop = top + shift; state.lastTop = pane.scrollTop; }
+      traceScroll("resize detected", pane, chatIdRef.current, state);
+      setAtBottom(isAtBottom(distanceFromBottom(pane)));
     });
-    return () => cancelAnimationFrame(frame);
+    observer.observe(pane);
+    observerRef.current = observer;
+    return () => { observer.disconnect(); observerRef.current = null; };
+  }, [snapToBottom]);
+
+  // New rows start being observed with their current height as the baseline.
+  useLayoutEffect(() => {
+    const pane = paneRef.current, observer = observerRef.current;
+    if (!pane || !observer) return;
+    const heights = rowHeightsRef.current;
+    for (const row of pane.querySelectorAll(".message-row")) {
+      if (heights.has(row)) continue;
+      heights.set(row, row.getBoundingClientRect().height);
+      observer.observe(row);
+    }
   }, [messages]);
 
-  // Older history is inserted above the reader. Restoring by the actual
-  // scroll-height delta is deterministic for a normal DOM list: regardless of
-  // page size, the exact pre-request viewport remains visible.
+  // Why the list changed decides what scrolling does — there is deliberately no generic
+  // "messages changed, scroll down" rule:
+  //   opening a conversation  → show the newest message
+  //   a message we should follow (sent by us, or arrived while pinned) → stay on the newest
+  //   older history inserted above → keep exactly what the reader was looking at
+  //   anything else (reactions, ticks, media resolving) → nothing here; the observer handles size
   useLayoutEffect(() => {
+    const pane = paneRef.current;
+    if (!pane || !messages.length || messagesOwnerRef.current !== chatId) return;
+    chatIdRef.current = chatId;
+    if (initialChatRef.current !== chatId) {
+      initialChatRef.current = chatId;
+      traceScroll("messages rendered", pane, chatId, scrollState.current);
+      pin(true);
+      traceScroll("initial scroll performed", pane, chatId, scrollState.current);
+      return;
+    }
     const before = historyRestoreRef.current;
-    if (!before || !paneRef.current) return undefined;
-    const frame = requestAnimationFrame(() => {
-      const pane = paneRef.current;
-      if (historyRestoreRef.current !== before || !pane) return;
+    if (before?.apply) {
       pane.scrollTop = before.top + pane.scrollHeight - before.height;
+      scrollState.current.lastTop = pane.scrollTop;
       historyRestoreRef.current = null;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [messages]);
+      return;
+    }
+    if (followLatestRef.current) { followLatestRef.current = false; pin(); }
+  }, [messages, chatId, pin]);
 
   const resolveMedia = useCallback(resolved => {
     if (!resolved?.id) return;
-    restoreAnchorRef.current = captureAnchor();
     setMessages(current => current.map(message => idFor(message, 0) === idFor(resolved, 0) ? { ...message, ...resolved, media: resolved.media || message.media, mediaUrl: resolved.mediaUrl || message.mediaUrl } : message));
-  }, [captureAnchor]);
+  }, []);
   const loadOlder = useCallback(async () => {
     if (!chatId || olderLoading || exhausted || olderRequestRef.current) return;
     const oldest = messagesRef.current[0];
@@ -520,6 +591,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     try {
       const page = pageOf(await api(endpoint(accountId, chatId, before)));
       if (requestRef.current !== version) return;
+      if (historyRestoreRef.current) historyRestoreRef.current.apply = true;   // the next layout restores the viewport
       setMessages(current => merge(current, page));
       setExhausted(page.length < PAGE_SIZE);
       hydrateSenderPictures(version, page);
@@ -531,19 +603,59 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     }
   }, [accountId, chatId, exhausted, olderLoading, hydrateSenderPictures]);
 
+  // The reader's own movement is the only thing that changes the mode (see thread-scroll.mjs).
   const maybeLoadOlder = useCallback(event => {
-    if (event.currentTarget.scrollTop <= 120) loadOlder();
-    const near = isNearBottom();
+    const pane = event.currentTarget, state = scrollState.current;
+    let gap = distanceFromBottom(pane);
+    let next = modeAfterScroll({ mode: state.mode, top: pane.scrollTop, lastTop: state.lastTop, distance: gap });
+    if (pointerHeldRef.current && pane.scrollTop < state.lastTop - 1) next = "reading";   // dragging the scrollbar up
+    if (next === "reading" || pane.scrollTop > state.lastTop || gap <= 1) state.lastTop = pane.scrollTop;
+    state.mode = next;
+    // Entry lock: a scroll that left us above the real bottom was not the reader's (they would have
+    // shown intent first), so put the newest message back in view.
+    if (entryNeedsCorrection({ mode: state.mode, distance: gap })) { snapToBottom(); gap = distanceFromBottom(pane); }
+    if (pane.scrollTop <= 120) loadOlder();
+    // When scrolling stops while following, close any last few pixels (a smooth scroll can end short).
+    clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = setTimeout(() => {
+      const current = paneRef.current;
+      if (current && settlesToBottom({ mode: scrollState.current.mode, distance: distanceFromBottom(current) })) snapToBottom();
+    }, 120);
+    const near = isAtBottom(gap);
     setAtBottom(near);
     if (near) setNewMessageCount(0);
-  }, [loadOlder, isNearBottom]);
+  }, [loadOlder, snapToBottom]);
+  useEffect(() => () => clearTimeout(settleTimerRef.current), []);
+  const stopFollowingOnWheel = useCallback(event => { scrollState.current.mode = modeAfterIntent(scrollState.current.mode, event.deltaY); }, []);
+  const trackTouch = useCallback(event => { touchYRef.current = event.touches[0]?.clientY ?? null; }, []);
+  // Keys that scroll the thread up are intent too (typing in the composer is not).
+  useEffect(() => {
+    const onKey = event => {
+      const target = event.target;
+      if (target?.closest?.("input, textarea, select, [contenteditable]")) return;
+      if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) scrollState.current.mode = "reading";
+    };
+    const release = () => { pointerHeldRef.current = false; };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("pointerup", release); window.removeEventListener("pointercancel", release); };
+  }, []);
+  const holdPointer = useCallback(event => {
+    if (event.target !== event.currentTarget) return;   // on the thread itself (its scrollbar), not on a message
+    pointerHeldRef.current = true;
+  }, []);
+  const stopFollowingOnTouch = useCallback(event => {
+    const y = event.touches[0]?.clientY, from = touchYRef.current;
+    if (y != null && from != null && y - from > 6) scrollState.current.mode = "reading";   // finger moving down scrolls the thread up
+  }, []);
 
   // Layout changes without a scroll (new messages, media finishing loading,
   // opening a chat) can move the bottom out of — or back into — view.
   useEffect(() => {
-    const frame = requestAnimationFrame(() => setAtBottom(isNearBottom()));
+    const frame = requestAnimationFrame(() => setAtBottom(isAtBottom(distance())));
     return () => cancelAnimationFrame(frame);
-  }, [messages, loading, isNearBottom]);
+  }, [messages, loading, distance]);
 
   // Short-lived message at the bottom of the conversation, always in view
   // (the error banner at the top of the thread is not, once you have scrolled).
@@ -557,6 +669,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   const jumpToLatest = useCallback(() => {
     setNewMessageCount(0);
     setAtBottom(true);
+    scrollState.current.mode = "pinned";   // from here on the thread follows the newest content
     const pane = paneRef.current;
     if (pane) pane.scrollTo({ top: pane.scrollHeight, behavior: "smooth" });
   }, []);
@@ -840,7 +953,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   }, [accountId, chat?.name, chatId, deleting, onDeleted]);
 
   const name = chat?.name || chatId || "Conversation";
-  return <div className="conversation-react-root" aria-label={name}>
+  return <div className="conversation-react-root" aria-label={name} onPointerDownCapture={() => onEngage?.()} onKeyDownCapture={() => onEngage?.()}>
     <header className="conversation-head">
       {onBack && <button type="button" className="back" onClick={onBack} aria-label="Back to conversations">‹</button>}
       <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small>Chat ID: {chatId || "Unavailable"}</small></span>
@@ -859,14 +972,17 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
         <MenuItem onSelect={deleteConversation} danger disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</MenuItem>
       </Menu>
     </header>
-    <div className="messages" ref={paneRef} onScroll={maybeLoadOlder}>
+    <div className="messages" ref={paneRef} onScroll={maybeLoadOlder} onWheel={event => { onEngage?.(); stopFollowingOnWheel(event); }} onPointerDown={event => { onEngage?.(); holdPointer(event); }} onKeyDown={() => onEngage?.()} onTouchStart={trackTouch} onTouchMove={stopFollowingOnTouch}>
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
       {loading && !messages.length ? <p className="chat-loading loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading messages…</p> : <div className="message-list">
         {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onForward={setForwarding} onEdit={beginEdit} onStar={toggleStar} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
-      {!atBottom && newMessageCount === 0 && messages.length > 0 && <button type="button" className="jump-to-bottom" onClick={jumpToLatest} aria-label="Scroll to the latest message" title="Scroll to the latest message"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M6 13l6 6 6-6"/></svg></button>}
-      {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
+      {/* Zero-height slot: showing or hiding these controls must never change the thread's height, or the scroll position would move under the reader. */}
+      <div className="thread-jump">
+        {!atBottom && newMessageCount === 0 && messages.length > 0 && <button type="button" className="jump-to-bottom" onClick={jumpToLatest} aria-label="Scroll to the latest message" title="Scroll to the latest message"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M6 13l6 6 6-6"/></svg></button>}
+        {newMessageCount > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label={`Jump to ${newMessageCount} new message${newMessageCount > 1 ? "s" : ""}`}>↓ {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}</button>}
+      </div>
     </div>
     {toast && <div className="chat-toast" role="status">{toast}</div>}
     {remoteTyping&&<div className="typing-indicator" role="status">Typing…</div>}

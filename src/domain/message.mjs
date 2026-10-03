@@ -190,6 +190,10 @@ function mediaView(contentType, content, accountId, chatId, messageId) {
     url: messageMediaUrl(accountId, chatId, messageId),
     mimetype: inner?.mimetype || null,
     filename: inner?.fileName || null,
+    // The size WhatsApp reports for pictures and video, so the client can reserve the right box
+    // before a single byte of the media has arrived.
+    width: Number(inner?.width) > 0 ? Number(inner.width) : null,
+    height: Number(inner?.height) > 0 ? Number(inner.height) : null,
   };
 }
 

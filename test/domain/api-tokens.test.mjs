@@ -24,7 +24,7 @@ test('unknown or empty permissions are refused, so a token can never grant more 
 
 test('publicToken never exposes the secret or its hash', () => {
   const shown = publicToken({ id: 'k1', name: 'n8n', scopes: ['messages:send'], createdAt: 'c', lastUsedAt: null, last4: 'wxyz', hash: 'secret-hash', token: 'wh_live_secret' });
-  assert.deepEqual(shown, { id: 'k1', name: 'n8n', scopes: ['messages:send'], createdAt: 'c', lastUsedAt: null, rotatedAt: null, last4: 'wxyz', copyable: false, copyableUntil: null });
+  assert.deepEqual(shown, { id: 'k1', accountId: null, name: 'n8n', scopes: ['messages:send'], createdAt: 'c', lastUsedAt: null, rotatedAt: null, last4: 'wxyz', copyable: false, copyableUntil: null });
   assert.equal(JSON.stringify(shown).includes('secret'), false);
 });
 
