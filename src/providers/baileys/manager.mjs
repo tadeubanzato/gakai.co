@@ -14,10 +14,16 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
+import { freshPictureUrl, createPictureRefresher } from './picture.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
 import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, editView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
+// Avatar upkeep: shortly after an account connects, then on a fixed interval.
+// Only the chats the inbox can actually show are swept.
+const PICTURE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const PICTURE_REFRESH_START_DELAY_MS = 30 * 1000;
+const PICTURE_REFRESH_CHAT_LIMIT = 80;
 
 // Gakai's own presence vocabulary ('typing'/'recording'/'paused') maps onto
 // Baileys' WAPresence type ('composing'/'recording'/'paused'/'available'/
@@ -42,6 +48,25 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   const groupParticipantsCache = createBoundedCache({ limit: 500, ttlMs: 5 * 60 * 1000 });
 
   const accountDir = accountId => join(sessionsDir, accountId);
+
+  const pictureRefresher = createPictureRefresher({
+    listChatIds: accountId => store.getChatsOverview(accountId, PICTURE_REFRESH_CHAT_LIMIT).map(chat => chat.id),
+    getStoredPicture: (accountId, chatId) => store.getContact(accountId, chatId)?.picture || null,
+    isKnownMissing: (accountId, chatId) => Boolean(noPictureCache.get(`${accountId}:${chatId}`)),
+    refresh: (accountId, chatId) => lookupPicture(accountId, chatId),
+    // Renew anything that would expire before the next sweep comes round.
+    lookaheadMs: PICTURE_REFRESH_INTERVAL_MS,
+  });
+
+  function sweepPictures(accountId) {
+    const entry = accounts.get(accountId);
+    if (!entry || entry.status !== 'WORKING') return;
+    pictureRefresher.sweep(accountId, { isActive: () => accounts.get(accountId) === entry && entry.status === 'WORKING' })
+      .then(result => { if (result.checked) logger.info({ accountId, ...result }, 'Refreshed profile pictures'); })
+      .catch(error => logger.warn({ error: error.message, accountId }, 'Profile picture refresh failed'));
+  }
+  const pictureRefreshTimer = setInterval(() => { for (const accountId of accounts.keys()) sweepPictures(accountId); }, PICTURE_REFRESH_INTERVAL_MS);
+  pictureRefreshTimer.unref();
 
   function setStatus(accountId, status) {
     const entry = accounts.get(accountId);
@@ -77,6 +102,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
         // Fold any conversation that a previous session split across a
         // phone-JID chat and a LID chat back into one. Best-effort.
         reconcileLidChats(accountId).catch(error => logger.warn({ error: error.message, accountId }, 'LID chat reconciliation failed'));
+        setTimeout(() => sweepPictures(accountId), PICTURE_REFRESH_START_DELAY_MS).unref();
       }
       if (update.connection === 'connecting' && !entry.qr) entry.status = 'STARTING';
       if (update.connection === 'close') {
@@ -479,9 +505,9 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   function enrichedOverviewFor(accountId, chatId) {
     const blocked = store.isBlocked(accountId, chatId);
     const [row] = store.getChatsOverview(accountId, 1000).filter(chat => chat.id === chatId);
-    if (row) return domainChatOverview({ ...row, blocked });
+    if (row) return domainChatOverview({ ...row, picture: freshPictureUrl(row.picture), blocked });
     const contact = store.getContact(accountId, chatId);
-    return domainChatOverview({ id: chatId, name: contact?.name || null, picture: contact?.picture || null, unreadCount: 0, lastMessageTimestamp: 0, lastMessage: null, blocked });
+    return domainChatOverview({ id: chatId, name: contact?.name || null, picture: freshPictureUrl(contact?.picture), unreadCount: 0, lastMessageTimestamp: 0, lastMessage: null, blocked });
   }
 
   async function subscribePresence(accountId, chatId) {
@@ -498,22 +524,31 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   // whatever name/phone/picture is already in the local store — the inbox
   // list's first paint uses this so it never blocks on ~40 WhatsApp
   // round-trips; the picture is then filled in lazily (getChatPictures).
+  // A stored picture link past its expiry counts as no picture at all, so it
+  // is looked up again here rather than handed out as a dead link.
   async function getContact(accountId, contactId, { namesOnly = false } = {}) {
     const cached = store.getContact(accountId, contactId);
     const entry = accounts.get(accountId);
     const cacheKey = `${accountId}:${contactId}`;
-    let picture = cached?.picture || null;
-    if (!namesOnly && !picture && entry && !noPictureCache.get(cacheKey)) {
-      picture = (await entry.sock.profilePictureUrl(contactId, 'preview').catch(() => null)) || null;
-      if (picture) store.setContactPicture(accountId, contactId, picture);
-      else noPictureCache.set(cacheKey, true);
-    }
+    let picture = freshPictureUrl(cached?.picture);
+    if (!namesOnly && !picture && entry && !noPictureCache.get(cacheKey)) picture = await lookupPicture(accountId, contactId);
     return {
       id: contactId,
       phone: cached?.phone || (jidDecode(contactId)?.server === 's.whatsapp.net' ? bareJidUser(contactId) : null),
       name: cached?.name || null,
       picture,
     };
+  }
+
+  // One live WhatsApp lookup, with the outcome recorded either way: a link is
+  // stored, a miss is remembered for a while (see noPictureCache).
+  async function lookupPicture(accountId, contactId) {
+    const entry = accounts.get(accountId);
+    if (!entry) return null;
+    const picture = (await entry.sock.profilePictureUrl(contactId, 'preview').catch(() => null)) || null;
+    if (picture) store.setContactPicture(accountId, contactId, picture);
+    else noPictureCache.set(`${accountId}:${contactId}`, true);
+    return picture;
   }
 
   function getContacts(accountId) { return store.getContacts(accountId); }
@@ -583,7 +618,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return domainChatOverview({
       id: chatId,
       name: contact?.name || null,
-      picture: contact?.picture || null,
+      picture: freshPictureUrl(contact?.picture),
       unreadCount: 0,
       lastMessageTimestamp: Math.floor(Date.now() / 1000),
       lastMessage: null,
@@ -594,10 +629,11 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     const rows = store.getChatsOverview(accountId, 200);
     const blocked = store.blockedJids(accountId);
     return rows.map(row => {
+      row = { ...row, picture: freshPictureUrl(row.picture) };
       if (!row.name) {
         const contact = store.getContact(accountId, row.id);
         if (contact?.name) row = { ...row, name: contact.name };
-        if (!row.picture && contact?.picture) row = { ...row, picture: contact.picture };
+        if (!row.picture) row = { ...row, picture: freshPictureUrl(contact?.picture) };
       }
       return domainChatOverview({ ...row, blocked: blocked.has(row.id) });
     });
@@ -672,6 +708,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   }
 
   async function shutdown() {
+    clearInterval(pictureRefreshTimer);
     for (const [, entry] of accounts) { try { entry.sock.end(undefined); } catch {} }
   }
 
