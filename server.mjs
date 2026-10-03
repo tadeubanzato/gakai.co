@@ -12,6 +12,8 @@ import { createBoundedCache } from './src/lib/lru-cache.mjs';
 import { decodeHtmlEntities } from './src/lib/html.mjs';
 import { isRecoverableStreamError } from './src/lib/process-guard.mjs';
 import { normalizeEmail, loginNamesAdmin } from './src/domain/admin-identity.mjs';
+import { callingCodeOf } from './src/domain/phone.mjs';
+import { INTERNAL_KEY_NAMES, MAX_TOKENS_PER_ACCOUNT, isCopyable, newToken, pruneExpiredTokens, publicToken, sendTarget, tokenLast4, validMessageText, validateScopes, validateTokenRequest } from './src/domain/api-tokens.mjs';
 import { normalizeReplyRules, shouldAiReply, isChatListed, setChatListed } from './src/domain/ai-reply-rules.mjs';
 import { searchPeople, searchGroups, resolveRuleLabels } from './src/domain/reply-targets.mjs';
 import { AI_PROVIDER_IDS, FIXED_BASE_URLS, usesFixedBaseUrl, listModels as listAiModels, complete as aiComplete } from './src/lib/ai-provider.mjs';
@@ -65,6 +67,11 @@ if(!Array.isArray(store.n8nConnections))store.n8nConnections=[];
 let migratedN8nConnections=false;for(const connection of store.n8nConnections){if(!connection.kind){connection.kind='standard';migratedN8nConnections=true}}if(migratedN8nConnections)persist();
 if(!Array.isArray(store.llmConfigs))store.llmConfigs=[];
 if(!store.preferences||typeof store.preferences!=='object'||Array.isArray(store.preferences))store.preferences={};
+// An application token can be copied back out for 24 hours after it is made; after that
+// the stored (encrypted) copy is deleted for good and only its one-way hash remains.
+function pruneTokenSecrets(){if(pruneExpiredTokens(store.keys))persist();}
+pruneTokenSecrets();
+setInterval(pruneTokenSecrets,60*60*1000).unref();
 if(!savedState&&(legacy.username||legacy.password||legacy.keys?.length||legacy.automationSubscriptions?.length||legacy.deletingAccounts?.length))persist();
 const legacyAdminUsername=process.env.GAKAI_LEGACY_ADMIN_USERNAME || null;
 if(!store.username&&store.password&&legacyAdminUsername){store.username=legacyAdminUsername;await persist();}
@@ -934,11 +941,26 @@ async function enrichMessage(session,view){
 }
   if(url.pathname.startsWith('/api/integrations/v1/')){
     const token=(req.headers.authorization||'').replace(/^Bearer\s+/i,'');const key=store.keys.find(k=>equalHex(k.hash,hash(token)));
-    if(!key)return send(res,401,{message:'Invalid integration key'});key.lastUsedAt=new Date().toISOString();persist();
+    if(!key)return send(res,401,{message:'Invalid integration key'});
+    // Last-used is a once-a-minute stamp, so a busy integration does not rewrite the saved state on every call.
+    if(!key.lastUsedAt||Date.now()-Date.parse(key.lastUsedAt)>60000){key.lastUsedAt=new Date().toISOString();persist();}
     const endpoint=url.pathname.slice('/api/integrations/v1/'.length);
     if(req.method==='GET'&&endpoint==='chats'&&key.scopes.includes('messages:read')){const chats=await provider.getChatsOverview(key.accountId);return send(res,200,{accountId:key.accountId,chats:chats.slice(0,35).sort((a,b)=>b.timestamp-a.timestamp)});}
     if(req.method==='GET'&&endpoint==='messages'&&key.scopes.includes('messages:read')){const chatId=url.searchParams.get('chatId');if(!chatId)return send(res,400,{message:'chatId is required'});const messages=await provider.getMessages(key.accountId,chatId,{limit:30});return send(res,200,{messages:messages.sort((a,b)=>a.timestamp-b.timestamp)});}
-    if(req.method==='POST'&&endpoint==='messages'&&key.scopes.includes('messages:send')){const input=await readBody(req);if(!input.chatId||!input.text)return send(res,400,{message:'chatId and text are required'});const sent=await provider.sendText(key.accountId,input.chatId,input.text);return send(res,200,{message:sent});}
+    if(req.method==='POST'&&endpoint==='messages'&&key.scopes.includes('messages:send')){
+      const input=await readBody(req),target=sendTarget(input,{defaultCallingCode:callingCodeOf(provider.getAccount(key.accountId)?.phone)}),body=validMessageText(input.text);
+      if(target.error)return send(res,400,{message:target.error});
+      if(body.error)return send(res,400,{message:body.error});
+      let chatId=target.chatId,newChat=false;
+      if(!chatId){
+        // A phone number: use the existing conversation with it, or open a new one
+        // if the number is on WhatsApp — the same step the New chat screen takes.
+        const chat=await provider.startConversation(key.accountId,target.phone);
+        chatId=chat.id;newChat=Boolean(chat.isNew);
+      }
+      const sent=await provider.sendText(key.accountId,chatId,body.text);
+      return send(res,200,{ok:true,chatId,to:target.e164||null,newChat,message:sent});
+    }
     return send(res,403,{message:'This integration key does not have permission for that action'});
 
   }
@@ -1277,8 +1299,47 @@ async function enrichMessage(session,view){
   if(req.method==='PATCH'&&parts[4]==='label') {const input=await readBody(req),label=String(input.label||'').trim().slice(0,80);if(!label)return send(res,400,{message:'Account name is required'});store.accountLabels[id]=label;await persist();return send(res,200,{ok:true,label});}
   if(parts[4]==="integration-keys"&&parts[5]==="n8n"&&req.method==="GET"){const key=store.keys.find(k=>k.accountId===id&&k.name==="n8n integration");return send(res,200,{token:key?.token||null});}
   if(parts[4]==="integration-keys"&&parts[5]==="n8n"&&req.method==="POST"){let key=store.keys.find(k=>k.accountId===id&&k.name==="n8n integration");const token=`wh_live_${randomBytes(24).toString("base64url")}`;if(key){key.token=token;key.hash=hash(token);key.lastUsedAt=null}else{key={id:randomBytes(8).toString("hex"),accountId:id,name:"n8n integration",scopes:["messages:read","messages:send"],createdAt:new Date().toISOString(),lastUsedAt:null,token,hash:hash(token)}}store.keys=store.keys.filter(item=>item===key||!(item.accountId===id&&item.name==="n8n integration"));store.keys.push(key);await persist();return send(res,200,{token});}
-  if(parts[4]==="integration-keys"&&req.method==="GET")return send(res,200,{keys:store.keys.filter(k=>k.accountId===id).map(({hash,token,...key})=>key)});
-  if(parts[4]==="integration-keys"&&req.method==="POST"){const input=await readBody(req);const token=`wh_live_${randomBytes(24).toString("base64url")}`;const key={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"Integration").slice(0,80),scopes:Array.isArray(input.scopes)?input.scopes:["messages:read","messages:send"],createdAt:new Date().toISOString(),lastUsedAt:null,hash:hash(token)};store.keys.push(key);await persist();return send(res,201,{key:{...key,hash:undefined},token});}
+  // Copy a token back out — only while its 24-hour window is open, and only for the
+  // signed-in administrator. Placed before the list route, which would otherwise take this URL.
+  if(parts[4]==="integration-keys"&&parts[5]&&parts[6]==="token"&&req.method==="GET"){
+    const key=store.keys.find(k=>k.id===parts[5]&&k.accountId===id&&!INTERNAL_KEY_NAMES.has(k.name));
+    if(!key)return send(res,404,{message:"Token not found"});
+    pruneTokenSecrets();
+    const token=isCopyable(key)?decryptSecret(key.tokenEnc):null;
+    if(!token)return send(res,410,{message:"This token can no longer be copied. Regenerate it to get a new one."});
+    res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});
+    return res.end(JSON.stringify({token}));
+  }
+  if(parts[4]==="integration-keys"&&req.method==="GET"){pruneTokenSecrets();return send(res,200,{keys:store.keys.filter(k=>k.accountId===id&&!INTERNAL_KEY_NAMES.has(k.name)).map(key=>publicToken(key))});}
+  // Rotate a token: a new secret replaces the old one immediately, so the
+  // application using the old token stops working until it is given the new one.
+  if(parts[4]==="integration-keys"&&parts[5]&&parts[6]==="regenerate"&&req.method==="POST"){
+    const key=store.keys.find(k=>k.id===parts[5]&&k.accountId===id&&!INTERNAL_KEY_NAMES.has(k.name));
+    if(!key)return send(res,404,{message:"Token not found"});
+    const token=newToken();
+    key.hash=hash(token);key.tokenEnc=encryptSecret(token);key.last4=tokenLast4(token);key.rotatedAt=new Date().toISOString();key.lastUsedAt=null;delete key.token;
+    await persist();
+    return send(res,200,{key:publicToken(key),token});
+  }
+  // Change what a token may do. Takes effect on its very next call.
+  if(parts[4]==="integration-keys"&&parts[5]&&!parts[6]&&req.method==="PATCH"){
+    const key=store.keys.find(k=>k.id===parts[5]&&k.accountId===id&&!INTERNAL_KEY_NAMES.has(k.name));
+    if(!key)return send(res,404,{message:"Token not found"});
+    const checked=validateScopes((await readBody(req)).scopes);
+    if(checked.error)return send(res,400,{message:checked.error});
+    key.scopes=checked.scopes;
+    await persist();
+    return send(res,200,{key:publicToken(key)});
+  }
+  if(parts[4]==="integration-keys"&&req.method==="POST"){
+    const request=validateTokenRequest(await readBody(req));
+    if(request.error)return send(res,400,{message:request.error});
+    if(store.keys.filter(k=>k.accountId===id&&!INTERNAL_KEY_NAMES.has(k.name)).length>=MAX_TOKENS_PER_ACCOUNT)return send(res,409,{message:`An account can have up to ${MAX_TOKENS_PER_ACCOUNT} tokens. Delete one you no longer use first.`});
+    const token=newToken();
+    const key={id:randomBytes(8).toString("hex"),accountId:id,name:request.name,scopes:request.scopes,createdAt:new Date().toISOString(),lastUsedAt:null,rotatedAt:null,last4:tokenLast4(token),hash:hash(token),tokenEnc:encryptSecret(token)};
+    store.keys.push(key);await persist();
+    return send(res,201,{key:publicToken(key),token});
+  }
   if(parts[4]==="automations"&&req.method==="GET")return send(res,200,{subscriptions:store.automationSubscriptions.filter(subscription=>subscription.accountId===id).map(automationSummary)});
   if(parts[4]==="automations"&&parts[5]==="test-delivery"&&req.method==="POST"){const input=await readBody(req),url=await n8nWebhookUrl(input.url||""),secret=String(input.secret||"").trim();if(!url)return send(res,400,{message:"Use the public HTTPS n8n test webhook URL"});if(!secret||secret.length>256)return send(res,400,{message:"Enter the Header Auth secret"});const event={id:`evt_test_${randomBytes(8).toString("hex")}`,type:"message.received",occurredAt:new Date().toISOString(),account:{id},chat:{id:"demo@s.whatsapp.net",kind:"direct"},message:{id:"demo-message",timestamp:Math.floor(Date.now()/1000),fromMe:false,body:"This is a Gakai test event.",text:"This is a Gakai test event.",hasMedia:false,media:null},source:"test"};try{const response=await automationFetch({secret,url:url.href},event);if(!response.ok)return send(res,502,{message:await describeWebhookFailure(response)});return send(res,200,{ok:true})}catch(error){return send(res,502,{message:error.message||"Test delivery failed"})}}
   if(parts[4]==="automations"&&!parts[5]&&req.method==="POST"){const input=await readBody(req),production=await n8nWebhookUrl(input.productionUrl||input.url||""),test=await n8nWebhookUrl(input.testUrl||""),requestedSecret=String(input.secret||"").trim();if(!production)return send(res,400,{message:"Use an HTTPS n8n production webhook URL"});if(input.testUrl&&!test)return send(res,400,{message:"Use an HTTPS n8n test webhook URL"});if(requestedSecret.length>256)return send(res,400,{message:"Invalid Header Auth secret"});const subscription={id:randomBytes(8).toString("hex"),accountId:id,name:String(input.name||"n8n automation").trim().slice(0,80)||"n8n automation",url:production.href,productionUrl:production.href,testUrl:test?.href||null,testPhone:String(input.testPhone||"").replace(/[^0-9]/g,"")||null,enabled:true,events:["message.received"],secret:requestedSecret||ensureN8nKey(id),createdAt:new Date().toISOString(),lastDelivery:null};store.automationSubscriptions=store.automationSubscriptions.filter(item=>item.accountId!==id);store.automationSubscriptions.push(subscription);await persist();return send(res,201,{subscription:automationSummary(subscription),secret:subscription.secret});}

@@ -126,7 +126,7 @@ export function createMockProvider({ onEvent } = {}) {
     if (!exists) throw Object.assign(new Error('That number is not on WhatsApp'), { status: 404 });
     const existing = chatsFor(accountId).get(jid);
     if (!existing) chatsFor(accountId).set(jid, { id: jid, name: contactsFor(accountId).get(jid)?.name || null, picture: null, unreadCount: 0, lastMessageTimestamp: Math.floor(Date.now() / 1000), lastMessage: null });
-    return domainChatOverview(chatsFor(accountId).get(jid));
+    return { isNew: !existing, ...domainChatOverview(chatsFor(accountId).get(jid)) };
   }
   function resolveLid(accountId, lid) { return lid; }
   async function getGroupParticipants(accountId, chatId) { return [...(groupParticipantsFor(accountId).get(chatId) || [])]; }

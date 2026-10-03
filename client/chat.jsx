@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending, messageIsEditable } from "./chat-helpers.mjs";
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, staleMessageIds, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending, messageIsEditable } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
 import { Avatar, Menu, MenuItem } from "./ui-helpers.jsx";
 import { confirmDialog } from "./confirm.jsx";
@@ -440,10 +440,14 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
         if (olderRequestRef.current) return;
         const known = new Set(messagesRef.current.map((message, index) => idFor(message, index)));
         const newCount = page.reduce((count, message, index) => count + (known.has(idFor(message, index)) ? 0 : 1), 0);
-        if (!newCount) return;
-        if (isNearBottom()) followLatestRef.current = true;
-        else setNewMessageCount(count => count + newCount);
-        setMessages(current => merge(current, page));
+        // A message deleted elsewhere drops out of the latest page — remove it here too.
+        const stale = staleMessageIds(messagesRef.current, page);
+        if (!newCount && !stale.size) return;
+        if (newCount) {
+          if (isNearBottom()) followLatestRef.current = true;
+          else setNewMessageCount(count => count + newCount);
+        }
+        setMessages(current => merge(current.filter(message => !stale.has(serializedId(message?.id))), page));
         hydrateSenderPictures(version, page);
       } catch {
         // A transient provider failure should not replace the open chat with an
@@ -766,15 +770,12 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   // time window, which this deliberately does not attempt.
   const deleteMessage = useCallback(async (message) => {
     const messageId = serializedId(message?.id); if (!messageId || !chatId) return;
-    // The delete request always asks for a real WhatsApp "delete for
-    // everyone" — it only silently falls back to a local-only removal when
-    // WhatsApp's own server rejects revoking someone else's message, which
-    // Gakai has no control over either way. So for a message the account
-    // itself sent, this confirmation must say what will actually happen: it
-    // disappears from the whole chat, not just this view.
+    // Your own message is deleted for everyone in the chat; someone else's can
+    // only be deleted for you (WhatsApp does not let you remove it for them), but
+    // that is real on your phone and linked devices too. The wording must say which.
     const confirmed = await confirmDialog(message?.fromMe
       ? { title: "Delete for everyone?", message: "This message will be removed for everyone in the chat. This can't be undone.", confirmLabel: "Delete", danger: true }
-      : { title: "Delete this message?", message: "This removes the message from your view only. It won't be removed from the other person's WhatsApp.", confirmLabel: "Delete", danger: true });
+      : { title: "Delete this message?", message: "This deletes the message for you, on your phone and in every app you have linked. The other person will still see it.", confirmLabel: "Delete", danger: true });
     if (!confirmed) return;
     try {
       await api(`/api/app/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
@@ -825,7 +826,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
 
   const deleteConversation = useCallback(async () => {
     if (!chatId || deleting) return;
-    const confirmed = await confirmDialog({ title: "Delete conversation?", message: `The conversation with ${chat?.name || chatId} will be removed from WhatsApp. This can't be undone.`, confirmLabel: "Delete conversation", danger: true });
+    const confirmed = await confirmDialog({ title: "Delete conversation?", message: `The conversation with ${chat?.name || chatId} will be deleted from WhatsApp on your phone and every linked app. This can't be undone.`, confirmLabel: "Delete conversation", danger: true });
     if (!confirmed) return;
     setDeleting(true); setError("");
     try {

@@ -125,6 +125,8 @@ export function openStore(db) {
     `),
     getMessage: db.prepare(`SELECT * FROM wa_messages WHERE account_id=? AND chat_id=? AND message_id=?`),
     deleteMessage: db.prepare(`DELETE FROM wa_messages WHERE account_id=? AND chat_id=? AND message_id=?`),
+    setChatPreview: db.prepare(`UPDATE wa_chats SET last_message_timestamp=?, last_message_json=?, updated_at=? WHERE account_id=? AND chat_id=?`),
+    clearChatPreview: db.prepare(`UPDATE wa_chats SET last_message_json=NULL, updated_at=? WHERE account_id=? AND chat_id=?`),
     listMessagesPage: db.prepare(`
       SELECT * FROM wa_messages WHERE account_id=? AND chat_id=? AND timestamp<=?
       ORDER BY timestamp DESC LIMIT ?
@@ -260,6 +262,25 @@ export function openStore(db) {
     stmt.deleteMessage.run(accountId, chatId, messageId);
     stmt.deleteReactionsForMessage.run(accountId, messageId);
     db.prepare(`DELETE FROM wa_starred WHERE account_id=? AND message_id=?`).run(accountId, messageId);
+  }
+
+  // Deleting a message must not leave its text behind as the chat's preview line
+  // in the inbox: point the preview at whatever is now the newest message
+  // (`overviewOf` turns a stored raw message into the preview shape). With
+  // nothing left to show, the preview is emptied and the chat drops out of the
+  // inbox list until its next message arrives.
+  function deleteMessageAndRefreshPreview(accountId, chatId, messageId, overviewOf) {
+    deleteMessage(accountId, chatId, messageId);
+    const [latest] = getMessagesPage(accountId, chatId, { limit: 1 });
+    if (!latest) { stmt.clearChatPreview.run(now(), accountId, chatId); return; }
+    const preview = overviewOf(latest);
+    stmt.setChatPreview.run(preview.timestamp || 0, JSON.stringify(preview), now(), accountId, chatId);
+  }
+
+  // WhatsApp's "clear chat": every message goes, the conversation itself stays.
+  function clearChatMessages(accountId, chatId) {
+    stmt.deleteChatMessages.run(accountId, chatId);
+    stmt.clearChatPreview.run(now(), accountId, chatId);
   }
 
   function setStarred(accountId, chatId, messageId, on) {
@@ -444,7 +465,7 @@ export function openStore(db) {
   return {
     upsertChats, setChatUnread, setChatPicture, setChatFlags, deleteChat, getChatsOverview,
     listChatIds, chatExists, ensureChat, mergeChat,
-    upsertMessages, deleteMessage, applyEdit, getMessagesPage, getMessageById,
+    upsertMessages, deleteMessage, deleteMessageAndRefreshPreview, clearChatMessages, applyEdit, getMessagesPage, getMessageById,
     setStarred, isStarred, starredMessageIds, listStarred,
     replaceBlocklist, setBlocked, isBlocked, blockedJids,
     upsertContacts, setContactPicture, getContact, getContacts,

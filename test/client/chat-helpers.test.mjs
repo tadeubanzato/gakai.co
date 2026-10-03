@@ -69,3 +69,23 @@ test('merge keeps the newer copy of a message id at whatever position its timest
   assert.equal(result.length, 1);
   assert.equal(result[0].body, 'resolved');
 });
+
+import { staleMessageIds } from '../../client/chat-helpers.mjs';
+
+const msg = (id, timestamp, extra = {}) => ({ id, timestamp, ...extra });
+
+test('staleMessageIds finds a message in the latest window that the server no longer has', () => {
+  const current = [msg('a', 100), msg('b', 200), msg('c', 300)];
+  const page = [msg('a', 100), msg('c', 300)];
+  assert.deepEqual([...staleMessageIds(current, page)], ['b']);
+});
+
+test('staleMessageIds leaves older history, unsent messages and id-less messages alone', () => {
+  const current = [msg('older', 10), msg('a', 100), msg('sending', 150, { pending: true }), { timestamp: 160, body: 'no id' }, msg('c', 300)];
+  const page = [msg('a', 100), msg('c', 300)];
+  assert.deepEqual([...staleMessageIds(current, page)], [], 'only messages inside the page window that are missing count');
+});
+
+test('staleMessageIds does nothing when the server returned no messages', () => {
+  assert.deepEqual([...staleMessageIds([msg('a', 100)], [])], []);
+});

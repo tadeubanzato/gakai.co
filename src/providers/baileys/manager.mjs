@@ -16,6 +16,7 @@ import { openStore } from './store.mjs';
 import { createMediaStore } from './media.mjs';
 import { freshPictureUrl, createPictureRefresher } from './picture.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
+import { planMessageDelete, keysFromDeleteEvent, chatDeleteRange } from '../../domain/message-delete.mjs';
 import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, editView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
@@ -75,6 +76,12 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
 
   function overviewFromMessage(normalized) {
     return { body: normalized.body, text: normalized.text, timestamp: normalized.timestamp, hasMedia: normalized.hasMedia, system: normalized.system };
+  }
+
+  // Remove a message from Gakai and re-point the inbox preview at what is now
+  // the newest message, so a deleted message's text never lingers in the list.
+  function removeMessageLocally(accountId, chatId, messageId) {
+    store.deleteMessageAndRefreshPreview(accountId, chatId, messageId, raw => overviewFromMessage(messageView(raw, { accountId, chatId })));
   }
 
   function wireEvents(accountId, entry) {
@@ -141,6 +148,17 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     sock.ev.on('contacts.upsert', safe('contacts.upsert', contacts => { learnFromContacts(accountId, contacts); store.upsertContacts(accountId, contacts.map(mapContact)); }));
     sock.ev.on('contacts.update', safe('contacts.update', updates => { learnFromContacts(accountId, updates); store.upsertContacts(accountId, updates.filter(u => u.id).map(mapContact)); }));
 
+    // Deletions made on the phone or another linked device (including another
+    // Gakai) arrive as events — mirror them so a message or conversation deleted
+    // anywhere disappears here too.
+    sock.ev.on('messages.delete', safe('messages.delete', event => {
+      for (const key of keysFromDeleteEvent(event)) removeMessageLocally(accountId, canonicalChatId(accountId, key.remoteJid), key.id);
+      if (event?.all && event.jid) store.clearChatMessages(accountId, canonicalChatId(accountId, event.jid));
+    }));
+    sock.ev.on('chats.delete', safe('chats.delete', ids => {
+      for (const id of ids || []) store.deleteChat(accountId, canonicalChatId(accountId, id));
+    }));
+
     sock.ev.on('messages.upsert', safe('messages.upsert', ({ messages, type }) => {
       ingestMessages(accountId, messages, { live: type === 'notify' });
     }));
@@ -162,7 +180,9 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     }));
 
     sock.ev.on('presence.update', safe('presence.update', ({ id: chatId, presences }) => {
-      onEvent?.('presence', { accountId, chatId, presences });
+      // The browser listens under the canonical (phone-number) chat id, but WhatsApp
+      // may report a contact by LID — relay it under the canonical id or it never matches.
+      onEvent?.('presence', { accountId, chatId: canonicalChatId(accountId, chatId), presences });
     }));
 
     // Blocklist: 'set' is the full list, 'update' is a { blocklist, type } delta.
@@ -264,7 +284,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
         if (reaction) { store.applyReaction(accountId, reaction); continue; }
 
         const revoke = revokeView(raw);
-        if (revoke?.targetMessageId) { store.deleteMessage(accountId, chatId, revoke.targetMessageId); continue; }
+        if (revoke?.targetMessageId) { removeMessageLocally(accountId, chatId, revoke.targetMessageId); continue; }
 
         const edit = editView(raw);
         if (edit?.targetMessageId) { store.applyEdit(accountId, chatId, edit.targetMessageId, edit.newText); continue; }
@@ -423,26 +443,32 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     store.applyReaction(accountId, { targetMessageId: messageId, senderId, reaction: reaction || '' });
   }
 
+  // Your own message is deleted for everyone; someone else's is deleted for you
+  // — on your phone and every linked device too (see planMessageDelete). A
+  // failure is thrown, never swallowed, so the screen cannot say "deleted"
+  // while WhatsApp still has the message.
   async function deleteMessage(accountId, chatId, messageId) {
     const { sock } = requireSocket(accountId);
     chatId = canonicalChatId(accountId, chatId);
-    const target = store.getMessageById(accountId, chatId, messageId);
-    const key = target?.key || { remoteJid: chatId, id: messageId, fromMe: true };
-    await sock.sendMessage(chatId, { delete: key });
-    store.deleteMessage(accountId, chatId, messageId);
+    const plan = planMessageDelete(store.getMessageById(accountId, chatId, messageId), { chatId, messageId });
+    if (plan.mode === 'forMe') await sock.chatModify({ deleteForMe: { deleteMedia: true, key: plan.key, timestamp: plan.timestamp } }, chatId);
+    else await sock.sendMessage(chatId, { delete: plan.key });
+    removeMessageLocally(accountId, chatId, messageId);
   }
 
+  // Deleting a conversation asks WhatsApp first and only then removes it here, so
+  // a delete WhatsApp refuses is reported and the conversation is kept instead
+  // of vanishing from Gakai while it is still on the phone.
   async function deleteChat(accountId, chatId) {
+    const { sock } = requireSocket(accountId);
     chatId = canonicalChatId(accountId, chatId);
-    const entry = accounts.get(accountId);
-    if (entry) {
-      try {
-        const [lastMessage] = store.getMessagesPage(accountId, chatId, { limit: 1 });
-        await entry.sock.chatModify({ delete: true, lastMessages: lastMessage ? [{ key: lastMessage.key, messageTimestamp: lastMessage.messageTimestamp }] : [] }, chatId);
-      } catch (error) { logger.warn({ error: error.message, accountId, chatId }, 'Remote chat delete failed; removing locally anyway'); }
+    const [lastMessage] = store.getMessagesPage(accountId, chatId, { limit: 1 });
+    try {
+      await sock.chatModify({ delete: true, lastMessages: chatDeleteRange(lastMessage) }, chatId);
+    } catch (error) {
+      logger.warn({ error: error.message, accountId, chatId }, 'WhatsApp refused the chat delete');
+      throw Object.assign(new Error(`WhatsApp did not confirm the delete (${error.message || 'unknown error'}). The conversation was kept.`), { status: 502 });
     }
-    // The local store is authoritative for what the inbox shows, so the
-    // chat disappears from Gakai even if the remote delete above failed.
     store.deleteChat(accountId, chatId);
   }
 
@@ -614,16 +640,17 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     const { exists, jid } = await checkOnWhatsApp(accountId, phone);
     if (!exists) throw Object.assign(new Error('That number is not on WhatsApp'), { status: 404 });
     const chatId = canonicalChatId(accountId, jid);
+    const existed = store.chatExists(accountId, chatId);
     store.ensureChat(accountId, chatId);
     const contact = store.getContact(accountId, chatId);
-    return domainChatOverview({
+    return { isNew: !existed, ...domainChatOverview({
       id: chatId,
       name: contact?.name || null,
       picture: freshPictureUrl(contact?.picture),
       unreadCount: 0,
       lastMessageTimestamp: Math.floor(Date.now() / 1000),
       lastMessage: null,
-    });
+    }) };
   }
 
   async function getChatsOverview(accountId) {

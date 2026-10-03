@@ -139,6 +139,23 @@ export function messageIsEditable(message) {
   return Date.now() / 1000 < Number(message.editableUntil);
 }
 
+// Messages on screen that the server no longer has: ones inside the time window
+// the latest page covers but missing from it, so they were deleted (on the
+// phone, another device, or by the sender). Older messages loaded by scrolling
+// up, unsent ones, and ones without an id are never touched.
+export function staleMessageIds(current, page) {
+  const times = page.map(stamp).filter(Boolean);
+  if (!times.length) return new Set();
+  const oldest = Math.min(...times);
+  const present = new Set(page.map(message => serializedId(message?.id)).filter(Boolean));
+  const stale = new Set();
+  for (const message of current) {
+    const id = serializedId(message?.id);
+    if (id && !message.pending && stamp(message) >= oldest && !present.has(id)) stale.add(id);
+  }
+  return stale;
+}
+
 export function merge(current, extra) {
   const keyed = new Map();
   [...current, ...extra].forEach((message, index) => keyed.set(idFor(message, index), message));
