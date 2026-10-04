@@ -988,6 +988,13 @@ async function enrichMessage(session,view){
     if(req.method==='GET'&&endpoint==='messages'&&key.scopes.includes('messages:read')){const chatId=url.searchParams.get('chatId');if(!chatId)return send(res,400,{message:'chatId is required'});const messages=await provider.getMessages(key.accountId,chatId,{limit:30});return send(res,200,{messages:messages.sort((a,b)=>a.timestamp-b.timestamp)});}
     if(req.method==='POST'&&endpoint==='messages'&&key.scopes.includes('messages:send')){
       const input=await readBody(req),target=sendTarget(input,{defaultCallingCode:callingCodeOf(provider.getAccount(key.accountId)?.phone)}),body=validMessageText(input.text);
+      // The token already decides which WhatsApp account sends. An optional "accountId" is only a guard:
+      // it must name that account, so a token pasted into the wrong flow fails loudly instead of sending from the wrong number.
+      const asked=input.accountId===undefined||input.accountId===null||input.accountId===''?null:String(input.accountId);
+      if(asked!==null&&asked!==key.accountId){
+        const own=account(provider.getAccount(key.accountId)||{id:key.accountId});
+        return send(res,403,{message:`This token sends from "${own.label}" (${key.accountId}), not "${asked}". Use the token created for that account.`,accountId:key.accountId});
+      }
       if(target.error)return send(res,400,{message:target.error});
       if(body.error)return send(res,400,{message:body.error});
       let chatId=target.chatId,newChat=false;
@@ -998,7 +1005,8 @@ async function enrichMessage(session,view){
         chatId=chat.id;newChat=Boolean(chat.isNew);
       }
       const sent=await provider.sendText(key.accountId,chatId,body.text);
-      return send(res,200,{ok:true,chatId,to:target.e164||null,newChat,message:sent});
+      const sender=account(provider.getAccount(key.accountId)||{id:key.accountId});
+      return send(res,200,{ok:true,account:{id:sender.id,label:sender.label,phone:sender.phone||null},chatId,to:target.e164||null,newChat,message:sent});
     }
     return send(res,403,{message:'This integration key does not have permission for that action'});
 

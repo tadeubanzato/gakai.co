@@ -3,7 +3,7 @@ import{runExclusive,api,compareChats}from"./app-helpers.mjs";
 import{createEventHub}from"./event-hub.mjs";
 // One live connection for the whole tab, shared by every view that wants events.
 const eventHub=createEventHub();
-import{Avatar,IconLogout,Menu,MenuItem,status}from"./ui-helpers.jsx";
+import{Avatar,CopyId,IconLogout,Menu,MenuItem,status}from"./ui-helpers.jsx";
 import{createRoot}from"react-dom/client";
 import{ChatPanel}from"./chat.jsx";
 import{ConfirmHost,confirmDialog}from"./confirm.jsx";
@@ -129,7 +129,7 @@ function Settings({account,tab,onTab,onAllSettings,onReconnect,onClose,onDeleted
     <header className="details-head">
       <div className="details-identity">
         <Avatar item={account}/>
-        <div><span className="eyebrow">PROFILE SETTINGS</span><h2 id="settings-title">{account.label}</h2><small>{account.phone?`+${account.phone} · `:""}{status(account.status)}</small></div>
+        <div><span className="eyebrow">PROFILE SETTINGS</span><h2 id="settings-title">{account.label}</h2><div className="details-sub"><small>{account.phone?`+${account.phone} · `:""}{status(account.status)}</small><CopyId id={account.id} label="ID"/></div></div>
       </div>
       <div className="details-head-actions">
         <button className="secondary" onClick={onAllSettings}>All settings</button>

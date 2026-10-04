@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useId, useState } from "react";
 import { api } from "./app-helpers.mjs";
 import { confirmDialog } from "./confirm.jsx";
 import { curlSample, jsonSample, SEND_PATH } from "./api-samples.mjs";
+import { copyText, CopyId } from "./ui-helpers.jsx";
 
 // New tokens can only send — the least an application needs to trigger a message.
 const NEW_TOKEN_SCOPES = ["messages:send"];
@@ -10,18 +11,6 @@ const SCOPE_OPTIONS = [
   { id: "messages:read", label: "Read messages", hint: "Read this account's chats and messages." },
 ];
 const when = value => (value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "");
-
-async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through to the older route */ }
-  try {
-    const field = document.createElement("textarea");
-    field.value = text; field.style.cssText = "position:fixed;opacity:0";
-    document.body.appendChild(field); field.select();
-    const copied = document.execCommand("copy");
-    field.remove();
-    return copied;
-  } catch { return false; }
-}
 
 function CopyButton({ text, label = "Copy", className = "secondary" }) {
   const [state, setState] = useState("");
@@ -88,6 +77,7 @@ export function ApiTokensCard({ accounts, onNotice }) {
   const [accountId, setAccountId] = useState(accounts[0]?.id || "");
   const [busy, setBusy] = useState(false);
   const [sampleTab, setSampleTab] = useState("curl");
+  const [sampleTokenId, setSampleTokenId] = useState("");
   const origin = window.location.origin;
 
   const load = useCallback(() => api("/api/app/integration-keys").then(result => setTokens(result.keys || [])).catch(error => { setTokens([]); onNotice(error.message); }), [onNotice]);
@@ -153,7 +143,11 @@ export function ApiTokensCard({ accounts, onNotice }) {
     } catch (error) { onNotice(error.message); } finally { setBusy(false); }
   };
 
-  const sample = sampleTab === "json" ? jsonSample() : curlSample(origin);
+  // The sample names the account of the token it is shown for (the first one, unless another is picked),
+  // or the profile chosen above while there are no tokens yet.
+  const sampleToken = (tokens || []).find(token => token.id === sampleTokenId) || (tokens || [])[0];
+  const sampleAccountId = sampleToken?.accountId || accountId;
+  const sample = sampleTab === "json" ? jsonSample(sampleAccountId) : curlSample(origin, undefined, sampleAccountId);
   const count = tokens?.length || 0;
 
   return <section className={`details-card security api-tokens${open ? " is-open" : ""}`} aria-labelledby="api-tokens-title" onClick={() => { if (!open) setOpen(true); }}>
@@ -223,14 +217,22 @@ export function ApiTokensCard({ accounts, onNotice }) {
             {[["curl", "curl"], ["json", "JSON"]].map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={sampleTab === id} className={sampleTab === id ? "on" : ""} onClick={() => setSampleTab(id)}>{label}</button>)}
           </div>
         </div>
+        {(tokens || []).length > 1 && <label className="token-sample-for">
+          <span>Example for</span>
+          <select value={sampleToken?.id || ""} onChange={event => setSampleTokenId(event.currentTarget.value)} aria-label="Token the example is written for">
+            {tokens.map(token => <option key={token.id} value={token.id}>{token.name} · {accountLabel(token.accountId)}</option>)}
+          </select>
+        </label>}
         <pre className="token-code" tabIndex={0}><code>{sample}</code></pre>
         <div className="token-sample-foot">
           <CopyButton text={sample} label={sampleTab === "json" ? "Copy JSON" : "Copy curl"}/>
           <small className="profile-hint">
             POST <code>{origin}{SEND_PATH}</code>.
             {sampleTab === "curl" && " Replace YOUR_TOKEN with an application token."}
+            {" "}<code>accountId</code> is the WhatsApp account this token belongs to. The token alone decides who sends, so it is optional — when given it must match, otherwise the request is refused instead of sending from the wrong number.
             {" "}<code>phone</code> is the full number in any format (<code>+1 555 123 4567</code> works) — Gakai uses the existing chat, or starts a new one if the number is on WhatsApp. For a group, send <code>chatId</code> instead.
           </small>
+          {sampleAccountId && <CopyId id={sampleAccountId}/>}
         </div>
       </div>
     </div>
