@@ -824,7 +824,7 @@ video.media{background:#000}
 
 /* Sidebar: section title, and a collapsed rail with just the logo and avatars. */
 .sidebar-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
-.sidebar-head .logo{padding-bottom:25px}
+.sidebar-head .logo{padding-bottom:14px}
 .sidebar-toggle{flex:none;width:30px;height:30px;display:grid;place-items:center;padding:0;margin-top:4px;border:0;border-radius:8px;background:transparent;color:#8696a0;cursor:pointer}
 .sidebar-toggle:hover{background:var(--soft);color:var(--ink)}
 .sidebar-toggle:focus-visible{outline:2px solid #25d366;outline-offset:2px}
@@ -843,7 +843,7 @@ video.media{background:#000}
   .sidebar-collapsed .sidebar{padding:22px 10px;align-items:center}
   .sidebar-collapsed .sidebar-head{flex-direction:column;align-items:center;gap:6px}
   .sidebar-collapsed .sidebar-head .logo{padding:0 0 6px}
-  .sidebar-collapsed .logo-word,.sidebar-collapsed .sidebar-title,.sidebar-collapsed .logout-label{display:none}
+  .sidebar-collapsed .sidebar-title,.sidebar-collapsed .logout-label{display:none}
   .sidebar-collapsed .account-switch{width:100%}
   .sidebar-collapsed .logout{width:36px;height:36px;padding:0;display:grid;place-items:center}
 }
@@ -859,208 +859,14 @@ video.media{background:#000}
 .menu-item.is-on .menu-toggle-check{color:#4ade80;font-weight:700}
 
 
-/* Logo: the capybara mark, with the Gakai wordmark beside it while expanded. */
-.sidebar .logo{align-items:center;gap:10px}
-.logo-mark{display:block;flex:none;width:34px;height:34px;object-fit:contain;user-select:none}
+/* Logo: the Gakai mascot lockup, nothing else. The artwork has its own dark backdrop, so it is
+   blended with `lighten` — the sidebar colour shows through where the artwork is darker than it. */
+.sidebar .logo{align-items:center}
+.logo-mark{display:block;flex:none;width:132px;height:auto;object-fit:contain;user-select:none;mix-blend-mode:lighten}
 @media (min-width:721px){
   .sidebar-collapsed .sidebar-head,.sidebar-collapsed .sidebar-head .logo{width:100%}
   .sidebar-collapsed .sidebar-head .logo{justify-content:center;box-sizing:border-box;padding:8px 0 12px;border-radius:10px;cursor:pointer}
   .sidebar-collapsed .sidebar-head .logo:hover{background:var(--soft)}
-  .sidebar-collapsed .logo-mark{width:46px;height:46px}
+  .sidebar-collapsed .logo-mark{width:60px}
 }
-@media (max-width:720px){.logo-mark{width:30px;height:30px}}
-
-/* Application tokens card. */
-.api-tokens .token-count{flex:none;padding:4px 12px;border-radius:999px;background:#202c33;border:1px solid #3a4c56;color:#c3d0d6;font-size:12px;font-weight:650;line-height:1.4}
-.token-body{display:grid;gap:22px;margin-top:18px}
-.token-body[hidden]{display:none}
-.api-tokens input[type="text"],.api-tokens input:not([type]),.api-tokens .token-reveal input{width:100%;box-sizing:border-box;background:#202c33;color:#e9edef;border:1px solid #3a4c56;border-radius:8px;padding:10px;font:inherit}
-.api-tokens input:focus-visible{outline:2px solid #25d366;outline-offset:1px}
-.token-create-button:disabled{opacity:.45;cursor:not-allowed}
-.token-copy{flex:none;white-space:nowrap}
-.token-list{display:grid;gap:10px}
-.token-row{display:flex;gap:16px;align-items:center;justify-content:space-between;padding:12px 14px;border:1px solid #2f3f48;border-radius:10px;background:#18232a}
-.token-info{display:grid;gap:4px;min-width:0}
-.token-info b{font-weight:650}
-.token-secret{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#8696a0}
-.token-info small{color:#8696a0;font-size:12px}
-.token-actions{display:flex;gap:8px;flex:none}
-.details-card .token-actions button{width:auto}
-.token-delete{color:#ffb4b4}
-.token-sample{display:grid;gap:10px;padding-top:18px;border-top:1px solid #2a3942}
-.token-sample-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.token-sample-head h4{margin:0;font-size:15px}
-.token-tabs{display:inline-flex;border:1px solid #3a4c56;border-radius:8px;overflow:hidden}
-.token-tabs button{padding:6px 14px;border:0;background:transparent;color:#8696a0;font:inherit;font-size:13px;cursor:pointer}
-.token-tabs button.on{background:#2a3942;color:#e9edef}
-.token-code{margin:0;padding:14px 16px;overflow:auto;border:1px solid #2f3f48;border-radius:10px;background:#0b141a;color:#d7e3e8;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;line-height:1.55;white-space:pre}
-.token-sample-foot{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
-.token-sample-foot small{flex:1 1 280px;min-width:0}
-.token-sample-foot code{padding:1px 5px;border-radius:4px;background:#202c33;font-size:12px}
-@media (max-width:640px){.token-row{flex-direction:column;align-items:stretch}.token-actions{justify-content:flex-start}}
-
-/* Create-token form: the name field with its button on the right. Scoped under
-   .details-card so it beats the older `.details-card form{display:flex}` rule. */
-.details-card .token-create{display:flex;gap:12px;align-items:stretch;max-width:560px}
-.details-card .token-create input{flex:1 1 auto;min-width:0}
-.details-card .token-create .token-create-button{flex:none;width:auto;min-height:44px;margin:0;padding:10px 22px;white-space:nowrap}
-@media (max-width:520px){.details-card .token-create{flex-direction:column}.details-card .token-create .token-create-button{width:100%}}
-
-/* Permission chips in a token row: the site's checkbox card, shrunk to a small chip —
-   round tick and name only, green outline when on. */
-.token-perm-options{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:4px 0 2px}
-.api-tokens .checkbox-field.is-compact{grid-template-columns:16px auto;column-gap:8px;align-items:center;margin:0;padding:5px 12px 5px 8px;border-radius:8px}
-.api-tokens .checkbox-field.is-compact input[type="checkbox"]{width:16px;height:16px;min-width:16px;flex:none;margin:0;padding:0;border-width:2px;background-size:10px}
-.checkbox-field.is-compact b{font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3}
-.checkbox-field.is-compact:has(input:disabled){cursor:default}
-.checkbox-field.is-compact input[type="checkbox"]:disabled{cursor:default}
-
-/* Copy icon beside a token's masked secret. */
-.token-secret-row{display:flex;align-items:center;gap:6px;min-width:0}
-.token-copy-icon{flex:none;display:inline-grid;place-items:center;width:26px;height:26px;padding:0;border:0;border-radius:6px;background:transparent;color:#8696a0;cursor:pointer}
-.details-card .token-copy-icon{width:26px}
-.token-copy-icon:hover{background:#2a3942;color:#e9edef}
-.token-copy-icon:focus-visible{outline:2px solid #25d366;outline-offset:1px}
-.token-copy-icon.is-copied{color:#4ade80}
-.token-copy-icon.is-expired{opacity:.35;cursor:not-allowed}
-.token-copy-icon.is-expired:hover{background:transparent;color:#8696a0}
-.token-copied{font-size:12px;color:#4ade80}
-.api-tokens .token-manual{width:min(340px,100%);padding:4px 8px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
-
-/* Token name with its created date beside it. */
-.token-title{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px}
-.token-title small{color:#8696a0;font-size:12px}
-
-/* Application tokens at workspace level: which profile a token sends from. */
-.details-card .token-create select{flex:none;width:auto;max-width:220px;box-sizing:border-box;appearance:none;-webkit-appearance:none;color-scheme:dark;background-color:#202c33;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%238696a0' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;color:#e9edef;border:1px solid #3a4c56;border-radius:8px;padding:10px 34px 10px 12px;font:inherit;cursor:pointer}
-.details-card .token-create select:focus-visible{outline:2px solid #25d366;outline-offset:1px}
-.details-card .token-create{max-width:760px}
-.token-account{padding:1px 9px;border-radius:999px;background:#173b3a;border:1px solid #2c5c58;color:#8ce6cf;font-size:11px;font-weight:600;line-height:1.5}
-@media (max-width:520px){.details-card .token-create select{max-width:none;width:100%}}
-
-/* Settings: header actions, the home gear, profile tabs, and the accounts list. */
-.details-head{justify-content:space-between}
-.details-head-actions{display:flex;gap:10px;flex:none}
-.header-actions .settings-gear{display:inline-grid;place-items:center;width:34px;height:34px;padding:0}
-.header-actions .settings-gear:hover{color:var(--ink);background:var(--soft);border-color:#3a4c56}
-.settings-tabs{display:flex;gap:4px;margin:0 0 18px;border-bottom:1px solid #293840;overflow-x:auto}
-.settings-tabs button{display:inline-flex;align-items:center;gap:8px;padding:11px 16px;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;background:none;color:#8696a0;font:inherit;font-weight:600;font-size:14px;white-space:nowrap;cursor:pointer}
-.settings-tabs button:hover{color:#e9edef}
-.settings-tabs button.on{color:#e9edef;border-bottom-color:#25d366}
-.settings-tabs button:focus-visible{outline:2px solid #25d366;outline-offset:-2px;border-radius:6px}
-.tab-check{color:#4ade80;font-size:12px}
-.ws-accounts-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
-.ws-accounts-head p{margin-bottom:6px}
-.details-card .ws-add{flex:none;width:auto;padding:9px 18px;white-space:nowrap}
-.ws-account-list{display:grid;gap:10px;margin-top:14px}
-.ws-account{display:flex;align-items:center;gap:14px;padding:12px 14px;border:1px solid #2f3f48;border-radius:10px;background:#18232a}
-.ws-account .avatar{flex:none;width:42px;height:42px}
-.ws-account-info{display:grid;gap:2px;min-width:0;flex:1}
-.ws-account-info b{font-weight:650}
-.ws-account-info small{color:#8696a0;font-size:12px}
-.ws-ok{color:#4ade80}
-.ws-warn{color:#f2c94c}
-.details-card .ws-account button{width:auto;flex:none}
-@media (max-width:640px){.ws-accounts-head{flex-direction:column}.details-head-actions{flex-wrap:wrap}}
-
-/* Voice profiles tab. */
-.voice-list-head,.voice-editor-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
-.voice-list{display:grid;gap:10px;margin:14px 0}
-.details-card .voice-card-actions button{width:auto}
-.voice-empty{display:grid;gap:4px;padding:18px;border:1px dashed #3a4c56;border-radius:10px;text-align:center}
-.voice-empty small{color:#8696a0}
-.details-card .voice-new{width:auto;padding:10px 20px}
-.voice-new:disabled{opacity:.45;cursor:not-allowed}
-.voice-template{display:grid;gap:4px;font-size:12px;color:var(--muted)}
-.voice-template select{appearance:none;-webkit-appearance:none;color-scheme:dark;background-color:#202c33;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%238696a0' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;color:#e9edef;border:1px solid #3a4c56;border-radius:8px;padding:8px 32px 8px 12px;font:inherit;font-size:13px;cursor:pointer}
-.voice-yaml{display:block;width:100%;box-sizing:border-box;min-height:380px;margin:14px 0 8px;padding:14px 16px;resize:vertical;background:#0b141a;color:#d7e3e8;border:1px solid #2f3f48;border-radius:10px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;line-height:1.6;tab-size:2;white-space:pre}
-.voice-yaml:focus-visible{outline:2px solid #25d366;outline-offset:1px}
-.voice-status{min-height:22px;font-size:13px}
-.voice-checking{color:#8696a0}
-.voice-valid{color:#4ade80}
-.voice-errors{margin:0;padding:0;list-style:none;display:grid;gap:4px;color:#f6a5a5}
-.voice-errors b{color:#ffd0d0}
-.voice-fold{margin-top:12px;border:1px solid #2f3f48;border-radius:10px;padding:0 14px}
-.voice-fold>summary{padding:10px 0;cursor:pointer;font-size:13px;font-weight:600;color:#c3d0d6}
-.voice-fold[open]>summary{border-bottom:1px solid #2a3942;margin-bottom:12px}
-.voice-fold .token-tabs{margin-bottom:10px}
-.voice-guide{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0 0 14px;font-size:13px}
-.voice-guide dt code{padding:1px 6px;border-radius:4px;background:#202c33;font-size:12px}
-.voice-guide dd{margin:0;color:#aebac1}
-.voice-preview{max-height:360px;margin-bottom:14px;white-space:pre-wrap}
-.voice-actions{display:flex;gap:10px;margin-top:16px}
-.details-card .voice-actions button{width:auto;padding:10px 22px}
-.voice-actions .primary:disabled{opacity:.45;cursor:not-allowed}
-@media (max-width:640px){.voice-list-head,.voice-editor-head,.voice-card{flex-direction:column;align-items:stretch}.voice-card-actions{justify-content:flex-start}}
-
-/* A person's or group's voice, chosen from a small menu on its tag. */
-
-/* On the AI responses tab: a pointer to where voices and the reply list live. */
-.ai-next{display:grid;gap:6px;margin-top:22px;padding:14px 16px;border:1px solid #2c5c58;border-radius:10px;background:#0f2b23}
-.ai-next p{margin:0;color:#aebac1;font-size:13px}
-.ai-next-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
-.details-card .ai-next-actions button{width:auto}
-.field-hint{display:block;margin:-2px 0 4px;color:#8696a0;font-size:12px}
-
-/* Beats the older `.service-detail>div` grid rule, which would split this box into two columns. */
-.service-detail>.ai-next{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;gap:6px;margin:22px 0 16px;padding:14px 16px;border:1px solid #2c5c58}
-
-/* Who to reply to: one box per voice. */
-.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
-.tag-kind{margin-left:6px;padding:0 6px;border-radius:4px;background:#173b3a;border:1px solid #2c5c58;color:#8ce6cf;font-style:normal;font-size:10px;font-weight:600;line-height:1.5;text-transform:uppercase;letter-spacing:.04em}
-.tag-text{align-items:center}
-
-/* AI Voice and Tone: a card per voice, holding the people and groups it answers. */
-.token-count{white-space:nowrap}
-.link-button{padding:0;border:0;background:none;color:#8ce6cf;font:inherit;text-decoration:underline;cursor:pointer}
-.voice-card{display:grid;gap:12px;padding:14px 16px;border:1px solid #2f3f48;border-radius:10px;background:#18232a}
-.voice-card.is-fallback{border-style:dashed;background:transparent}
-.voice-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
-.voice-card-info{display:grid;gap:3px;min-width:0}
-.voice-card-info b{font-weight:650}
-.voice-card-info small{color:#8696a0;font-size:12px}
-.voice-id{padding:0 5px;border-radius:4px;background:#202c33;color:#8696a0;font-size:11px}
-.voice-card-actions{display:flex;gap:8px;flex:none}
-.voice-card-body .tag-picker{gap:8px}
-@media (max-width:640px){.voice-card-head{flex-direction:column;align-items:stretch}.voice-card-actions{justify-content:flex-start}}
-
-/* Compact tag picker: "Reply to:" then tags, then a small round + that becomes a little search box. */
-.tag-picker.is-inline{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}
-.tag-title{font-size:13px;font-weight:600;color:#8696a0;white-space:nowrap}
-.tag-picker.is-inline .tag-list{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-height:28px;flex:1 1 auto;min-width:0}
-.tag-add{flex:none;display:inline-grid;place-items:center;width:26px;height:26px;margin:0;padding:0;border:0;border-radius:50%;background:#25d366;color:#063b29;font:inherit;font-size:19px;font-weight:700;line-height:1;cursor:pointer;transition:background-color .15s ease,transform .1s ease}
-.tag-add:hover{background:#2fe377;transform:scale(1.06)}
-.tag-add:focus-visible{outline:2px solid #e9edef;outline-offset:2px}
-.tag-search.is-compact{position:relative;display:inline-block}
-.tag-search.is-compact input{width:230px;height:28px;box-sizing:border-box;padding:3px 12px;border:1px solid #3a4c56;border-radius:14px;background:#202c33;color:#e9edef;font:inherit;font-size:13px}
-.tag-search.is-compact input:focus-visible{outline:2px solid #25d366;outline-offset:1px}
-.tag-search.is-compact .tag-options{right:auto;min-width:320px;width:max-content;max-width:min(460px,86vw)}
-@media (max-width:520px){.tag-search.is-compact input{width:180px}.tag-search.is-compact .tag-options{min-width:260px}}
-
-/* The + is a drawn shape, centred exactly in its circle. */
-.tag-add svg{display:block}
-/* A voice card opens its editor; the Delete button now lives on the edit screen. */
-.voice-card.is-clickable{cursor:pointer;transition:border-color .15s ease,background-color .15s ease}
-.voice-card.is-clickable:hover{border-color:#3a4c56;background:#1b2830}
-.voice-card.is-clickable:focus-within{border-color:#3a4c56}
-.voice-card-title{padding:0;border:0;background:none;color:#e9edef;font:inherit;font-weight:650;text-align:left;cursor:pointer}
-.voice-card-title:focus-visible{outline:2px solid #25d366;outline-offset:3px;border-radius:4px}
-.voice-card-chevron{flex:none;align-self:center;color:#8696a0;transition:transform .15s ease,color .15s ease}
-.voice-card.is-clickable:hover .voice-card-chevron{color:#e9edef;transform:translateX(2px)}
-.voice-card-body .tag-picker{cursor:default}
-.voice-actions .voice-delete{margin-left:auto}
-
-/* Thread layout stability: every box that will hold something later is the right size now.
-   Widths are explicit (never a percentage of a shrink-wrapped bubble, which collapses an empty box). */
-.messages .media:not(video){--ar:1.333;width:min(380px,calc(360px * var(--ar)));max-width:100%;aspect-ratio:var(--ar);height:auto;max-height:360px;object-fit:contain}
-.video-player{--ar:1.333;width:min(460px,calc(360px * var(--ar)));min-width:min(260px,70vw);max-width:100%}
-.video-stage{aspect-ratio:var(--ar);max-height:360px}
-.link-preview{width:360px;max-width:100%}
-.link-preview-image-slot{width:100%;height:180px;background:#20343c;flex:none}
-.thread-jump{position:sticky;bottom:12px;height:0;margin-top:-8px;align-self:stretch;flex:none;z-index:4;pointer-events:none}
-.thread-jump>button{position:absolute;bottom:0;margin:0;pointer-events:auto}
-.thread-jump>.jump-to-bottom{right:16px}
-.thread-jump>.jump-to-latest{left:50%;transform:translateX(-50%);position:absolute}
-/* Overlays, not rows: a pill that comes and goes (someone typing in a group) must never change the thread's height. */
-.conversation-react-root{position:relative}
-.typing-indicator{position:absolute;left:50%;bottom:76px;transform:translateX(-50%);margin:0;z-index:5;pointer-events:none}
+@media (max-width:720px){.logo-mark{width:64px}}
