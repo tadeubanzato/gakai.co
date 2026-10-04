@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, resolveMentionLabels, bareJidUser, isGroupChatId, isLidJid, isSameIdentity, ackStatusName, ackStatusRank, editView, EDIT_WINDOW_SECONDS } from '../../src/domain/message.mjs';
+import { thumbnailOfRawMessage, extractMentionIds, mentionsIdentity, messageView, normalizedTimestamp, resolveMentionLabels, bareJidUser, isGroupChatId, isLidJid, isSameIdentity, ackStatusName, ackStatusRank, editView, EDIT_WINDOW_SECONDS } from '../../src/domain/message.mjs';
 
 const ctx = { accountId: 'account-fixture', chatId: '551199999999@s.whatsapp.net' };
 const fixture = name => readFile(fileURLToPath(new URL(`../fixtures/providers/baileys/${name}`, import.meta.url)), 'utf8').then(JSON.parse);
@@ -28,7 +28,45 @@ test('messageView normalizes a quoted/reply message into replyTo', async () => {
     body: 'Hello from fixture',
     hasMedia: false,
     participant: null,
+    kind: 'text',
+    label: 'Hello from fixture',
+    caption: '',
+    thumbnail: null,
   });
+});
+
+const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10]).toString('base64');
+const replyTo = quotedMessage => messageView({
+  key: { remoteJid: '551199999999@s.whatsapp.net', fromMe: true, id: 'R1' }, messageTimestamp: 1735689660,
+  message: { extendedTextMessage: { text: 'nice', contextInfo: { stanzaId: 'Q1', participant: '551188888888@s.whatsapp.net', quotedMessage } } },
+}, ctx).replyTo;
+
+test('a reply to a photo is labelled as a photo, keeps the caption, and carries the thumbnail', () => {
+  const quote = replyTo({ imageMessage: { caption: 'sunset', mimetype: 'image/jpeg', jpegThumbnail: JPEG } });
+  assert.equal(quote.kind, 'image');
+  assert.equal(quote.label, '📷 Photo');
+  assert.equal(quote.caption, 'sunset');
+  assert.equal(quote.thumbnail, `data:image/jpeg;base64,${JPEG}`);
+  assert.equal(quote.hasMedia, true);
+});
+
+test('replies to video, GIF, voice note, audio, sticker and document each say what they are', () => {
+  assert.equal(replyTo({ videoMessage: { seconds: 75 } }).label, '🎥 Video 1:15');
+  assert.equal(replyTo({ videoMessage: { gifPlayback: true } }).label, '🎞 GIF');
+  assert.equal(replyTo({ audioMessage: { ptt: true, seconds: 7 } }).label, '🎤 Voice message 0:07');
+  assert.equal(replyTo({ audioMessage: {} }).label, '🎵 Audio');
+  assert.equal(replyTo({ stickerMessage: {} }).label, 'Sticker');
+  assert.equal(replyTo({ documentMessage: { fileName: 'plan.pdf' } }).label, '📄 plan.pdf');
+  assert.equal(replyTo({ documentMessage: {} }).label, '📄 Document');
+});
+
+test('a reply to a shared link or post leads with its title and keeps the address underneath', () => {
+  const quote = replyTo({ extendedTextMessage: { text: 'https://example.com/p/1', title: 'A great post', jpegThumbnail: JPEG } });
+  assert.equal(quote.kind, 'link');
+  assert.equal(quote.label, '🔗 A great post');
+  assert.equal(quote.caption, 'https://example.com/p/1');
+  assert.ok(quote.thumbnail);
+  assert.equal(replyTo({ extendedTextMessage: { text: 'plain words' } }).label, 'plain words');
 });
 
 test('messageView shapes a link-preview message from Baileys\' own extendedTextMessage fields', async () => {
@@ -293,4 +331,19 @@ test('messageView surfaces a sent message\'s delivery status as ackName', () => 
   assert.equal(read.ackName, 'READ');
   const noStatus = messageView({ key: { remoteJid: ctx.chatId, fromMe: true, id: 'sent-3' }, messageTimestamp: 1735690000, message: { conversation: 'hi' } }, ctx);
   assert.equal(noStatus.ackName, null);
+});
+
+test('a quote whose stored thumbnail is not a JPEG (garbled bytes) shows no thumbnail rather than a broken image', () => {
+  const garbled = 'AAkAAAQAAAAAAAAAAAAAAA==';
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10]).toString('base64');
+  assert.equal(replyTo({ imageMessage: { jpegThumbnail: garbled } }).thumbnail, null);
+  assert.equal(replyTo({ imageMessage: { jpegThumbnail: garbled } }).label, '📷 Photo');
+  assert.equal(replyTo({ imageMessage: { jpegThumbnail: jpeg } }).thumbnail, `data:image/jpeg;base64,${jpeg}`);
+});
+
+test('thumbnailOfRawMessage reads the real thumbnail off a stored message, and nothing off a text or garbled one', () => {
+  assert.equal(thumbnailOfRawMessage({ message: { imageMessage: { jpegThumbnail: JPEG } } }), `data:image/jpeg;base64,${JPEG}`);
+  assert.equal(thumbnailOfRawMessage({ message: { conversation: 'hi' } }), null);
+  assert.equal(thumbnailOfRawMessage({ message: { imageMessage: { jpegThumbnail: 'AAkAAAQAAAAAAAAAAAAAAA==' } } }), null);
+  assert.equal(thumbnailOfRawMessage(null), null);
 });

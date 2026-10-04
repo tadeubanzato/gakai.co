@@ -694,7 +694,7 @@ function App(){
       <div className={"app"+(sidebarCollapsed?" sidebar-collapsed":"")}>
         <aside className="sidebar">
           <div className="sidebar-head">
-            <div className="logo" {...(sidebarCollapsed?{role:"button",tabIndex:0,title:"Expand menu","aria-label":"Expand menu","aria-expanded":false,onClick:toggleSidebar,onKeyDown:event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();toggleSidebar()}}}:{})}><img className="logo-mark" src="/logo.png" alt="" width="34" height="34" draggable="false"/><span className="logo-word">Gakai</span></div>
+            <div className="logo" {...(sidebarCollapsed?{role:"button",tabIndex:0,title:"Expand menu","aria-label":"Expand menu","aria-expanded":false,onClick:toggleSidebar,onKeyDown:event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();toggleSidebar()}}}:{})}><picture><source media="(max-width:720px)" srcSet="/logo-mark.png?v=4"/><img className="logo-mark" src={sidebarCollapsed?"/logo-mark.png?v=4":"/logo.png?v=4"} alt="Gakai" draggable="false"/></picture></div>
             {!sidebarCollapsed&&<button type="button" className="sidebar-toggle" onClick={toggleSidebar} aria-expanded="true" aria-label="Collapse menu" title="Collapse menu">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M15 6l-6 6 6 6"/></svg>
             </button>}

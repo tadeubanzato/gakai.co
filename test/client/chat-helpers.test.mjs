@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { serializedId, idFor, stamp, pageOf, endpoint, merge, confirmSentMessage, PAGE_SIZE } from '../../client/chat-helpers.mjs';
+import { serializedId, idFor, stamp, pageOf, endpoint, merge, confirmSentMessage, describeMessage, replyLabel, PAGE_SIZE } from '../../client/chat-helpers.mjs';
 
 test('serializedId resolves a structured provider id to a stable string, never "[object Object]"', () => {
   assert.equal(serializedId({ _serialized: 'abc' }), 'abc');
@@ -88,4 +88,21 @@ test('staleMessageIds leaves older history, unsent messages and id-less messages
 
 test('staleMessageIds does nothing when the server returned no messages', () => {
   assert.deepEqual([...staleMessageIds([msg('a', 100)], [])], []);
+});
+
+test('describeMessage says what a message is: its text, else the kind of attachment', () => {
+  assert.equal(describeMessage({ body: 'hello' }), 'hello');
+  assert.equal(describeMessage({ hasMedia: true, media: { mimetype: 'image/jpeg' } }), '📷 Photo');
+  assert.equal(describeMessage({ hasMedia: true, media: { mimetype: 'video/mp4' } }), '🎥 Video');
+  assert.equal(describeMessage({ hasMedia: true, media: { mimetype: 'audio/ogg' } }), '🎵 Audio');
+  assert.equal(describeMessage({ hasMedia: true, media: { mimetype: 'application/pdf', filename: 'a.pdf' } }), '📄 a.pdf');
+  assert.equal(describeMessage({ location: {} }), '📍 Location');
+  assert.equal(describeMessage({}), 'Message');
+});
+
+test('replyLabel prefers the backend label and degrades gracefully for older data', () => {
+  assert.equal(replyLabel({ label: '📷 Photo', body: '' }), '📷 Photo');
+  assert.equal(replyLabel({ body: 'old text' }), 'old text');
+  assert.equal(replyLabel({ hasMedia: true }), '📎 Attachment');
+  assert.equal(replyLabel({ hasMedia: true, media: { mimetype: 'image/png' } }), '📷 Photo', 'the optimistic bubble quotes the full message');
 });

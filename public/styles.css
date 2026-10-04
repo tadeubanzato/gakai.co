@@ -824,7 +824,7 @@ video.media{background:#000}
 
 /* Sidebar: section title, and a collapsed rail with just the logo and avatars. */
 .sidebar-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
-.sidebar-head .logo{padding-bottom:25px}
+.sidebar-head .logo{padding-bottom:14px}
 .sidebar-toggle{flex:none;width:30px;height:30px;display:grid;place-items:center;padding:0;margin-top:4px;border:0;border-radius:8px;background:transparent;color:#8696a0;cursor:pointer}
 .sidebar-toggle:hover{background:var(--soft);color:var(--ink)}
 .sidebar-toggle:focus-visible{outline:2px solid #25d366;outline-offset:2px}
@@ -843,7 +843,7 @@ video.media{background:#000}
   .sidebar-collapsed .sidebar{padding:22px 10px;align-items:center}
   .sidebar-collapsed .sidebar-head{flex-direction:column;align-items:center;gap:6px}
   .sidebar-collapsed .sidebar-head .logo{padding:0 0 6px}
-  .sidebar-collapsed .logo-word,.sidebar-collapsed .sidebar-title,.sidebar-collapsed .logout-label{display:none}
+  .sidebar-collapsed .sidebar-title,.sidebar-collapsed .logout-label{display:none}
   .sidebar-collapsed .account-switch{width:100%}
   .sidebar-collapsed .logout{width:36px;height:36px;padding:0;display:grid;place-items:center}
 }
@@ -859,16 +859,20 @@ video.media{background:#000}
 .menu-item.is-on .menu-toggle-check{color:#4ade80;font-weight:700}
 
 
-/* Logo: the capybara mark, with the Gakai wordmark beside it while expanded. */
-.sidebar .logo{align-items:center;gap:10px}
-.logo-mark{display:block;flex:none;width:34px;height:34px;object-fit:contain;user-select:none}
+/* Logo: the Gakai mascot lockup, nothing else. The artwork has a fully transparent background. */
+.sidebar .logo{align-items:center}
+.logo-mark{display:block;flex:none;width:84px;height:auto;object-fit:contain;user-select:none}
 @media (min-width:721px){
+  /* Expanded: the lockup is centred in the full sidebar width; the collapse button floats at the corner. */
+  .app:not(.sidebar-collapsed) .sidebar-head{position:relative;justify-content:center}
+  .app:not(.sidebar-collapsed) .sidebar-head .logo{flex:1;display:flex;justify-content:center;padding-left:0;padding-right:0}
+  .app:not(.sidebar-collapsed) .sidebar-toggle{position:absolute;top:0;right:0}
   .sidebar-collapsed .sidebar-head,.sidebar-collapsed .sidebar-head .logo{width:100%}
   .sidebar-collapsed .sidebar-head .logo{justify-content:center;box-sizing:border-box;padding:8px 0 12px;border-radius:10px;cursor:pointer}
   .sidebar-collapsed .sidebar-head .logo:hover{background:var(--soft)}
-  .sidebar-collapsed .logo-mark{width:46px;height:46px}
+  .sidebar-collapsed .logo-mark{width:60px}
 }
-@media (max-width:720px){.logo-mark{width:30px;height:30px}}
+@media (max-width:720px){.logo-mark{width:64px}}
 
 /* Application tokens card. */
 .api-tokens .token-count{flex:none;padding:4px 12px;border-radius:999px;background:#202c33;border:1px solid #3a4c56;color:#c3d0d6;font-size:12px;font-weight:650;line-height:1.4}
@@ -1064,3 +1068,9 @@ video.media{background:#000}
 /* Overlays, not rows: a pill that comes and goes (someone typing in a group) must never change the thread's height. */
 .conversation-react-root{position:relative}
 .typing-indicator{position:absolute;left:50%;bottom:76px;transform:translateX(-50%);margin:0;z-index:5;pointer-events:none}
+
+/* Quoted reply: text on the left, the quoted media's thumbnail on the right. */
+.reply-context.has-thumb{grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}
+.reply-context .reply-text{display:grid;gap:2px;min-width:0}
+.reply-context .reply-text em{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9fb4ad;font-style:normal}
+.reply-context .reply-thumb{display:block;width:44px;height:44px;border-radius:6px;object-fit:cover}

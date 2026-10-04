@@ -13,6 +13,10 @@ test('pinned chats are ordered among themselves by recent activity, then the res
   assert.deepEqual(order([chat('b', 50, true), chat('c', 400), chat('a', 150, true), chat('d', 300)]), ['a', 'b', 'c', 'd']);
 });
 
+test('chats with the same timestamp keep a stable order (id descending), matching the server', () => {
+  assert.deepEqual(order([chat('a', 100), chat('c', 100), chat('b', 100)]), ['c', 'b', 'a']);
+});
+
 test('falls back to the last message time when a chat has no timestamp, and tolerates none at all', () => {
   const list = [{ id: 'x', lastMessage: { timestamp: 500 } }, chat('y', 100), { id: 'z' }];
   assert.deepEqual(order(list), ['x', 'y', 'z']);
