@@ -859,10 +859,9 @@ video.media{background:#000}
 .menu-item.is-on .menu-toggle-check{color:#4ade80;font-weight:700}
 
 
-/* Logo: the Gakai mascot lockup, nothing else. The artwork has its own dark backdrop, so it is
-   blended with `lighten` — the sidebar colour shows through where the artwork is darker than it. */
+/* Logo: the Gakai mascot lockup, nothing else. The artwork has a fully transparent background. */
 .sidebar .logo{align-items:center}
-.logo-mark{display:block;flex:none;width:108px;height:auto;object-fit:contain;user-select:none;mix-blend-mode:lighten}
+.logo-mark{display:block;flex:none;width:108px;height:auto;object-fit:contain;user-select:none}
 @media (min-width:721px){
   /* Expanded: the lockup is centred in the full sidebar width; the collapse button floats at the corner. */
   .app:not(.sidebar-collapsed) .sidebar-head{position:relative;justify-content:center}
