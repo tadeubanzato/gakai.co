@@ -429,3 +429,39 @@ test('an empty accountId is the same as leaving it out', async () => {
   assert.equal((await send(token, { accountId: '', phone: '18577075969', text: 'empty id' })).status, 200);
   assert.equal((await send(token, { accountId: null, phone: '18577075969', text: 'null id' })).status, 200);
 });
+
+const getAccount = token => fetch(`${base}/api/integrations/v1/account`, { headers: { authorization: `Bearer ${token}` } });
+
+test('a token can ask which account it belongs to, whatever permissions it has', async () => {
+  provider.__test.seedAccount('someone-elses-account');
+  for (const scopes of [['messages:send'], ['messages:read']]) {
+    const { token, key } = await create(`whoami-${scopes[0]}`, scopes);
+    const response = await getAccount(token);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.account.id, ACCOUNT);
+    assert.ok(body.account.label);
+    assert.ok('phone' in body.account && 'status' in body.account);
+    assert.equal(body.token.name, key.name);
+    assert.deepEqual(body.token.scopes, scopes);
+  }
+});
+
+test('the account endpoint describes only the token\'s own account and never exposes secrets', async () => {
+  const { token } = await create('whoami-private', ['messages:send']);
+  const text = await (await getAccount(token)).text();
+  assert.equal(text.includes('someone-elses-account'), false);
+  assert.equal(text.includes(token), false);
+  assert.equal(/hash|tokenEnc|last4/.test(text), false);
+});
+
+test('the account endpoint refuses a missing or wrong token', async () => {
+  assert.equal((await getAccount('wh_live_not-a-real-token')).status, 401);
+  assert.equal((await fetch(`${base}/api/integrations/v1/account`)).status, 401);
+});
+
+test('POST to the account endpoint is not a thing', async () => {
+  const { token } = await create('whoami-post', ['messages:send']);
+  const response = await fetch(`${base}/api/integrations/v1/account`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(response.status, 403);
+});

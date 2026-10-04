@@ -230,7 +230,7 @@ export function ApiTokensCard({ accounts, onNotice }) {
             POST <code>{origin}{SEND_PATH}</code>.
             {sampleTab === "curl" && " Replace YOUR_TOKEN with an application token."}
             {" "}<code>accountId</code> is the WhatsApp account this token belongs to. The token alone decides who sends, so it is optional — when given it must match, otherwise the request is refused instead of sending from the wrong number.
-            {" "}<code>phone</code> is the full number in any format (<code>+1 555 123 4567</code> works) — Gakai uses the existing chat, or starts a new one if the number is on WhatsApp. For a group, send <code>chatId</code> instead.
+            {" "}<code>phone</code> is the full number in any format (<code>+1 555 123 4567</code> works) — Gakai uses the existing chat, or starts a new one if the number is on WhatsApp. For a group, send <code>chatId</code> instead. To check a token's setup, <code>GET {SEND_PATH.replace("/messages", "/account")}</code> returns the account it belongs to.
           </small>
           {sampleAccountId && <CopyId id={sampleAccountId}/>}
         </div>

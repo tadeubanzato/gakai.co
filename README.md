@@ -317,7 +317,7 @@ curl -X POST https://your-gakai-host/api/integrations/v1/messages \
 | `text` | Required, up to 4096 characters. |
 
 A successful call returns `{"ok": true, "account": {"id": "…", "label": "…", "phone": "…"}, "chatId": "…", "to": "+18577075969", "newChat": false, "message": {…}}` — `account` is the WhatsApp account the message was sent from and `to` is the normalized number Gakai used. A token is tied to one
-WhatsApp account and only sends from it. Permissions: **Send messages** (`POST /api/integrations/v1/messages`) and
+WhatsApp account and only sends from it. `GET /api/integrations/v1/account` (any valid token, no permission needed) returns that account — `{"account": {"id", "label", "phone", "status"}, "token": {"name", "scopes"}}` — so a gateway can confirm which account each token maps to; it never describes any other account. Permissions: **Send messages** (`POST /api/integrations/v1/messages`) and
 **Read messages** (`GET /api/integrations/v1/chats`, `GET /api/integrations/v1/messages?chatId=…`).
 
 ### Custom webhook subscriptions
