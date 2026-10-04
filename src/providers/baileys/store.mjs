@@ -483,21 +483,27 @@ export function openStore(db) {
     COALESCE(json_extract(last_message_json,'$.body'),'')<>'' OR COALESCE(json_extract(last_message_json,'$.text'),'')<>''
     OR json_extract(last_message_json,'$.hasMedia')=1 OR json_extract(last_message_json,'$.system.kind')='call')`;
 
-  // One page of the conversation list: newest activity first, ties broken by id, resuming after
-  // `cursor`. Filtering happens in SQL so `limit` rows really are `limit` listable conversations,
-  // and only one page ever leaves the database, however many chats are stored.
+  // One page of the conversation list. The first page (no cursor) opens with every pinned
+  // conversation, whatever its age — pinning is the owner's "keep this on top" — and then `limit`
+  // unpinned conversations, newest activity first (ties broken by id). Later pages continue the
+  // unpinned run after `cursor`, so pinned chats never repeat. Filtering happens in SQL so `limit`
+  // rows really are `limit` listable conversations, and only one page ever leaves the database,
+  // however many chats are stored.
   function listChatsPage(accountId, { limit, cursor, archived = false } = {}) {
     const size = clampPageSize(limit);
     const after = decodeCursor(cursor);
+    const where = `account_id=? AND archived=? AND ${DISPLAYABLE_JID_SQL} AND ${HAS_CONTENT_SQL}`;
+    const pinned = after ? [] : db.prepare(`SELECT * FROM wa_chats WHERE ${where} AND pinned=1 ORDER BY last_message_timestamp DESC, chat_id DESC`)
+      .all(accountId, archived ? 1 : 0);
     const rows = db.prepare(`
       SELECT * FROM wa_chats
-      WHERE account_id=? AND archived=? AND ${DISPLAYABLE_JID_SQL} AND ${HAS_CONTENT_SQL}
+      WHERE ${where} AND pinned=0
         ${after ? 'AND (last_message_timestamp<? OR (last_message_timestamp=? AND chat_id<?))' : ''}
       ORDER BY last_message_timestamp DESC, chat_id DESC LIMIT ?
     `).all(accountId, archived ? 1 : 0, ...(after ? [after.timestamp, after.timestamp, after.id] : []), size + 1);
     const page = rows.slice(0, size);
     const last = page[page.length - 1];
-    return { chats: page.map(overviewOf), nextCursor: rows.length > size ? encodeCursor(last.last_message_timestamp, last.chat_id) : null };
+    return { chats: [...pinned, ...page].map(overviewOf), nextCursor: rows.length > size ? encodeCursor(last.last_message_timestamp, last.chat_id) : null };
   }
 
   // Contact rows that can name each of `chatIds`: the id's own row, then the row of its LID or

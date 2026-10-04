@@ -46,3 +46,12 @@ test('hidden kinds never use up a slot: the page is `limit` listable chats', () 
 test('the last page has no cursor', () => {
   assert.equal(pageConversations([chat(1, 5), chat(2, 4)], { limit: 2 }).nextCursor, null);
 });
+
+test('pinned chats open the first page only, then the unpinned run continues without repeating them', () => {
+  const chats = [chat(1, 10, { pinned: true }), chat(2, 90), chat(3, 80), chat(4, 70), chat(5, 60)];
+  const first = pageConversations(chats, { limit: 2 });
+  assert.deepEqual(first.chats.map(c => c.id), [chats[0].id, chats[1].id, chats[2].id]);
+  const second = pageConversations(chats, { limit: 2, cursor: first.nextCursor });
+  assert.deepEqual(second.chats.map(c => c.id), [chats[3].id, chats[4].id]);
+  assert.equal(second.nextCursor, null);
+});

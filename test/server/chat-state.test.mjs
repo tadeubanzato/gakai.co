@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Pin / mute / archive: POST /chats/:chatId/state toggles per-chat state; the
-// /chats list hides archived chats; pinning is a flag and does not reorder or add to the list.
+// /chats list hides archived chats; pinned chats lead the list whatever their age.
 const accountId = 'chat-state-account';
 const oldChat = '15551110000@s.whatsapp.net';
 const freshChat = '15552220000@s.whatsapp.net';
@@ -37,13 +37,14 @@ const setState = (chatId, body) => fetch(`${base}/api/app/accounts/${accountId}/
   method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body),
 });
 
-test('pinning sets the flag but neither reorders the list nor pulls an old chat in beyond the page', async () => {
+test('an old chat appears below the newer one until it is pinned, then leads the list', async () => {
+  assert.deepEqual((await listChats()).map(c => c.id), [freshChat, oldChat]);
   const response = await setState(oldChat, { pin: true });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).chat.pinned, true);
-  const list = await listChats();
-  assert.deepEqual(list.map(c => c.id), [freshChat, oldChat], 'newest activity first, pinned or not');
-  assert.equal(list.find(c => c.id === oldChat).pinned, true);
+  assert.deepEqual((await listChats()).map(c => c.id), [oldChat, freshChat], 'a pinned chat sorts to the top');
+  await setState(oldChat, { pin: false });
+  assert.deepEqual((await listChats()).map(c => c.id), [freshChat, oldChat]);
 });
 
 test('archiving removes a chat from the default list and surfaces it under ?archived=1', async () => {

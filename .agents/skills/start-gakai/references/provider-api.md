@@ -94,7 +94,7 @@ Superseded. The previous notes in this section described a REST/webhook provider
 ### Conversation list and identity (verified against rc14)
 
 - **History** — `messaging-history.set` carries `chats`, `contacts`, `messages`, `lidPnMappings`, `syncType`, `progress`, `isLatest`. Chunks arrive reverse-chronological and in any order, so Gakai only ever moves a chat's timestamp/preview forward. `PUSH_NAME` syncs arrive as contacts with `notify` only. Gakai sets `syncFullHistory: false`; Baileys' default `shouldSyncHistoryMessage` rejects only `FULL`, so what arrives is `INITIAL_BOOTSTRAP`/`RECENT`/`PUSH_NAME`. What WhatsApp never sent to this linked device cannot be recovered.
-- **The conversation list is Gakai's own index** (`wa_chats`), paged by `(last_message_timestamp, chat_id)` descending with an opaque cursor (`GET /chats?limit=&cursor=`, next cursor in `x-next-cursor`). It never queries WhatsApp.
+- **The conversation list is Gakai's own index** (`wa_chats`), paged by `(last_message_timestamp, chat_id)` descending with an opaque cursor; the first page opens with every pinned chat (any age), then `limit` unpinned ones, and the cursor walks only the unpinned run (`GET /chats?limit=&cursor=`, next cursor in `x-next-cursor`). It never queries WhatsApp.
 - **Which JIDs are conversations** is decided only by `src/domain/jid.mjs` (`classifyJid`, built on Baileys' `isJid*`/`isPnUser`/`isLidUser`): people and groups. `status@broadcast`, broadcast lists, channels and bots are never stored.
 - **Titles** come only from `resolveConversationDisplayName` (`src/domain/identity.mjs`): contact name, chat label, verified name, push name, formatted phone, raw JID. Groups: subject first. Names stored under a LID follow `wa_lid_map` to the phone-number chat.
 

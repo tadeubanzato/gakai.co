@@ -170,3 +170,23 @@ test('a name stored under a LID reaches the phone-number conversation, and the o
 test('getContactsForChats on an empty list does no work', () => {
   assert.equal(fresh().getContactsForChats(A, []).size, 0);
 });
+
+test('pinned chats lead the first page whatever their age, without using up the unpinned page', () => {
+  const store = fresh();
+  seed(store, 20);
+  store.setChatFlags(A, jid(0), { pinned: true }); // the oldest chat of all
+  store.setChatFlags(A, jid(1), { pinned: true });
+  const first = store.listChatsPage(A, { limit: 5 });
+  assert.deepEqual(ids(first), [jid(1), jid(0), jid(19), jid(18), jid(17), jid(16), jid(15)], 'pinned (newest first), then 5 unpinned');
+  const second = store.listChatsPage(A, { limit: 5, cursor: first.nextCursor });
+  assert.deepEqual(ids(second), [jid(14), jid(13), jid(12), jid(11), jid(10)], 'later pages continue the unpinned run, no pinned repeats');
+});
+
+test('a pinned chat with no real message behind it, or in another archive state, is still not listed', () => {
+  const store = fresh();
+  store.upsertChats(A, [{ id: jid(50), conversationTimestamp: 100 }]);
+  store.setChatFlags(A, jid(50), { pinned: true });
+  seed(store, 2);
+  store.setChatFlags(A, jid(1), { pinned: true, archived: true });
+  assert.deepEqual(ids(store.listChatsPage(A, {})), [jid(0)]);
+});
