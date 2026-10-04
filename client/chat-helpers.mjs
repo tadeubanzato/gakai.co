@@ -104,6 +104,31 @@ export function mediaKindFromMime(mimetype) {
   return "document";
 }
 
+// One line saying what a message is — its text, else what kind of attachment it carries. Used where
+// a message is quoted or previewed without being rendered (the reply bar, the forward list).
+export function describeMessage(message) {
+  const text = message?.body || message?.text || message?.caption;
+  if (text) return String(text);
+  if (message?.location) return "📍 Location";
+  if (message?.poll) return "📊 Poll";
+  if (message?.contacts?.length) return "👤 Contact";
+  const media = message?.media || (message?.hasMedia || message?.mediaUrl ? { mimetype: message?.mimetype } : null);
+  if (media) {
+    if (!(media.mimetype || message?.mimetype)) return media.filename ? `📄 ${media.filename}` : "📎 Attachment";
+    const kind = mediaKindFromMime(media.mimetype || message?.mimetype);
+    if (kind === "image") return "📷 Photo";
+    if (kind === "video") return "🎥 Video";
+    if (kind === "audio") return "🎵 Audio";
+    return media.filename ? `📄 ${media.filename}` : "📄 Document";
+  }
+  return "Message";
+}
+
+// The quoted line of a reply: the backend's label for what was quoted, falling back for older data.
+export function replyLabel(replyTo) {
+  return replyTo?.label || describeMessage(replyTo);
+}
+
 export function humanFileSize(bytes) {
   const value = Number(bytes) || 0;
   if (value < 1024) return `${value} B`;

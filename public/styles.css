@@ -1068,3 +1068,9 @@ video.media{background:#000}
 /* Overlays, not rows: a pill that comes and goes (someone typing in a group) must never change the thread's height. */
 .conversation-react-root{position:relative}
 .typing-indicator{position:absolute;left:50%;bottom:76px;transform:translateX(-50%);margin:0;z-index:5;pointer-events:none}
+
+/* Quoted reply: text on the left, the quoted media's thumbnail on the right. */
+.reply-context.has-thumb{grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}
+.reply-context .reply-text{display:grid;gap:2px;min-width:0}
+.reply-context .reply-text em{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9fb4ad;font-style:normal}
+.reply-context .reply-thumb{display:block;width:44px;height:44px;border-radius:6px;object-fit:cover}

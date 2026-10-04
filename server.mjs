@@ -974,7 +974,7 @@ async function enrichMessage(session,view){
   if(mentionIds.length){
     const contacts=await Promise.all(mentionIds.map(async id=>[id,await resolveContactByNumber(session,id,rawMentionIds,{namesOnly:true})]));
     const labels=new Map(contacts.map(([id,contact])=>[id,contact?.name||bareJidUser(contact?.id||'')]).filter(([,label])=>label));
-    view={...view,body:resolveMentionLabels(body,labels),text:resolveMentionLabels(body,labels),replyTo:view.replyTo?{...view.replyTo,body:resolveMentionLabels(replyBody,labels)}:view.replyTo};
+    view={...view,body:resolveMentionLabels(body,labels),text:resolveMentionLabels(body,labels),replyTo:view.replyTo?{...view.replyTo,body:resolveMentionLabels(replyBody,labels),label:resolveMentionLabels(String(view.replyTo.label||''),labels),caption:resolveMentionLabels(String(view.replyTo.caption||''),labels)}:view.replyTo};
   }
   return view;
 }

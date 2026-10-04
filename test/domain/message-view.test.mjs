@@ -28,7 +28,44 @@ test('messageView normalizes a quoted/reply message into replyTo', async () => {
     body: 'Hello from fixture',
     hasMedia: false,
     participant: null,
+    kind: 'text',
+    label: 'Hello from fixture',
+    caption: '',
+    thumbnail: null,
   });
+});
+
+const replyTo = quotedMessage => messageView({
+  key: { remoteJid: '551199999999@s.whatsapp.net', fromMe: true, id: 'R1' }, messageTimestamp: 1735689660,
+  message: { extendedTextMessage: { text: 'nice', contextInfo: { stanzaId: 'Q1', participant: '551188888888@s.whatsapp.net', quotedMessage } } },
+}, ctx).replyTo;
+
+test('a reply to a photo is labelled as a photo, keeps the caption, and carries the thumbnail', () => {
+  const quote = replyTo({ imageMessage: { caption: 'sunset', mimetype: 'image/jpeg', jpegThumbnail: 'QUJD' } });
+  assert.equal(quote.kind, 'image');
+  assert.equal(quote.label, '📷 Photo');
+  assert.equal(quote.caption, 'sunset');
+  assert.equal(quote.thumbnail, 'data:image/jpeg;base64,QUJD');
+  assert.equal(quote.hasMedia, true);
+});
+
+test('replies to video, GIF, voice note, audio, sticker and document each say what they are', () => {
+  assert.equal(replyTo({ videoMessage: { seconds: 75 } }).label, '🎥 Video 1:15');
+  assert.equal(replyTo({ videoMessage: { gifPlayback: true } }).label, '🎞 GIF');
+  assert.equal(replyTo({ audioMessage: { ptt: true, seconds: 7 } }).label, '🎤 Voice message 0:07');
+  assert.equal(replyTo({ audioMessage: {} }).label, '🎵 Audio');
+  assert.equal(replyTo({ stickerMessage: {} }).label, 'Sticker');
+  assert.equal(replyTo({ documentMessage: { fileName: 'plan.pdf' } }).label, '📄 plan.pdf');
+  assert.equal(replyTo({ documentMessage: {} }).label, '📄 Document');
+});
+
+test('a reply to a shared link or post leads with its title and keeps the address underneath', () => {
+  const quote = replyTo({ extendedTextMessage: { text: 'https://example.com/p/1', title: 'A great post', jpegThumbnail: 'QUJD' } });
+  assert.equal(quote.kind, 'link');
+  assert.equal(quote.label, '🔗 A great post');
+  assert.equal(quote.caption, 'https://example.com/p/1');
+  assert.ok(quote.thumbnail);
+  assert.equal(replyTo({ extendedTextMessage: { text: 'plain words' } }).label, 'plain words');
 });
 
 test('messageView shapes a link-preview message from Baileys\' own extendedTextMessage fields', async () => {

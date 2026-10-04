@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, staleMessageIds, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending, messageIsEditable } from "./chat-helpers.mjs";
+import { PAGE_SIZE, serializedId, idFor, stamp, pageOf, endpoint, merge, staleMessageIds, nextComposerValue, confirmSentMessage, mentionQueryAt, applyMentionPick, buildMentionPayload, mediaKindFromMime, humanFileSize, buildMediaPending, messageIsEditable, describeMessage, replyLabel } from "./chat-helpers.mjs";
 import { api } from "./app-helpers.mjs";
 import { aspectOf, compensation, distanceFromBottom, entryNeedsCorrection, followsIncoming, isAtBottom, modeAfterIntent, modeAfterScroll, settlesToBottom } from "./thread-scroll.mjs";
 import { Avatar, Menu, MenuItem } from "./ui-helpers.jsx";
@@ -223,7 +223,8 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
   const isInstagramLink = (() => { if (!previewUrl) return false; try { return /instagram\.com$/i.test(new URL(previewUrl).hostname); } catch { return false; } })();
   const [showReactions, setShowReactions] = useState(false);
-  const label = message?.replyTo?.body || (message?.replyTo?.hasMedia ? "Media attachment" : "Message");
+  const label = replyLabel(message?.replyTo);
+  const replyCaption = message?.replyTo?.caption && message.replyTo.label !== message.replyTo.caption ? message.replyTo.caption : "";
   // A structured payload (location / contact / poll) renders as its own card,
   // so the emoji-prefixed preview text the backend attaches for the inbox list
   // is suppressed inside the thread.
@@ -231,7 +232,7 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
   const bubble = <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}${message.mentions?.some(mention=>mention.isMe)?" mentioned-me":""}`}>
     {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} />}
     {message.fromMe && <Sender sender={{id:accountId,name:accountLabel||"You",picture:accountPicture}} />}
-    {message?.replyTo && <div className="reply-context"><b>Replying to</b><span>{String(label).slice(0,140)}</span></div>}
+    {message?.replyTo && <div className={`reply-context${message.replyTo.thumbnail ? " has-thumb" : ""}`}><div className="reply-text"><b>Replying to</b><span>{String(label).slice(0,140)}</span>{replyCaption && <em>{String(replyCaption).slice(0,140)}</em>}</div>{message.replyTo.thumbnail && <img className="reply-thumb" src={message.replyTo.thumbnail} alt="" width="44" height="44" loading="lazy"/>}</div>}
     {message?.viewOnce && <span className="view-once-badge">👁 View once</span>}
     {message?.starred && <span className="starred-badge" title="Starred" aria-label="Starred">★</span>}
     <MediaCard message={message} accountId={accountId} chatId={chatId} onResolved={onMediaResolved} />
@@ -264,12 +265,7 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
 }
 
 function forwardPreviewText(message) {
-  if (message?.body || message?.text) return String(message.body || message.text).slice(0, 120);
-  if (message?.hasMedia || message?.media || message?.mediaUrl) return "Media attachment";
-  if (message?.location) return "📍 Location";
-  if (message?.poll) return "📊 Poll";
-  if (message?.contacts?.length) return "👤 Contact";
-  return "Message";
+  return describeMessage(message).slice(0, 120);
 }
 function ForwardDialog({ message, chats, currentChatId, busy, onForward, onClose }) {
   const [query, setQuery] = useState("");
@@ -989,7 +985,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
     {chat?.blocked
       ? <div className="composer blocked-banner" role="status">You blocked this contact. <button type="button" onClick={()=>onBlock?.(chat,false)}>Unblock</button> to message them.</div>
       : <form className="composer" onSubmit={submitComposer}>
-      {replyingTo&&<div className="composer-reply"><span><b>Replying to</b>{String(replyingTo.body||replyingTo.text||"Message").slice(0,100)}</span><button type="button" onClick={()=>setReplyingTo(null)} aria-label="Cancel reply">×</button></div>}
+      {replyingTo&&<div className="composer-reply"><span><b>Replying to</b>{describeMessage(replyingTo).slice(0,100)}</span><button type="button" onClick={()=>setReplyingTo(null)} aria-label="Cancel reply">×</button></div>}
       {editingMessage&&<div className="composer-reply composer-editing"><span><b>Editing message</b>{String(editingMessage.body||editingMessage.text||"").slice(0,100)}</span><button type="button" onClick={cancelEdit} aria-label="Cancel edit">×</button></div>}
       {attachment&&<div className="composer-attachment">
         {mediaKindFromMime(attachment.file.type)==="image"

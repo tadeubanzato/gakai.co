@@ -278,6 +278,38 @@ function ackView(status) {
   return { ack: name, ackName: name };
 }
 
+// What a quoted message looks like in a reply box: a short label naming the kind of thing it was
+// ("📷 Photo", "🎥 Video", a link's title), the caption or text under it, and a small thumbnail
+// when WhatsApp sent one with the quote.
+function mmss(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function quotedSummary(type, content) {
+  const text = type ? bodyTextFor(type, content) : '';
+  const inner = type === 'documentWithCaptionMessage' ? content?.message?.documentMessage : content;
+  const thumbnail = base64Thumbnail(inner?.jpegThumbnail);
+  switch (type) {
+    case 'imageMessage': return { kind: 'image', label: '📷 Photo', caption: text, thumbnail };
+    case 'videoMessage': return content?.gifPlayback
+      ? { kind: 'gif', label: '🎞 GIF', caption: text, thumbnail }
+      : { kind: 'video', label: content?.seconds ? `🎥 Video ${mmss(content.seconds)}` : '🎥 Video', caption: text, thumbnail };
+    case 'audioMessage': return content?.ptt
+      ? { kind: 'voice', label: content?.seconds ? `🎤 Voice message ${mmss(content.seconds)}` : '🎤 Voice message', caption: '', thumbnail: null }
+      : { kind: 'audio', label: '🎵 Audio', caption: '', thumbnail: null };
+    case 'stickerMessage': return { kind: 'sticker', label: 'Sticker', caption: '', thumbnail: null };
+    case 'documentMessage':
+    case 'documentWithCaptionMessage': return { kind: 'document', label: `📄 ${inner?.fileName || 'Document'}`, caption: text, thumbnail };
+    case 'extendedTextMessage': {
+      // A shared link/post: lead with the page's title when it has one, the address underneath.
+      const title = String(content?.title || '').trim();
+      return title ? { kind: 'link', label: `🔗 ${title}`, caption: text, thumbnail: base64Thumbnail(content?.jpegThumbnail) } : { kind: 'text', label: text, caption: '', thumbnail: null };
+    }
+    default: return { kind: type ? 'text' : 'unknown', label: text, caption: '', thumbnail: null };
+  }
+}
+
 function replyView(contextInfo, accountId, chatId) {
   const quoted = contextInfo?.quotedMessage;
   const stanzaId = contextInfo?.stanzaId;
@@ -285,11 +317,13 @@ function replyView(contextInfo, accountId, chatId) {
   const normalizedQuoted = normalizeMessageContent(quoted) || {};
   const quotedType = getContentType(normalizedQuoted);
   const quotedContent = quotedType ? normalizedQuoted[quotedType] : null;
+  const summary = quotedSummary(quotedType, quotedContent);
   return {
     id: stanzaId,
     body: quotedType ? bodyTextFor(quotedType, quotedContent) : '',
     hasMedia: MEDIA_TYPES.has(quotedType),
     participant: contextInfo.participant || null,
+    ...summary,
   };
 }
 
