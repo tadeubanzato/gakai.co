@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Pin / mute / archive: POST /chats/:chatId/state toggles per-chat state; the
-// /chats list hides archived chats and keeps pinned ones regardless of age.
+// /chats list hides archived chats; pinning is a flag and does not reorder or add to the list.
 const accountId = 'chat-state-account';
 const oldChat = '15551110000@s.whatsapp.net';
 const freshChat = '15552220000@s.whatsapp.net';
@@ -37,13 +37,13 @@ const setState = (chatId, body) => fetch(`${base}/api/app/accounts/${accountId}/
   method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body),
 });
 
-test('an old chat is outside the recency window until it is pinned', async () => {
-  assert.equal((await listChats()).some(c => c.id === oldChat), false);
+test('pinning sets the flag but neither reorders the list nor pulls an old chat in beyond the page', async () => {
   const response = await setState(oldChat, { pin: true });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).chat.pinned, true);
   const list = await listChats();
-  assert.equal(list[0].id, oldChat, 'a pinned chat sorts to the top');
+  assert.deepEqual(list.map(c => c.id), [freshChat, oldChat], 'newest activity first, pinned or not');
+  assert.equal(list.find(c => c.id === oldChat).pinned, true);
 });
 
 test('archiving removes a chat from the default list and surfaces it under ?archived=1', async () => {

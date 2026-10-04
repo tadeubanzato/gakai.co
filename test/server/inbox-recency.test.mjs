@@ -17,7 +17,7 @@ const { server, provider } = await import('../../server.mjs');
 after(() => server.close());
 
 // Fixed set of chats: a mix of recent, stale (older than the 60-day default
-// recency window), and one that gets deleted through Gakai.
+// old, which must still show), and one that gets deleted through Gakai.
 provider.__test.seedAccount(accountId);
 const seed = (id, name, lastMessage) => provider.__test.seedChat(accountId, { id, name, lastMessage: { text: lastMessage.body || '', system: null, ...lastMessage } });
 seed('recent-1@s.whatsapp.net', 'Recent 1', { timestamp: now - 1 * day, body: 'hi', hasMedia: false });
@@ -50,13 +50,13 @@ const setup = await fetch(`${base}/api/app/auth/setup`, {
 });
 const cookie = setup.headers.get('set-cookie').split(';')[0];
 
-test('the inbox excludes chats with no activity in the recency window, even when fewer chats exist than the cap', async () => {
+test('the inbox has no age cutoff: old chats with real messages are listed; ghosts and notice-only contacts are not', async () => {
   const response = await fetch(`${base}/api/app/accounts/${accountId}/chats`, { headers: { cookie } });
   const chats = await response.json();
 
   assert.equal(response.status, 200);
   const ids = chats.map(c => c.id).sort();
-  assert.deepEqual(ids, ['call-only@s.whatsapp.net', 'recent-1@s.whatsapp.net', 'recent-2@s.whatsapp.net'], 'stale chats, the deleted chat, the fresh-timestamp-no-content ghost, and a fabricated encryption-notice-only contact must not pad out the list, but a real recent call must still show');
+  assert.deepEqual(ids, ['call-only@s.whatsapp.net', 'recent-1@s.whatsapp.net', 'recent-2@s.whatsapp.net', 'stale-1@s.whatsapp.net', 'stale-2@s.whatsapp.net'], 'old chats still show; the deleted chat, the fresh-timestamp-no-content ghost, and an encryption-notice-only contact must not');
 });
 
 test('the most recently active chat sorts first', async () => {

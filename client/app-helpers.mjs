@@ -26,10 +26,10 @@ export async function api(path, options = {}) {
   return data;
 }
 
-// Inbox order: pinned chats first, then newest activity first. Every place that
-// builds or patches the chat list sorts with this, so a pinned chat stays on
-// top after a refresh, a background poll, or the moment it is pinned.
+// Inbox order: newest activity first, ties broken by id — the same total order the server pages
+// by. Pinning is a WhatsApp flag the menu still shows, but it does not reorder the list. Every
+// place that builds or patches the chat list sorts with this.
 export function compareChats(left, right) {
   const recency = chat => Number(chat.timestamp || chat.lastMessage?.timestamp || 0);
-  return (right.pinned ? 1 : 0) - (left.pinned ? 1 : 0) || recency(right) - recency(left);
+  return recency(right) - recency(left) || String(right.id || "").localeCompare(String(left.id || ""));
 }

@@ -956,7 +956,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   return <div className="conversation-react-root" aria-label={name} onPointerDownCapture={() => onEngage?.()} onKeyDownCapture={() => onEngage?.()}>
     <header className="conversation-head">
       {onBack && <button type="button" className="back" onClick={onBack} aria-label="Back to conversations">‹</button>}
-      <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small>Chat ID: {chatId || "Unavailable"}</small></span>
+      <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small title={chatId || undefined}>{chat?.kind === "group" ? "Group" : chat?.phone && chat.phone !== name ? chat.phone : chat?.phone ? "WhatsApp contact" : `Chat ID: ${chatId || "Unavailable"}`}</small></span>
       <Menu label="Conversation actions" className="conversation-menu">
         {onAiToggle && chat && <MenuItem toggled={!!chat.aiReply} onSelect={()=>onAiToggle(chat)}>AI replies - {chat.aiReply ? "On" : "Off"}</MenuItem>}
         {onChatState && chat && <>

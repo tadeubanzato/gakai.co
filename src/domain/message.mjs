@@ -82,6 +82,8 @@ export function chatOverview(chat) {
   return {
     id: chat.id,
     name: chat.name || null,
+    phone: chat.phone || null,
+    kind: chat.kind || null,
     picture: avatarUrl(chat.picture),
     unreadCount: Number(chat.unreadCount || 0) || 0,
     timestamp: chatTimestamp(chat),

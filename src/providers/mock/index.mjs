@@ -8,6 +8,8 @@
  * production code ever touches.
  */
 import { chatOverview as domainChatOverview } from '../../domain/message.mjs';
+import { isDisplayableConversation } from '../../domain/jid.mjs';
+import { pageConversations } from '../../domain/conversation-list.mjs';
 
 export function createMockProvider({ onEvent } = {}) {
   const accounts = new Map(); // id -> {id,status,phone,profile,ownJid}
@@ -145,7 +147,13 @@ export function createMockProvider({ onEvent } = {}) {
   // Mirrors the real Baileys manager's contract: getChatsOverview always
   // returns the final, already-normalized Gakai view model, never a raw
   // store row.
-  async function getChatsOverview(accountId) { const blocks = blockedFor(accountId); return [...chatsFor(accountId).values()].map(chat => domainChatOverview({ ...chat, blocked: blocks.has(chat.id) })); }
+  async function getChatsOverview(accountId) { const blocks = blockedFor(accountId); return [...chatsFor(accountId).values()].filter(chat => isDisplayableConversation(chat.id)).map(chat => domainChatOverview({ ...chat, blocked: blocks.has(chat.id) })); }
+  // Same contract as the real manager: one page of listable conversations plus a cursor.
+  async function getChatsPage(accountId, options = {}) {
+    const blocks = blockedFor(accountId);
+    const page = pageConversations([...chatsFor(accountId).values()], options);
+    return { chats: page.chats.map(chat => domainChatOverview({ ...chat, blocked: blocks.has(chat.id) })), nextCursor: page.nextCursor };
+  }
   async function getMessages(accountId, chatId, { limit = 20, before } = {}) {
     const list = (messagesFor(accountId).get(chatId) || []).slice();
     const filtered = Number.isFinite(before) && before > 0 ? list.filter(m => m.timestamp <= before - 1) : list;
@@ -232,7 +240,7 @@ export function createMockProvider({ onEvent } = {}) {
     subscribePresence, publishPresence,
     getContact, getContacts, resolveLid, getGroupParticipants,
     checkOnWhatsApp, startConversation,
-    getChatsOverview, getMessages, getMessage, downloadMedia,
+    getChatsOverview, getChatsPage, getMessages, getMessage, downloadMedia,
     shutdown,
     __test: { seedAccount, seedChat, seedMessage, seedContact, seedWhatsAppNumber, seedGroupParticipants, simulateIncomingMessage, getSentMessages, getReaction },
   };

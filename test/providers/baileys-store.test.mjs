@@ -10,13 +10,13 @@ function freshStore() {
 test('upsertMessages stores a message and bumps the chat\'s denormalized last-message snapshot', () => {
   const store = freshStore();
   store.upsertMessages('acct-1', [{
-    chatId: 'chat-1', messageId: 'm1', timestamp: 100, fromMe: false,
+    chatId: '1001@s.whatsapp.net', messageId: 'm1', timestamp: 100, fromMe: false,
     waMessage: { key: { id: 'm1' }, messageTimestamp: 100 },
     overviewMessage: { body: 'hi', text: 'hi', timestamp: 100, hasMedia: false, system: null },
   }]);
 
   const [chat] = store.getChatsOverview('acct-1');
-  assert.equal(chat.id, 'chat-1');
+  assert.equal(chat.id, '1001@s.whatsapp.net');
   assert.equal(chat.lastMessageTimestamp, 100);
   assert.equal(chat.lastMessage.body, 'hi');
 });
@@ -24,14 +24,14 @@ test('upsertMessages stores a message and bumps the chat\'s denormalized last-me
 test('upsertMessages never regresses the last-message snapshot to an older message', () => {
   const store = freshStore();
   store.upsertMessages('acct-1', [{
-    chatId: 'chat-1', messageId: 'newer', timestamp: 200, fromMe: false,
+    chatId: '1001@s.whatsapp.net', messageId: 'newer', timestamp: 200, fromMe: false,
     waMessage: { key: { id: 'newer' } },
     overviewMessage: { body: 'second', text: 'second', timestamp: 200, hasMedia: false, system: null },
   }]);
   // A backfill/history-sync batch can deliver an older message after a newer
   // one is already cached — the chat's preview must stay on the newer one.
   store.upsertMessages('acct-1', [{
-    chatId: 'chat-1', messageId: 'older', timestamp: 100, fromMe: false,
+    chatId: '1001@s.whatsapp.net', messageId: 'older', timestamp: 100, fromMe: false,
     waMessage: { key: { id: 'older' } },
     overviewMessage: { body: 'first', text: 'first', timestamp: 100, hasMedia: false, system: null },
   }]);
@@ -44,52 +44,52 @@ test('upsertMessages never regresses the last-message snapshot to an older messa
 test('re-upserting a message id overwrites the stored raw payload (delivery-status folding)', () => {
   const store = freshStore();
   store.upsertMessages('acct-1', [{
-    chatId: 'chat-1', messageId: 'sent-1', timestamp: 100, fromMe: true,
+    chatId: '1001@s.whatsapp.net', messageId: 'sent-1', timestamp: 100, fromMe: true,
     waMessage: { key: { id: 'sent-1', fromMe: true }, messageTimestamp: 100, status: 2, message: { conversation: 'hi' } },
     overviewMessage: { body: 'hi', text: 'hi', timestamp: 100, hasMedia: false, system: null },
   }]);
   // A messages.update event advances the status; the adapter folds it onto the
   // stored raw and re-upserts under the same id.
-  const raw = store.getMessageById('acct-1', 'chat-1', 'sent-1');
+  const raw = store.getMessageById('acct-1', '1001@s.whatsapp.net', 'sent-1');
   raw.status = 4;
   store.upsertMessages('acct-1', [{
-    chatId: 'chat-1', messageId: 'sent-1', timestamp: 100, fromMe: true,
+    chatId: '1001@s.whatsapp.net', messageId: 'sent-1', timestamp: 100, fromMe: true,
     waMessage: raw,
     overviewMessage: { body: 'hi', text: 'hi', timestamp: 100, hasMedia: false, system: null },
   }]);
 
-  assert.equal(store.getMessageById('acct-1', 'chat-1', 'sent-1').status, 4);
-  assert.equal(store.getMessagesPage('acct-1', 'chat-1', {}).length, 1, 're-upsert must not duplicate the row');
+  assert.equal(store.getMessageById('acct-1', '1001@s.whatsapp.net', 'sent-1').status, 4);
+  assert.equal(store.getMessagesPage('acct-1', '1001@s.whatsapp.net', {}).length, 1, 're-upsert must not duplicate the row');
 });
 
 test('getMessagesPage pages backward from a timestamp cursor, most recent first', () => {
   const store = freshStore();
   const rows = [1, 2, 3, 4, 5].map(n => ({
-    chatId: 'chat-1', messageId: `m${n}`, timestamp: n * 10, fromMe: false,
+    chatId: '1001@s.whatsapp.net', messageId: `m${n}`, timestamp: n * 10, fromMe: false,
     waMessage: { key: { id: `m${n}` }, n },
     overviewMessage: { body: `msg ${n}`, text: `msg ${n}`, timestamp: n * 10, hasMedia: false, system: null },
   }));
   store.upsertMessages('acct-1', rows);
 
-  const firstPage = store.getMessagesPage('acct-1', 'chat-1', { limit: 2 });
+  const firstPage = store.getMessagesPage('acct-1', '1001@s.whatsapp.net', { limit: 2 });
   assert.deepEqual(firstPage.map(m => m.n), [5, 4]);
 
-  const nextPage = store.getMessagesPage('acct-1', 'chat-1', { limit: 2, before: 40 });
+  const nextPage = store.getMessagesPage('acct-1', '1001@s.whatsapp.net', { limit: 2, before: 40 });
   assert.deepEqual(nextPage.map(m => m.n), [3, 2]);
 });
 
 test('deleteMessage removes the message and any reactions on it', () => {
   const store = freshStore();
   store.upsertMessages('acct-1', [{
-    chatId: 'chat-1', messageId: 'm1', timestamp: 10, fromMe: false,
+    chatId: '1001@s.whatsapp.net', messageId: 'm1', timestamp: 10, fromMe: false,
     waMessage: { key: { id: 'm1' } },
     overviewMessage: { body: 'hi', text: 'hi', timestamp: 10, hasMedia: false, system: null },
   }]);
   store.applyReaction('acct-1', { targetMessageId: 'm1', senderId: 'them@s.whatsapp.net', reaction: '👍' });
   assert.equal(store.getReaction('acct-1', 'm1'), '👍');
 
-  store.deleteMessage('acct-1', 'chat-1', 'm1');
-  assert.equal(store.getMessageById('acct-1', 'chat-1', 'm1'), null);
+  store.deleteMessage('acct-1', '1001@s.whatsapp.net', 'm1');
+  assert.equal(store.getMessageById('acct-1', '1001@s.whatsapp.net', 'm1'), null);
   assert.equal(store.getReaction('acct-1', 'm1'), null);
 });
 
@@ -107,23 +107,23 @@ test('applyReaction surfaces the most recently reacted sender, and an empty reac
 
 test('deleteChat removes the chat and every message in it, scoped to that account only', () => {
   const store = freshStore();
-  store.upsertMessages('acct-1', [{ chatId: 'chat-1', messageId: 'm1', timestamp: 10, fromMe: false, waMessage: {}, overviewMessage: { body: 'x', text: 'x', timestamp: 10, hasMedia: false, system: null } }]);
-  store.upsertMessages('acct-2', [{ chatId: 'chat-1', messageId: 'm1', timestamp: 10, fromMe: false, waMessage: {}, overviewMessage: { body: 'y', text: 'y', timestamp: 10, hasMedia: false, system: null } }]);
+  store.upsertMessages('acct-1', [{ chatId: '1001@s.whatsapp.net', messageId: 'm1', timestamp: 10, fromMe: false, waMessage: {}, overviewMessage: { body: 'x', text: 'x', timestamp: 10, hasMedia: false, system: null } }]);
+  store.upsertMessages('acct-2', [{ chatId: '1001@s.whatsapp.net', messageId: 'm1', timestamp: 10, fromMe: false, waMessage: {}, overviewMessage: { body: 'y', text: 'y', timestamp: 10, hasMedia: false, system: null } }]);
 
-  store.deleteChat('acct-1', 'chat-1');
+  store.deleteChat('acct-1', '1001@s.whatsapp.net');
 
   assert.deepEqual(store.getChatsOverview('acct-1'), []);
-  assert.equal(store.getMessageById('acct-1', 'chat-1', 'm1'), null);
+  assert.equal(store.getMessageById('acct-1', '1001@s.whatsapp.net', 'm1'), null);
   // The same chat id under a different account is untouched.
   assert.equal(store.getChatsOverview('acct-2').length, 1);
 });
 
 test('upsertContacts fills in a name/picture without clobbering an existing one with null', () => {
   const store = freshStore();
-  store.upsertContacts('acct-1', [{ id: 'c1', name: 'First Name', picture: null, phone: '5511999999999' }]);
-  store.upsertContacts('acct-1', [{ id: 'c1', name: null, picture: 'https://pps.whatsapp.net/x.jpg', phone: null }]);
+  store.upsertContacts('acct-1', [{ id: '1002@s.whatsapp.net', name: 'First Name', picture: null, phone: '5511999999999' }]);
+  store.upsertContacts('acct-1', [{ id: '1002@s.whatsapp.net', name: null, picture: 'https://pps.whatsapp.net/x.jpg', phone: null }]);
 
-  const contact = store.getContact('acct-1', 'c1');
+  const contact = store.getContact('acct-1', '1002@s.whatsapp.net');
   assert.equal(contact.name, 'First Name');
   assert.equal(contact.picture, 'https://pps.whatsapp.net/x.jpg');
   assert.equal(contact.phone, '5511999999999');
@@ -138,15 +138,15 @@ test('lid mapping round-trips, and an unmapped lid resolves to null', () => {
 
 test('deleteAccountData clears chats, messages, contacts, lids, and reactions for that account only', () => {
   const store = freshStore();
-  store.upsertMessages('acct-1', [{ chatId: 'chat-1', messageId: 'm1', timestamp: 10, fromMe: false, waMessage: {}, overviewMessage: { body: 'x', text: 'x', timestamp: 10, hasMedia: false, system: null } }]);
-  store.upsertContacts('acct-1', [{ id: 'c1', name: 'Someone' }]);
+  store.upsertMessages('acct-1', [{ chatId: '1001@s.whatsapp.net', messageId: 'm1', timestamp: 10, fromMe: false, waMessage: {}, overviewMessage: { body: 'x', text: 'x', timestamp: 10, hasMedia: false, system: null } }]);
+  store.upsertContacts('acct-1', [{ id: '1002@s.whatsapp.net', name: 'Someone' }]);
   store.applyReaction('acct-1', { targetMessageId: 'm1', senderId: 'a@s.whatsapp.net', reaction: '👍' });
   store.setLidMapping('acct-1', 'abc@lid', '5511999999999@s.whatsapp.net');
 
   store.deleteAccountData('acct-1');
 
   assert.deepEqual(store.getChatsOverview('acct-1'), []);
-  assert.equal(store.getContact('acct-1', 'c1'), null);
+  assert.equal(store.getContact('acct-1', '1002@s.whatsapp.net'), null);
   assert.equal(store.getReaction('acct-1', 'm1'), null);
   assert.equal(store.resolveLid('acct-1', 'abc@lid'), null);
 });
@@ -286,7 +286,7 @@ test('setChatFlags stores the ephemeral (disappearing-messages) duration', () =>
 });
 
 const seed = (store, id, timestamp, body) => store.upsertMessages('acct-1', [{
-  chatId: 'chat-1', messageId: id, timestamp, fromMe: false,
+  chatId: '1001@s.whatsapp.net', messageId: id, timestamp, fromMe: false,
   waMessage: { key: { id }, messageTimestamp: timestamp, body },
   overviewMessage: { body, text: body, timestamp, hasMedia: false, system: null },
 }]);
@@ -296,27 +296,27 @@ test('deleting the newest message points the chat preview at the one before it',
   const store = freshStore();
   seed(store, 'old', 100, 'first');
   seed(store, 'new', 200, 'second');
-  store.deleteMessageAndRefreshPreview('acct-1', 'chat-1', 'new', overviewOf);
+  store.deleteMessageAndRefreshPreview('acct-1', '1001@s.whatsapp.net', 'new', overviewOf);
   const [chat] = store.getChatsOverview('acct-1');
   assert.equal(chat.lastMessage.body, 'first', 'the deleted text must not linger as the preview');
   assert.equal(chat.lastMessageTimestamp, 100);
-  assert.equal(store.getMessageById('acct-1', 'chat-1', 'new'), null);
+  assert.equal(store.getMessageById('acct-1', '1001@s.whatsapp.net', 'new'), null);
 });
 
 test('deleting an older message leaves the preview alone', () => {
   const store = freshStore();
   seed(store, 'old', 100, 'first');
   seed(store, 'new', 200, 'second');
-  store.deleteMessageAndRefreshPreview('acct-1', 'chat-1', 'old', overviewOf);
+  store.deleteMessageAndRefreshPreview('acct-1', '1001@s.whatsapp.net', 'old', overviewOf);
   assert.equal(store.getChatsOverview('acct-1')[0].lastMessage.body, 'second');
 });
 
 test('deleting the only message empties the preview but keeps the chat row', () => {
   const store = freshStore();
   seed(store, 'only', 100, 'hello');
-  store.deleteMessageAndRefreshPreview('acct-1', 'chat-1', 'only', overviewOf);
+  store.deleteMessageAndRefreshPreview('acct-1', '1001@s.whatsapp.net', 'only', overviewOf);
   const [chat] = store.getChatsOverview('acct-1');
-  assert.equal(chat.id, 'chat-1');
+  assert.equal(chat.id, '1001@s.whatsapp.net');
   assert.equal(chat.lastMessage, null);
 });
 
@@ -324,7 +324,7 @@ test('clearChatMessages removes every message and empties the preview, keeping t
   const store = freshStore();
   seed(store, 'a', 100, 'one');
   seed(store, 'b', 200, 'two');
-  store.clearChatMessages('acct-1', 'chat-1');
-  assert.deepEqual(store.getMessagesPage('acct-1', 'chat-1', { limit: 10 }), []);
+  store.clearChatMessages('acct-1', '1001@s.whatsapp.net');
+  assert.deepEqual(store.getMessagesPage('acct-1', '1001@s.whatsapp.net', { limit: 10 }), []);
   assert.equal(store.getChatsOverview('acct-1')[0].lastMessage, null);
 });

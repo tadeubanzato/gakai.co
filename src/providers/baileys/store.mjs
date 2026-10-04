@@ -15,6 +15,8 @@
  */
 
 import { startsUnread } from '../../domain/unread.mjs';
+import { isDisplayableConversation, DISPLAYABLE_JID_SQL } from '../../domain/jid.mjs';
+import { encodeCursor, decodeCursor, clampPageSize } from '../../domain/conversation-list.mjs';
 
 export function openStore(db) {
   db.exec(`
@@ -30,6 +32,7 @@ export function openStore(db) {
       PRIMARY KEY (account_id, chat_id)
     );
     CREATE INDEX IF NOT EXISTS wa_chats_account_ts ON wa_chats(account_id, last_message_timestamp);
+    CREATE INDEX IF NOT EXISTS wa_chats_page ON wa_chats(account_id, last_message_timestamp DESC, chat_id DESC);
 
     CREATE TABLE IF NOT EXISTS wa_messages (
       account_id TEXT NOT NULL,
@@ -94,6 +97,12 @@ export function openStore(db) {
     ['ephemeral', 'INTEGER NOT NULL DEFAULT 0'],
   ]) if (!chatColumns.has(name)) db.exec(`ALTER TABLE wa_chats ADD COLUMN ${name} ${ddl}`);
 
+  // A contact's names are kept apart so the display-name hierarchy (domain/identity.mjs) can rank
+  // them: `name` is the contact-sync name, then a verified business name, then the person's own
+  // push name. Rows written before this split keep whatever they had in `name`.
+  const contactColumns = new Set(db.prepare(`PRAGMA table_info(wa_contacts)`).all().map(column => column.name));
+  for (const name of ['push_name', 'verified_name']) if (!contactColumns.has(name)) db.exec(`ALTER TABLE wa_contacts ADD COLUMN ${name} TEXT`);
+
   // Read state. A conversation has a monotonic read cursor (`read_ts`: everything at or before it is
   // read) and each stored message carries an `unread` flag; the number shown is COUNTED from those
   // flags. The old `unread_count` column is no longer written or read.
@@ -116,7 +125,7 @@ export function openStore(db) {
     `),
     bumpChatLastMessage: db.prepare(`
       UPDATE wa_chats SET last_message_timestamp=?, last_message_json=?, updated_at=?
-      WHERE account_id=? AND chat_id=? AND last_message_timestamp<=?
+      WHERE account_id=? AND chat_id=? AND (last_message_timestamp<=? OR last_message_json IS NULL)
     `),
     ensureChat: db.prepare(`
       INSERT INTO wa_chats(account_id, chat_id, name, picture, unread_count, last_message_timestamp, last_message_json, updated_at)
@@ -124,7 +133,7 @@ export function openStore(db) {
       ON CONFLICT(account_id, chat_id) DO NOTHING
     `),
     getChat: db.prepare(`SELECT * FROM wa_chats WHERE account_id=? AND chat_id=?`),
-    listChats: db.prepare(`SELECT * FROM wa_chats WHERE account_id=? ORDER BY last_message_timestamp DESC LIMIT ?`),
+    listChats: db.prepare(`SELECT * FROM wa_chats WHERE account_id=? AND ${DISPLAYABLE_JID_SQL} ORDER BY last_message_timestamp DESC, chat_id DESC LIMIT ?`),
     deleteChat: db.prepare(`DELETE FROM wa_chats WHERE account_id=? AND chat_id=?`),
     deleteChatMessages: db.prepare(`DELETE FROM wa_messages WHERE account_id=? AND chat_id=?`),
     getMessageRow: db.prepare(`SELECT unread FROM wa_messages WHERE account_id=? AND chat_id=? AND message_id=?`),
@@ -154,12 +163,14 @@ export function openStore(db) {
     findMessageById: db.prepare(`SELECT * FROM wa_messages WHERE account_id=? AND message_id=? LIMIT 1`),
 
     upsertContact: db.prepare(`
-      INSERT INTO wa_contacts(account_id, contact_id, name, picture, phone, updated_at)
-      VALUES (?,?,?,?,?,?)
+      INSERT INTO wa_contacts(account_id, contact_id, name, picture, phone, updated_at, push_name, verified_name)
+      VALUES (?,?,?,?,?,?,?,?)
       ON CONFLICT(account_id, contact_id) DO UPDATE SET
         name=COALESCE(excluded.name, wa_contacts.name),
         picture=COALESCE(excluded.picture, wa_contacts.picture),
         phone=COALESCE(excluded.phone, wa_contacts.phone),
+        push_name=COALESCE(excluded.push_name, wa_contacts.push_name),
+        verified_name=COALESCE(excluded.verified_name, wa_contacts.verified_name),
         updated_at=excluded.updated_at
     `),
     getContact: db.prepare(`SELECT * FROM wa_contacts WHERE account_id=? AND contact_id=?`),
@@ -188,10 +199,14 @@ export function openStore(db) {
 
   const now = () => new Date().toISOString();
 
+  // Status, broadcast lists, channels and bots are never conversations here (see
+  // domain/jid.mjs); nothing is stored under their ids, so they cannot pick up unread counts either.
+  const ensureRow = (accountId, chatId) => { if (isDisplayableConversation(chatId)) stmt.ensureChat.run(accountId, chatId, now()); };
+
   // Partial update of the per-chat state columns (pinned / muted_until /
   // archived / ephemeral). Only the keys present in `flags` are written.
   function setChatFlags(accountId, chatId, flags = {}) {
-    stmt.ensureChat.run(accountId, chatId, now());
+    ensureRow(accountId, chatId);
     const map = { pinned: 'pinned', mutedUntil: 'muted_until', archived: 'archived', ephemeral: 'ephemeral' };
     const sets = [], values = [];
     for (const [key, column] of Object.entries(map)) {
@@ -217,7 +232,7 @@ export function openStore(db) {
 
   function upsertChats(accountId, chats) {
     for (const chat of chats) {
-      if (!chat?.id) continue;
+      if (!chat?.id || !isDisplayableConversation(chat.id)) continue;
       stmt.upsertChat.run(
         accountId, chat.id,
         chat.name ?? null,
@@ -294,11 +309,11 @@ export function openStore(db) {
   }
 
   function hasUnread(accountId) {
-    return Boolean(db.prepare(`SELECT 1 FROM wa_messages WHERE account_id=? AND unread=1 LIMIT 1`).get(accountId));
+    return Boolean(db.prepare(`SELECT 1 FROM wa_messages WHERE account_id=? AND unread=1 AND ${DISPLAYABLE_JID_SQL} LIMIT 1`).get(accountId));
   }
 
   function setChatPicture(accountId, chatId, pictureUrl) {
-    stmt.ensureChat.run(accountId, chatId, now());
+    ensureRow(accountId, chatId);
     db.prepare(`UPDATE wa_chats SET picture=? WHERE account_id=? AND chat_id=?`).run(pictureUrl, accountId, chatId);
   }
 
@@ -309,8 +324,8 @@ export function openStore(db) {
   function upsertMessages(accountId, rows) {
     for (const row of rows) {
       const { chatId, messageId, timestamp, fromMe, waMessage, overviewMessage } = row;
-      if (!chatId || !messageId) continue;
-      stmt.ensureChat.run(accountId, chatId, now());
+      if (!chatId || !messageId || !isDisplayableConversation(chatId)) continue;
+      ensureRow(accountId, chatId);
       // Only a message seen for the first time can start unread; a replay keeps its verdict.
       const seen = stmt.getMessageRow.get(accountId, chatId, messageId);
       const unread = !seen && startsUnread({
@@ -404,7 +419,7 @@ export function openStore(db) {
   // conversation before any message has been exchanged). No-op if present.
   function ensureChat(accountId, chatId) {
     if (!accountId || !chatId) return;
-    stmt.ensureChat.run(accountId, chatId, now());
+    ensureRow(accountId, chatId);
   }
 
   // Fold one chat's history into another and drop the source row. Used to
@@ -414,7 +429,7 @@ export function openStore(db) {
   // move is a no-op.
   function mergeChat(accountId, fromChatId, toChatId) {
     if (!fromChatId || !toChatId || fromChatId === toChatId) return;
-    stmt.ensureChat.run(accountId, toChatId, now());
+    ensureRow(accountId, toChatId);
     db.prepare(`
       INSERT INTO wa_messages(account_id, chat_id, message_id, timestamp, from_me, payload_json, created_at, unread)
       SELECT account_id, ?, message_id, timestamp, from_me, payload_json, created_at, unread
@@ -440,19 +455,72 @@ export function openStore(db) {
     stmt.deleteChat.run(accountId, fromChatId);
   }
 
+  const overviewOf = row => ({
+    id: row.chat_id,
+    name: row.name,
+    picture: row.picture,
+    unreadCount: unreadCountOf(row.account_id, row.chat_id),
+    lastMessageTimestamp: row.last_message_timestamp,
+    lastMessage: row.last_message_json ? JSON.parse(row.last_message_json) : null,
+    pinned: Boolean(row.pinned),
+    mutedUntil: row.muted_until || 0,
+    archived: Boolean(row.archived),
+    ephemeral: row.ephemeral || 0,
+  });
+
+  function getChatOverview(accountId, chatId) {
+    const row = stmt.getChat.get(accountId, chatId);
+    return row ? overviewOf(row) : null;
+  }
+
   function getChatsOverview(accountId, limit = 200) {
-    return stmt.listChats.all(accountId, limit).map(row => ({
-      id: row.chat_id,
-      name: row.name,
-      picture: row.picture,
-      unreadCount: unreadCountOf(accountId, row.chat_id),
-      lastMessageTimestamp: row.last_message_timestamp,
-      lastMessage: row.last_message_json ? JSON.parse(row.last_message_json) : null,
-      pinned: Boolean(row.pinned),
-      mutedUntil: row.muted_until || 0,
-      archived: Boolean(row.archived),
-      ephemeral: row.ephemeral || 0,
-    }));
+    return stmt.listChats.all(accountId, limit).map(overviewOf);
+  }
+
+  // A chat is worth listing only if a real message (or call) is behind its timestamp — metadata
+  // churn and handshake notices also touch a chat. Mirrors hasMessageContent() in domain/message.mjs.
+  const HAS_CONTENT_SQL = `last_message_json IS NOT NULL AND (
+    COALESCE(json_extract(last_message_json,'$.body'),'')<>'' OR COALESCE(json_extract(last_message_json,'$.text'),'')<>''
+    OR json_extract(last_message_json,'$.hasMedia')=1 OR json_extract(last_message_json,'$.system.kind')='call')`;
+
+  // One page of the conversation list: newest activity first, ties broken by id, resuming after
+  // `cursor`. Filtering happens in SQL so `limit` rows really are `limit` listable conversations,
+  // and only one page ever leaves the database, however many chats are stored.
+  function listChatsPage(accountId, { limit, cursor, archived = false } = {}) {
+    const size = clampPageSize(limit);
+    const after = decodeCursor(cursor);
+    const rows = db.prepare(`
+      SELECT * FROM wa_chats
+      WHERE account_id=? AND archived=? AND ${DISPLAYABLE_JID_SQL} AND ${HAS_CONTENT_SQL}
+        ${after ? 'AND (last_message_timestamp<? OR (last_message_timestamp=? AND chat_id<?))' : ''}
+      ORDER BY last_message_timestamp DESC, chat_id DESC LIMIT ?
+    `).all(accountId, archived ? 1 : 0, ...(after ? [after.timestamp, after.timestamp, after.id] : []), size + 1);
+    const page = rows.slice(0, size);
+    const last = page[page.length - 1];
+    return { chats: page.map(overviewOf), nextCursor: rows.length > size ? encodeCursor(last.last_message_timestamp, last.chat_id) : null };
+  }
+
+  // Contact rows that can name each of `chatIds`: the id's own row, then the row of its LID or
+  // phone-number alias. Three batched queries for the whole page, never one per conversation.
+  function getContactsForChats(accountId, chatIds) {
+    const ids = [...new Set(chatIds)];
+    const out = new Map(ids.map(id => [id, { contacts: [], phoneJid: null }]));
+    if (!ids.length) return out;
+    const marks = list => list.map(() => '?').join(',');
+    const aliases = db.prepare(`SELECT lid, phone_jid FROM wa_lid_map WHERE account_id=? AND (phone_jid IN (${marks(ids)}) OR lid IN (${marks(ids)}))`)
+      .all(accountId, ...ids, ...ids);
+    const aliasOf = new Map();
+    for (const { lid, phone_jid: pn } of aliases) {
+      if (out.has(pn)) { (aliasOf.get(pn) || aliasOf.set(pn, []).get(pn)).push(lid); }
+      if (out.has(lid)) { (aliasOf.get(lid) || aliasOf.set(lid, []).get(lid)).push(pn); out.get(lid).phoneJid = pn; }
+    }
+    const wanted = [...new Set([...ids, ...[...aliasOf.values()].flat()])];
+    const byId = new Map(db.prepare(`SELECT * FROM wa_contacts WHERE account_id=? AND contact_id IN (${marks(wanted)})`).all(accountId, ...wanted).map(row => [row.contact_id, row]));
+    for (const id of ids) {
+      const entry = out.get(id);
+      entry.contacts = [id, ...(aliasOf.get(id) || [])].map(key => byId.get(key)).filter(Boolean);
+    }
+    return out;
   }
 
   function getMessagesPage(accountId, chatId, { limit = 20, before } = {}) {
@@ -472,24 +540,30 @@ export function openStore(db) {
       if (!contact?.id) continue;
       stmt.upsertContact.run(
         accountId, contact.id,
-        contact.name ?? contact.notify ?? contact.verifiedName ?? null,
+        contact.name ?? null,
         contact.picture ?? null,
         contact.phone ?? null,
         now(),
+        contact.pushName ?? contact.notify ?? null,
+        contact.verifiedName ?? null,
       );
     }
   }
 
   function setContactPicture(accountId, contactId, pictureUrl) {
-    stmt.upsertContact.run(accountId, contactId, null, pictureUrl, null, now());
+    stmt.upsertContact.run(accountId, contactId, null, pictureUrl, null, now(), null, null);
   }
 
+  // Everything outside the conversation list just wants "a name for this contact": the contact
+  // name, else the verified business name, else the push name.
+  const withBestName = row => (row ? { ...row, name: row.name || row.verified_name || row.push_name || null } : null);
+
   function getContact(accountId, contactId) {
-    return stmt.getContact.get(accountId, contactId) || null;
+    return withBestName(stmt.getContact.get(accountId, contactId));
   }
 
   function getContacts(accountId) {
-    return stmt.listContacts.all(accountId);
+    return stmt.listContacts.all(accountId).map(withBestName);
   }
 
   function setLidMapping(accountId, lid, phoneJid) {
@@ -528,7 +602,7 @@ export function openStore(db) {
   }
 
   return {
-    upsertChats, setChatPicture, setChatFlags, deleteChat, getChatsOverview,
+    upsertChats, setChatPicture, setChatFlags, deleteChat, getChatsOverview, getChatOverview, listChatsPage, getContactsForChats,
     listChatIds, chatExists, ensureChat, mergeChat,
     unreadCountOf, unreadIncomingKeys, markChatRead, markMessagesReadElsewhere, hasUnread,
     upsertMessages, deleteMessage, deleteMessageAndRefreshPreview, clearChatMessages, applyEdit, getMessagesPage, getMessageById,

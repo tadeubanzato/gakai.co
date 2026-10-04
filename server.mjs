@@ -13,6 +13,7 @@ import { decodeHtmlEntities } from './src/lib/html.mjs';
 import { isRecoverableStreamError } from './src/lib/process-guard.mjs';
 import { normalizeEmail, loginNamesAdmin } from './src/domain/admin-identity.mjs';
 import { callingCodeOf } from './src/domain/phone.mjs';
+import { clampPageSize } from './src/domain/conversation-list.mjs';
 import { INTERNAL_KEY_NAMES, MAX_TOKENS_PER_ACCOUNT, isCopyable, newToken, pruneExpiredTokens, publicToken, sendTarget, tokenLast4, validMessageText, validateScopes, validateTokenRequest } from './src/domain/api-tokens.mjs';
 import { normalizeReplyRules, shouldAiReply, isChatListed, setChatListed, voiceIdFor } from './src/domain/ai-reply-rules.mjs';
 import { MAX_VOICES_PER_ACCOUNT, TEMPLATES as VOICE_TEMPLATES, compileVoicePrompt, parseVoiceYaml } from './src/domain/voice-profile.mjs';
@@ -88,8 +89,8 @@ const sessionRememberTtlMs=30*24*60*60*1000; // matches the cookie's own Max-Age
 // (Gakai never hears about that) or otherwise gone stale; without a recency
 // floor, the top-30 inbox pads itself out with whatever old chats exist
 // once there aren't 30 genuinely active ones.
-const inboxRecencyMs=(Number(process.env.GAKAI_INBOX_RECENCY_DAYS)||60)*24*60*60*1000;
-const inboxChatLimit=Number(process.env.GAKAI_INBOX_CHAT_LIMIT)||40;
+// Page size of the conversation list. There is no age cutoff: the list is the latest activity, newest first.
+const inboxChatLimit=clampPageSize(process.env.GAKAI_INBOX_CHAT_LIMIT);
 const instagramPreviewRetryMs=Number(process.env.GAKAI_INSTAGRAM_PREVIEW_RETRY_MS)||5*60*1000;
 // Guards against a double-click or slow-retry racing two concurrent n8n
 // connect attempts for the same account: each spans several awaited n8n API
@@ -110,7 +111,7 @@ const admin=req=>{
   return true;
 };
 const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.png':'image/png', '.svg':'image/svg+xml', '.ico':'image/x-icon', '.webp':'image/webp', '.jpg':'image/jpeg' };
-const send = (res, status, data) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'}); res.end(JSON.stringify(data)); };
+const send = (res, status, data, headers={}) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store',...headers}); res.end(JSON.stringify(data)); };
 async function readBody(req) { const chunks=[]; let size=0; for await (const chunk of req){size+=chunk.length;if(size>1024*1024)throw Object.assign(new Error('Request body too large'),{status:413});chunks.push(chunk);} req.rawBody=Buffer.concat(chunks).toString('utf8'); return req.rawBody ? JSON.parse(req.rawBody) : {}; }
 // Raw binary body (media upload). Same streaming guard as readBody but no
 // JSON.parse and a caller-set cap — media is far larger than a JSON payload.
@@ -1270,20 +1271,14 @@ async function enrichMessage(session,view){
     return send(res,200,{pictures:Object.fromEntries(entries.filter(([,pictureUrl])=>pictureUrl))});
   }
   if (req.method==='GET' && parts[4]==='chats') {
-    const chats=await provider.getChatsOverview(id);
-    const wantArchived=url.searchParams.get('archived')==='1';
-    if(wantArchived){
-      const archived=chats.filter(chat=>chat.archived&&hasMessageContent(chat)).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
-      return send(res,200,(await mapWithConcurrency(archived,8,chat=>enrichChatOverview(id,chat,{pictures:false}))).sort((a,b)=>b.timestamp-a.timestamp));
-    }
-    const recencyFloor=Math.floor((Date.now()-inboxRecencyMs)/1000);
-    // Archived chats drop out of the main list; pinned chats stay regardless of
-    // how old their last message is, and sort above everything else.
-    const recent=chats.filter(chat=>!chat.archived&&hasMessageContent(chat)&&(chat.pinned||chatTimestamp(chat)>=recencyFloor)).sort((a,b)=>chatTimestamp(b)-chatTimestamp(a)).slice(0,inboxChatLimit);
+    // GET /chats?limit=50&cursor=<opaque>[&archived=1] — one page of the local conversation index,
+    // newest activity first. The next page's cursor travels in the x-next-cursor header (absent on
+    // the last page), so the body stays a plain array.
+    const page=await provider.getChatsPage(id,{limit:clampPageSize(url.searchParams.get('limit'),inboxChatLimit),cursor:url.searchParams.get('cursor')||undefined,archived:url.searchParams.get('archived')==='1'});
     // pictures:false — the list must not block on a burst of avatar lookups;
     // the client hydrates them separately via /chats/pictures.
-    const enriched=await mapWithConcurrency(recent,8,chat=>enrichChatOverview(id,chat,{pictures:false}));
-    return send(res,200,enriched.sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||b.timestamp-a.timestamp));
+    const enriched=await mapWithConcurrency(page.chats,8,chat=>enrichChatOverview(id,chat,{pictures:false}));
+    return send(res,200,enriched,page.nextCursor?{'x-next-cursor':page.nextCursor,'access-control-expose-headers':'x-next-cursor'}:{});
   }
   if (req.method==='GET' && parts[4]==='contact') {const contactId=url.searchParams.get('contactId');if(!contactId)return send(res,400,{message:'contactId is required'});return send(res,200,{contact:await resolveContact(id,contactId)});}
   if (req.method==='GET' && parts[4]==='messages') {
