@@ -108,3 +108,35 @@ export function Avatar({ item, picture, label, className = "avatar" }) {
 
 // Plain-language label for a WhatsApp account's connection state.
 export const status = value => ({ WORKING: "Connected", SCAN_QR_CODE: "Ready to scan", STARTING: "Starting WhatsApp", STOPPED: "Offline", FAILED: "Needs attention" })[value] || value || "Connecting";
+
+// Copy to the clipboard, falling back to the older execCommand route when the browser refuses.
+export async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through to the older route */ }
+  try {
+    const field = document.createElement("textarea");
+    field.value = text; field.style.cssText = "position:fixed;opacity:0";
+    document.body.appendChild(field); field.select();
+    const copied = document.execCommand("copy");
+    field.remove();
+    return copied;
+  } catch { return false; }
+}
+
+// A WhatsApp account's id — what API requests put in "accountId" — with a copy button.
+export function CopyId({ id, label = "Account ID" }) {
+  const [state, setState] = useState("");
+  const timer = useRef(null);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  if (!id) return null;
+  const copy = async event => {
+    event.stopPropagation();
+    setState((await copyText(id)) ? "Copied" : "Press Ctrl/Cmd+C");
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState(""), 1800);
+  };
+  return <span className="account-id">
+    <span className="account-id-label">{label}</span>
+    <code>{id}</code>
+    <button type="button" className="account-id-copy" onClick={copy} aria-label={`Copy ${label}`}>{state || "Copy"}</button>
+  </span>;
+}

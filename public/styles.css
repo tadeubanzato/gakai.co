@@ -1074,3 +1074,16 @@ video.media{background:#000}
 .reply-context .reply-text{display:grid;gap:2px;min-width:0}
 .reply-context .reply-text em{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9fb4ad;font-style:normal}
 .reply-context .reply-thumb{display:block;width:44px;height:44px;border-radius:6px;object-fit:cover}
+
+/* Account id with a copy button: the value API requests use as "accountId". */
+.account-id{display:inline-flex;align-items:center;gap:8px;max-width:100%;margin-top:6px;font-size:12px;color:var(--muted)}
+.account-id-label{font-weight:650;letter-spacing:.04em;text-transform:uppercase;font-size:11px;color:#8696a0}
+.account-id code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 8px;border-radius:6px;background:var(--soft);border:1px solid var(--line);color:var(--ink);font-size:12px}
+.account-id-copy{flex:none;padding:2px 9px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--muted);font-size:11px;font-weight:600;cursor:pointer}
+.account-id-copy:hover{background:var(--soft);color:var(--ink)}
+.account-id-copy:focus-visible{outline:2px solid #25d366;outline-offset:2px}
+.token-sample-for{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:12px;color:var(--muted)}
+.token-sample-for select{max-width:100%;padding:4px 8px;border-radius:8px;background:var(--soft);border:1px solid var(--line);color:var(--ink);font-size:12px}
+.details-sub{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px;min-width:0}
+.details-sub .account-id{margin-top:0}
+.token-sample-foot .account-id{display:flex;width:fit-content;margin:8px 0 0}

@@ -393,3 +393,39 @@ test('the workspace token routes are for the signed-in administrator only', asyn
   assert.equal((await platformKeys({})).status, 401);
   assert.equal((await platformCreate({ accountId: ACCOUNT, name: 'x' }, {})).status, 401);
 });
+
+test('the send response names the account the message went out from', async () => {
+  const { token } = await create('who-sent', ['messages:send']);
+  const response = await send(token, { phone: '18577075969', text: 'who am i' });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.account.id, ACCOUNT);
+  assert.ok(body.account.label);
+  assert.ok('phone' in body.account);
+});
+
+test('an accountId that matches the token is accepted', async () => {
+  const { token } = await create('guard-ok', ['messages:send']);
+  const before = sentMessages().length;
+  const response = await send(token, { accountId: ACCOUNT, phone: '18577075969', text: 'guarded' });
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages().length, before + 1);
+});
+
+test('an accountId for a different account is refused and nothing is sent', async () => {
+  const { token } = await create('guard-bad', ['messages:send']);
+  const before = sentMessages().length;
+  const response = await send(token, { accountId: 'some-other-account', phone: '18577075969', text: 'wrong place' });
+  assert.equal(response.status, 403);
+  const body = await response.json();
+  assert.match(body.message, /some-other-account/);
+  assert.match(body.message, new RegExp(ACCOUNT));
+  assert.equal(body.accountId, ACCOUNT);
+  assert.equal(sentMessages().length, before, 'no message may go out from the wrong account');
+});
+
+test('an empty accountId is the same as leaving it out', async () => {
+  const { token } = await create('guard-empty', ['messages:send']);
+  assert.equal((await send(token, { accountId: '', phone: '18577075969', text: 'empty id' })).status, 200);
+  assert.equal((await send(token, { accountId: null, phone: '18577075969', text: 'null id' })).status, 200);
+});
