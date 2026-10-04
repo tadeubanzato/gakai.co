@@ -861,7 +861,7 @@ video.media{background:#000}
 
 /* Logo: the Gakai mascot lockup, nothing else. The artwork has a fully transparent background. */
 .sidebar .logo{align-items:center}
-.logo-mark{display:block;flex:none;width:108px;height:auto;object-fit:contain;user-select:none}
+.logo-mark{display:block;flex:none;width:84px;height:auto;object-fit:contain;user-select:none}
 @media (min-width:721px){
   /* Expanded: the lockup is centred in the full sidebar width; the collapse button floats at the corner. */
   .app:not(.sidebar-collapsed) .sidebar-head{position:relative;justify-content:center}
