@@ -984,6 +984,21 @@ async function enrichMessage(session,view){
     // Last-used is a once-a-minute stamp, so a busy integration does not rewrite the saved state on every call.
     if(!key.lastUsedAt||Date.now()-Date.parse(key.lastUsedAt)>60000){key.lastUsedAt=new Date().toISOString();persist();}
     const endpoint=url.pathname.slice('/api/integrations/v1/'.length);
+    // Which account is this token for? Any valid token may ask: it only ever describes its own account, so a
+    // gateway can confirm its setup and a leaked token still reveals nothing about the other accounts.
+    if(req.method==='GET'&&endpoint==='account'){
+      const own=provider.getAccount(key.accountId);
+      if(!own)return send(res,404,{message:'The WhatsApp account this token belonged to no longer exists',accountId:key.accountId});
+      const view=account(own);
+      return send(res,200,{account:{id:view.id,label:view.label,phone:view.phone||null,status:view.status},token:{name:key.name,scopes:key.scopes}});
+    }
+    // Every WhatsApp account's id and name, for an application's account picker. Opt-in ("Read accounts"): unlike the rest
+    // of the API it is not limited to the token's own account — but it lists only id, name, number and status, nothing else.
+    if(req.method==='GET'&&endpoint==='accounts'&&key.scopes.includes('accounts:read')){
+      const accounts=provider.listAccounts().map(account).map(view=>({id:view.id,label:view.label,phone:view.phone||null,status:view.status,current:view.id===key.accountId}));
+      accounts.sort((a,b)=>String(a.label).localeCompare(String(b.label),undefined,{sensitivity:'base'})||a.id.localeCompare(b.id));
+      return send(res,200,{accounts});
+    }
     if(req.method==='GET'&&endpoint==='chats'&&key.scopes.includes('messages:read')){const chats=await provider.getChatsOverview(key.accountId);return send(res,200,{accountId:key.accountId,chats:chats.slice(0,35).sort((a,b)=>b.timestamp-a.timestamp)});}
     if(req.method==='GET'&&endpoint==='messages'&&key.scopes.includes('messages:read')){const chatId=url.searchParams.get('chatId');if(!chatId)return send(res,400,{message:'chatId is required'});const messages=await provider.getMessages(key.accountId,chatId,{limit:30});return send(res,200,{messages:messages.sort((a,b)=>a.timestamp-b.timestamp)});}
     if(req.method==='POST'&&endpoint==='messages'&&key.scopes.includes('messages:send')){
