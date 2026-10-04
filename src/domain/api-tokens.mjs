@@ -3,7 +3,9 @@
 import { randomBytes } from 'node:crypto';
 import { normalizePhone } from './phone.mjs';
 
-export const TOKEN_SCOPES = ['messages:send', 'messages:read'];
+// `accounts:read` is workspace-wide on purpose: it lists every WhatsApp account's id and name (never their
+// messages or chats), so an application can offer a choice of account. Off unless ticked.
+export const TOKEN_SCOPES = ['messages:send', 'messages:read', 'accounts:read'];
 export const MAX_TOKENS_PER_ACCOUNT = 20;
 export const MAX_MESSAGE_LENGTH = 4096;
 // A token can be copied back out of Gakai for this long after it is created or

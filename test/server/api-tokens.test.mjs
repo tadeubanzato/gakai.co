@@ -465,3 +465,63 @@ test('POST to the account endpoint is not a thing', async () => {
   const response = await fetch(`${base}/api/integrations/v1/account`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: '{}' });
   assert.equal(response.status, 403);
 });
+
+// An account holds at most 20 tokens and the tests above have made many: clear them before the next group.
+test('(setup) clear earlier test tokens', async () => {
+  const { keys } = await (await manage('GET', '')).json();
+  for (const key of keys) await manage('DELETE', `/${key.id}`);
+  assert.equal((await (await manage('GET', '')).json()).keys.length, 0);
+});
+
+const listAccounts = token => fetch(`${base}/api/integrations/v1/accounts`, { headers: { authorization: `Bearer ${token}` } });
+const setScopes = (keyId, scopes) => manage('PATCH', `/${keyId}`, { scopes });
+
+test('listing accounts needs the "Read accounts" permission, which a token does not get by default', async () => {
+  const { token } = await create('no-accounts-yet', ['messages:send', 'messages:read']);
+  const refused = await listAccounts(token);
+  assert.equal(refused.status, 403);
+  assert.match((await refused.json()).message, /permission/);
+  assert.equal((await create('default-scopes')).key.scopes.includes('accounts:read'), false);
+});
+
+test('a token with "Read accounts" lists every account: id, name, number and status, sorted by name', async () => {
+  provider.__test.seedAccount('zeta-account', { phone: '15550000002' });
+  provider.__test.seedAccount('alpha-account', { phone: '15550000001' });
+  const { token } = await create('picker', ['accounts:read']);
+  const response = await listAccounts(token);
+  assert.equal(response.status, 200);
+  const { accounts } = await response.json();
+  const ids = accounts.map(account => account.id);
+  for (const id of [ACCOUNT, 'zeta-account', 'alpha-account']) assert.ok(ids.includes(id), id);
+  for (const account of accounts) assert.deepEqual(Object.keys(account).sort(), ['current', 'id', 'label', 'phone', 'status']);
+  const labels = accounts.map(account => String(account.label).toLowerCase());
+  assert.deepEqual(labels, [...labels].sort((a, b) => a.localeCompare(b)), 'sorted by name for a dropdown');
+  assert.deepEqual(accounts.filter(account => account.current).map(account => account.id), [ACCOUNT], 'only the token\'s own account is marked current');
+});
+
+test('the accounts list exposes nothing but id, name, number and status — no messages, jids, pictures or secrets', async () => {
+  const { token } = await create('picker-private', ['accounts:read']);
+  const text = await (await listAccounts(token)).text();
+  assert.equal(/ownJid|picture|chats|message|hash|tokenEnc|last4|mentionNames/.test(text), false, text);
+  assert.equal(text.includes(token), false);
+});
+
+test('"Read accounts" alone does not let a token send or read messages', async () => {
+  const { token } = await create('picker-only', ['accounts:read']);
+  assert.equal((await send(token, { phone: '18577075969', text: 'nope' })).status, 403);
+  assert.equal((await fetch(`${base}/api/integrations/v1/chats`, { headers: { authorization: `Bearer ${token}` } })).status, 403);
+});
+
+test('the permission can be switched on and off for an existing token', async () => {
+  const { key, token } = await create('toggle', ['messages:send']);
+  assert.equal((await listAccounts(token)).status, 403);
+  assert.equal((await setScopes(key.id, ['messages:send', 'accounts:read'])).status, 200);
+  assert.equal((await listAccounts(token)).status, 200);
+  assert.equal((await setScopes(key.id, ['messages:send'])).status, 200);
+  assert.equal((await listAccounts(token)).status, 403);
+});
+
+test('the accounts list refuses a missing or wrong token', async () => {
+  assert.equal((await listAccounts('wh_live_not-a-real-token')).status, 401);
+  assert.equal((await fetch(`${base}/api/integrations/v1/accounts`)).status, 401);
+});

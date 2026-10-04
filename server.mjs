@@ -992,6 +992,13 @@ async function enrichMessage(session,view){
       const view=account(own);
       return send(res,200,{account:{id:view.id,label:view.label,phone:view.phone||null,status:view.status},token:{name:key.name,scopes:key.scopes}});
     }
+    // Every WhatsApp account's id and name, for an application's account picker. Opt-in ("Read accounts"): unlike the rest
+    // of the API it is not limited to the token's own account — but it lists only id, name, number and status, nothing else.
+    if(req.method==='GET'&&endpoint==='accounts'&&key.scopes.includes('accounts:read')){
+      const accounts=provider.listAccounts().map(account).map(view=>({id:view.id,label:view.label,phone:view.phone||null,status:view.status,current:view.id===key.accountId}));
+      accounts.sort((a,b)=>String(a.label).localeCompare(String(b.label),undefined,{sensitivity:'base'})||a.id.localeCompare(b.id));
+      return send(res,200,{accounts});
+    }
     if(req.method==='GET'&&endpoint==='chats'&&key.scopes.includes('messages:read')){const chats=await provider.getChatsOverview(key.accountId);return send(res,200,{accountId:key.accountId,chats:chats.slice(0,35).sort((a,b)=>b.timestamp-a.timestamp)});}
     if(req.method==='GET'&&endpoint==='messages'&&key.scopes.includes('messages:read')){const chatId=url.searchParams.get('chatId');if(!chatId)return send(res,400,{message:'chatId is required'});const messages=await provider.getMessages(key.accountId,chatId,{limit:30});return send(res,200,{messages:messages.sort((a,b)=>a.timestamp-b.timestamp)});}
     if(req.method==='POST'&&endpoint==='messages'&&key.scopes.includes('messages:send')){

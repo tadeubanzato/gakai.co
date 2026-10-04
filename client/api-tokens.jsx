@@ -9,6 +9,7 @@ const NEW_TOKEN_SCOPES = ["messages:send"];
 const SCOPE_OPTIONS = [
   { id: "messages:send", label: "Send messages", hint: "Send WhatsApp messages from this account." },
   { id: "messages:read", label: "Read messages", hint: "Read this account's chats and messages." },
+  { id: "accounts:read", label: "Read accounts", hint: "List the names and ids of ALL WhatsApp accounts in this workspace — for example to fill an account dropdown. Never their messages." },
 ];
 const when = value => (value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "");
 
@@ -230,7 +231,7 @@ export function ApiTokensCard({ accounts, onNotice }) {
             POST <code>{origin}{SEND_PATH}</code>.
             {sampleTab === "curl" && " Replace YOUR_TOKEN with an application token."}
             {" "}<code>accountId</code> is the WhatsApp account this token belongs to. The token alone decides who sends, so it is optional — when given it must match, otherwise the request is refused instead of sending from the wrong number.
-            {" "}<code>phone</code> is the full number in any format (<code>+1 555 123 4567</code> works) — Gakai uses the existing chat, or starts a new one if the number is on WhatsApp. For a group, send <code>chatId</code> instead. To check a token's setup, <code>GET {SEND_PATH.replace("/messages", "/account")}</code> returns the account it belongs to.
+            {" "}<code>phone</code> is the full number in any format (<code>+1 555 123 4567</code> works) — Gakai uses the existing chat, or starts a new one if the number is on WhatsApp. For a group, send <code>chatId</code> instead. <code>GET {SEND_PATH.replace("/messages", "/account")}</code> returns the account a token belongs to. To fill an account dropdown, tick <b>Read accounts</b> on the token and <code>GET {SEND_PATH.replace("/messages", "/accounts")}</code> lists every account's id, name, number and status.
           </small>
           {sampleAccountId && <CopyId id={sampleAccountId}/>}
         </div>
