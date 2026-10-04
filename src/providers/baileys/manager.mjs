@@ -13,6 +13,7 @@ import QRCode from 'qrcode';
 import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { openStore } from './store.mjs';
+import { quotedForSend } from './quote.mjs';
 import { isReadElsewhere } from '../../domain/unread.mjs';
 import { createMediaStore } from './media.mjs';
 import { freshPictureUrl, createPictureRefresher } from './picture.mjs';
@@ -20,7 +21,7 @@ import { createBoundedCache } from '../../lib/lru-cache.mjs';
 import { planMessageDelete, keysFromDeleteEvent, chatDeleteRange } from '../../domain/message-delete.mjs';
 import { isDisplayableConversation } from '../../domain/jid.mjs';
 import { resolveConversationIdentity } from '../../domain/identity.mjs';
-import { messageView, chatOverview as domainChatOverview, reactionView, revokeView, editView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
+import { thumbnailOfRawMessage, messageView, chatOverview as domainChatOverview, reactionView, revokeView, editView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
 const RECONNECT_DELAY_MS = 3000;
 // Avatar upkeep: shortly after an account connects, then on a fixed interval.
@@ -379,7 +380,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     // Send to (and store under) the canonical phone-JID chat, even if the
     // caller still holds a LID id for this conversation.
     const target = canonicalChatId(accountId, chatId);
-    const quoted = quotedMessageId ? store.getMessageById(accountId, target, quotedMessageId) : null;
+    const quoted = quotedMessageId ? quotedForSend(store.getMessageById(accountId, target, quotedMessageId)) : null;
     const content = Array.isArray(mentions) && mentions.length ? { text, mentions } : { text };
     const sent = await sock.sendMessage(target, content, quoted ? { quoted } : undefined);
     learnFromKey(accountId, sent?.key);
@@ -403,7 +404,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     const { sock } = requireSocket(accountId);
     if (!buffer || !buffer.length) throw Object.assign(new Error('No file data received'), { status: 400 });
     const target = canonicalChatId(accountId, chatId);
-    const quoted = quotedMessageId ? store.getMessageById(accountId, target, quotedMessageId) : null;
+    const quoted = quotedMessageId ? quotedForSend(store.getMessageById(accountId, target, quotedMessageId)) : null;
     const resolvedKind = mediaKindFor(mimetype, kind);
     const trimmedCaption = caption ? String(caption).slice(0, 1024) : '';
     let content;
@@ -690,6 +691,14 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     chatId = canonicalChatId(accountId, chatId);
     const rows = store.getMessagesPage(accountId, chatId, { limit, before });
     const views = rows.map(raw => messageView(raw, { accountId, chatId }));
+    // A reply Gakai sent before quotes were stored correctly can carry a garbled thumbnail (dropped by
+    // the view); the original message still has the real one.
+    for (const view of views) {
+      if (!view.replyTo?.hasMedia || view.replyTo.thumbnail || !view.replyTo.id) continue;
+      const original = store.getMessageById(accountId, chatId, view.replyTo.id);
+      const thumbnail = original ? thumbnailOfRawMessage(original) : null;
+      if (thumbnail) view.replyTo = { ...view.replyTo, thumbnail };
+    }
     if (downloadMedia) await hydrateMedia(accountId, chatId, rows, views);
     const starred = store.starredMessageIds(accountId);
     return views.map(view => withReaction(accountId, view, starred));

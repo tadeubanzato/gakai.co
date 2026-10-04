@@ -286,10 +286,17 @@ function mmss(seconds) {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
 
+// Only a real JPEG becomes a thumbnail; anything else (a stored copy whose bytes were garbled)
+// is left out so the reply box never shows a broken image.
+function jpegThumbnail(bytes) {
+  const uri = base64Thumbnail(bytes);
+  return uri && Buffer.from(uri.slice('data:image/jpeg;base64,'.length), 'base64').subarray(0, 2).equals(Buffer.from([0xff, 0xd8])) ? uri : null;
+}
+
 function quotedSummary(type, content) {
   const text = type ? bodyTextFor(type, content) : '';
   const inner = type === 'documentWithCaptionMessage' ? content?.message?.documentMessage : content;
-  const thumbnail = base64Thumbnail(inner?.jpegThumbnail);
+  const thumbnail = jpegThumbnail(inner?.jpegThumbnail);
   switch (type) {
     case 'imageMessage': return { kind: 'image', label: '📷 Photo', caption: text, thumbnail };
     case 'videoMessage': return content?.gifPlayback
@@ -304,10 +311,19 @@ function quotedSummary(type, content) {
     case 'extendedTextMessage': {
       // A shared link/post: lead with the page's title when it has one, the address underneath.
       const title = String(content?.title || '').trim();
-      return title ? { kind: 'link', label: `🔗 ${title}`, caption: text, thumbnail: base64Thumbnail(content?.jpegThumbnail) } : { kind: 'text', label: text, caption: '', thumbnail: null };
+      return title ? { kind: 'link', label: `🔗 ${title}`, caption: text, thumbnail: jpegThumbnail(content?.jpegThumbnail) } : { kind: 'text', label: text, caption: '', thumbnail: null };
     }
     default: return { kind: type ? 'text' : 'unknown', label: text, caption: '', thumbnail: null };
   }
+}
+
+// The thumbnail of a stored raw message itself — used to repair a quote whose own copy was garbled.
+export function thumbnailOfRawMessage(raw) {
+  const content = normalizeMessageContent(raw?.message) || {};
+  const type = getContentType(content);
+  const body = type ? content[type] : null;
+  const inner = type === 'documentWithCaptionMessage' ? body?.message?.documentMessage : body;
+  return jpegThumbnail(inner?.jpegThumbnail);
 }
 
 function replyView(contextInfo, accountId, chatId) {
