@@ -862,8 +862,12 @@ video.media{background:#000}
 /* Logo: the Gakai mascot lockup, nothing else. The artwork has its own dark backdrop, so it is
    blended with `lighten` — the sidebar colour shows through where the artwork is darker than it. */
 .sidebar .logo{align-items:center}
-.logo-mark{display:block;flex:none;width:132px;height:auto;object-fit:contain;user-select:none;mix-blend-mode:lighten}
+.logo-mark{display:block;flex:none;width:108px;height:auto;object-fit:contain;user-select:none;mix-blend-mode:lighten}
 @media (min-width:721px){
+  /* Expanded: the lockup is centred in the full sidebar width; the collapse button floats at the corner. */
+  .app:not(.sidebar-collapsed) .sidebar-head{position:relative;justify-content:center}
+  .app:not(.sidebar-collapsed) .sidebar-head .logo{flex:1;display:flex;justify-content:center;padding-left:0;padding-right:0}
+  .app:not(.sidebar-collapsed) .sidebar-toggle{position:absolute;top:0;right:0}
   .sidebar-collapsed .sidebar-head,.sidebar-collapsed .sidebar-head .logo{width:100%}
   .sidebar-collapsed .sidebar-head .logo{justify-content:center;box-sizing:border-box;padding:8px 0 12px;border-radius:10px;cursor:pointer}
   .sidebar-collapsed .sidebar-head .logo:hover{background:var(--soft)}
