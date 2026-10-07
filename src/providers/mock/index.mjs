@@ -8,7 +8,8 @@
  * production code ever touches.
  */
 import { chatOverview as domainChatOverview } from '../../domain/message.mjs';
-import { isDisplayableConversation } from '../../domain/jid.mjs';
+import { isDisplayableConversation, classifyJid, JID_KIND } from '../../domain/jid.mjs';
+import { groupInfoView, personInfoView } from '../../domain/chat-info.mjs';
 import { pageConversations } from '../../domain/conversation-list.mjs';
 
 export function createMockProvider({ onEvent } = {}) {
@@ -142,6 +143,21 @@ export function createMockProvider({ onEvent } = {}) {
     return { isNew: !existing, ...domainChatOverview(chatsFor(accountId).get(jid)) };
   }
   function resolveLid(accountId, lid) { return lid; }
+  const chatDetails = new Map(); // accountId -> Map(chatId -> { about, business, group: { subject, desc, ... } })
+  async function getChatInfo(accountId, chatId) {
+    const kind = classifyJid(chatId);
+    if (kind !== JID_KIND.INDIVIDUAL && kind !== JID_KIND.GROUP) throw Object.assign(new Error('Details are only available for people and groups'), { status: 400 });
+    const details = chatDetails.get(accountId)?.get(chatId) || {};
+    if (kind === JID_KIND.GROUP) {
+      if (!details.group) throw Object.assign(new Error("Details aren't available for this group"), { status: 404 });
+      const people = new Map((groupParticipantsFor(accountId).get(chatId) || []).map(person => [person.id, person]));
+      const describe = rawId => { const person = people.get(rawId); return { id: rawId, number: rawId.split('@')[0], name: person?.name || `+${rawId.split('@')[0]}`, isMe: Boolean(details.group.me && rawId === details.group.me) }; };
+      return groupInfoView({ id: chatId, ...details.group, participants: details.group.participants || [] }, describe, details.picture || null);
+    }
+    const contact = contactsFor(accountId).get(chatId);
+    return personInfoView({ id: chatId, name: contact?.name, phone: contact?.phone || chatId.split('@')[0], picture: details.picture || contact?.picture, about: details.about, business: details.business });
+  }
+  function seedChatDetails(accountId, chatId, details) { if (!chatDetails.has(accountId)) chatDetails.set(accountId, new Map()); chatDetails.get(accountId).set(chatId, details); }
   async function getGroupParticipants(accountId, chatId) { return [...(groupParticipantsFor(accountId).get(chatId) || [])]; }
 
   // Mirrors the real Baileys manager's contract: getChatsOverview always
@@ -238,10 +254,10 @@ export function createMockProvider({ onEvent } = {}) {
     sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState,
     setMessageStar, getStarredMessages, setBlocked, setDisappearing,
     subscribePresence, publishPresence,
-    getContact, getContacts, resolveLid, getGroupParticipants,
+    getContact, getContacts, resolveLid, getGroupParticipants, getChatInfo,
     checkOnWhatsApp, startConversation,
     getChatsOverview, getChatsPage, getMessages, getMessage, downloadMedia,
     shutdown,
-    __test: { seedAccount, seedChat, seedMessage, seedContact, seedWhatsAppNumber, seedGroupParticipants, simulateIncomingMessage, getSentMessages, getReaction },
+    __test: { seedAccount, seedChat, seedMessage, seedContact, seedWhatsAppNumber, seedGroupParticipants, seedChatDetails, simulateIncomingMessage, getSentMessages, getReaction },
   };
 }
