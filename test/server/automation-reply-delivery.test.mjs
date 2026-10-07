@@ -4,8 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// Ground truth for this feature: an automation (the Gakai-managed n8n
-// templates, or any hand-authored webhook) responds synchronously to the
+// Ground truth for this feature: an automation webhook responds synchronously to the
 // SAME request Gakai made to deliver the event, and Gakai sends that reply
 // to WhatsApp itself — no separate outbound call from the automation back
 // into Gakai's own API, and so no host/URL for it to get wrong.
@@ -29,7 +28,7 @@ test('sendAutomationReply sends the "reply" field from the automation\'s respons
   assert.equal(sent[0].text, 'Hi there!');
 });
 
-test('sendAutomationReply also accepts "text" or "output" as the field name (n8n Respond to Webhook / AI Agent shapes)', async () => {
+test('sendAutomationReply also accepts "text" or "output" as the field name (common webhook response shapes)', async () => {
   await sendAutomationReply(jsonResponse({ text: 'via text field' }), 'account-2', 'chat-2@s.whatsapp.net');
   await sendAutomationReply(jsonResponse({ output: 'via output field' }), 'account-2', 'chat-2@s.whatsapp.net');
   const sent = provider.__test.getSentMessages().filter(call => call.accountId === 'account-2');

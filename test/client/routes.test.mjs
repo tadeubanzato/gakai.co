@@ -12,7 +12,7 @@ test('the home page, the settings page and a profile page are told apart', () =>
 
 test('a profile page can name a tab; an unknown tab falls back to the first', () => {
   assert.equal(parseRoute('/profile-settings/tadeu/ai').tab, 'ai');
-  assert.equal(parseRoute('/profile-settings/tadeu/automation').tab, 'automation');
+  assert.equal(parseRoute('/profile-settings/tadeu/automation').tab, 'connection', 'the removed Automation tab falls back to the first');
   assert.equal(parseRoute('/profile-settings/tadeu/voices').tab, 'voices');
   assert.deepEqual(parseRoute('/profile-settings/tadeu/people'), { view: 'profile', slug: 'tadeu', tab: 'voices', legacy: true }, 'the old Who to reply to tab now lives in AI Voice and Tone, and the address gets rewritten');
   assert.equal(parseRoute('/profile-settings/tadeu/nonsense').tab, 'connection');
@@ -33,7 +33,7 @@ test('profilePath builds the address, leaving the default tab out', () => {
   assert.equal(profilePath('tadeu'), '/profile-settings/tadeu');
   assert.equal(profilePath('tadeu', 'connection'), '/profile-settings/tadeu');
   assert.equal(profilePath('tadeu', 'ai'), '/profile-settings/tadeu/ai');
-  assert.deepEqual(parseRoute(profilePath('tadeu', 'automation')), { view: 'profile', slug: 'tadeu', tab: 'automation' });
+  assert.deepEqual(parseRoute(profilePath('tadeu', 'voices')), { view: 'profile', slug: 'tadeu', tab: 'voices' });
 });
 
 test('an account is addressed by its name, and by its id when names would clash or are unusable', () => {

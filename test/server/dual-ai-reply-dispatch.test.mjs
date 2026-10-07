@@ -33,41 +33,13 @@ async function dispatchMessage(accountId, messageId, overrides = {}) {
   });
 }
 
-test('native LLM reply fires when no agentic n8n automation is enabled for the account', async () => {
-  const accountId = 'no-n8n-account';
+test('native LLM reply fires for a listed number', async () => {
+  const accountId = 'native-account';
   store.llmConfigs.push(llmConfigFor(accountId));
 
   const before = llmHits;
   await dispatchMessage(accountId, 'msg-1');
-  assert.equal(llmHits, before + 1, 'native LLM must be dispatched when nothing else is handling AI replies for this account');
-});
-
-test('native LLM reply takes precedence over a stale enabled n8n AI Agent automation', async () => {
-  const accountId = 'has-n8n-account';
-  store.llmConfigs.push(llmConfigFor(accountId));
-  store.automationSubscriptions.push({
-    id: 'agentic-sub', accountId, name: 'n8n auto-connect (AI Agent)',
-    url: 'https://127.0.0.1:1/webhook/unused', productionUrl: 'https://127.0.0.1:1/webhook/unused', testUrl: null, testPhone: null,
-    enabled: true, events: ['message.received'], secret: 'unused', createdAt: new Date().toISOString(), lastDelivery: null,
-  });
-
-  const before = llmHits;
-  await dispatchMessage(accountId, 'msg-2');
-  assert.equal(llmHits, before + 1, 'native mode must bypass the stale n8n AI Agent subscription');
-});
-
-test('a disabled n8n AI Agent automation does not suppress the native LLM reply', async () => {
-  const accountId = 'disabled-n8n-account';
-  store.llmConfigs.push(llmConfigFor(accountId));
-  store.automationSubscriptions.push({
-    id: 'agentic-sub-disabled', accountId, name: 'n8n auto-connect (AI Agent)',
-    url: 'https://127.0.0.1:1/webhook/unused', productionUrl: 'https://127.0.0.1:1/webhook/unused', testUrl: null, testPhone: null,
-    enabled: false, events: ['message.received'], secret: 'unused', createdAt: new Date().toISOString(), lastDelivery: null,
-  });
-
-  const before = llmHits;
-  await dispatchMessage(accountId, 'msg-3');
-  assert.equal(llmHits, before + 1, 'only an enabled AI Agent automation should suppress native replies');
+  assert.equal(llmHits, before + 1, 'native LLM must be dispatched for a listed number');
 });
 
 test('a "message" event with no body, text, or media is not dispatched to native AI reply', async () => {

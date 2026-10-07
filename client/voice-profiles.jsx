@@ -69,7 +69,7 @@ export function VoiceProfilesPanel({ base, data, llm, onLlmSaved, onOpenAi, onCh
     const users = usage(voice.id);
     const confirmed = await confirmDialog({
       title: `Delete the ${voice.name} voice?`,
-      message: users ? `${users} ${users === 1 ? "person or group uses" : "people and groups use"} it. They will go back to the default instructions.` : "This can't be undone.",
+      message: users ? `${users} ${users === 1 ? "person or group uses" : "people and groups use"} it. They will go back to Gakai's basic reply style.` : "This can't be undone.",
       confirmLabel: "Delete voice", danger: true,
     });
     if (!confirmed) return;
@@ -159,7 +159,7 @@ export function VoiceProfilesPanel({ base, data, llm, onLlmSaved, onOpenAi, onCh
         <div className="voice-card-head">
           <div className="voice-card-info">
             <b>{voices.length ? "Everyone else" : "Who should the AI reply to?"}</b>
-            <small>{voices.length ? "No voice chosen, so they get your default instructions (AI responses tab)" : "Create a voice above to answer different people differently. Until then everyone gets your default instructions."}</small>
+            <small>{voices.length ? "No voice chosen, so they get Gakai's basic reply style. Move them into a voice to control it" : "Create a voice above to answer different people differently. Until then everyone gets Gakai's basic reply style."}</small>
           </div>
         </div>
         <div className="voice-card-body">{people(fallback, "everyone else", "No one yet")}</div>

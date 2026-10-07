@@ -28,7 +28,7 @@ const setup = await fetch(`${base}/api/app/auth/setup`, {
 });
 const cookie = setup.headers.get('set-cookie').split(';')[0];
 
-test('saving an LLM config with no system prompt does not persist the placeholder phone-number gate', async () => {
+test('an AI config stores no account-wide instructions: voices are the only instructions', async () => {
   const accountId = 'prompt-test-account';
   const response = await fetch(`${base}/api/app/accounts/${accountId}/llm`, {
     method: 'POST', headers: { 'content-type': 'application/json', cookie },
@@ -38,6 +38,7 @@ test('saving an LLM config with no system prompt does not persist the placeholde
 
   const saved = store.llmConfigs.find(item => item.accountId === accountId);
   assert.ok(saved, 'the config must have been persisted');
-  assert.doesNotMatch(saved.systemPrompt, /approved phone numbers/i);
-  assert.doesNotMatch(saved.systemPrompt, /\+1555\d{7}/);
+  assert.equal('systemPrompt' in saved, false, 'a posted systemPrompt is ignored, not stored');
+  const shown = await (await fetch(`${base}/api/app/accounts/${accountId}/llm`, { headers: { cookie } })).json();
+  assert.equal('systemPrompt' in shown, false);
 });

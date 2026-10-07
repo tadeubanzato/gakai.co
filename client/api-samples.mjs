@@ -8,7 +8,7 @@ export const ACCOUNT_PLACEHOLDER = "YOUR_ACCOUNT_ID";
 // account in the body is a safety check that fails loudly if the wrong token is used.
 const bodyFor = accountId => ({ accountId: accountId || ACCOUNT_PLACEHOLDER, phone: "15551234567", text: "Hello from Gakai" });
 
-// The request body on its own — for n8n's HTTP Request node or any HTTP client.
+// The request body on its own — for any HTTP client.
 export const jsonSample = accountId => JSON.stringify(bodyFor(accountId), null, 2);
 
 // A complete command: this server's address, the Authorization header, the body.

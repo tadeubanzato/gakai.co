@@ -34,11 +34,11 @@ test('only the signed-in administrator can manage tokens', async () => {
 });
 
 test('creating a token shows the secret once, and listing never shows it again', async () => {
-  const created = await manage('POST', '', { name: '  n8n  ', scopes: ['messages:send'] });
+  const created = await manage('POST', '', { name: '  crm  ', scopes: ['messages:send'] });
   assert.equal(created.status, 201);
   const { key, token } = await created.json();
   assert.match(token, /^wh_live_/);
-  assert.deepEqual({ name: key.name, scopes: key.scopes, last4: key.last4 }, { name: 'n8n', scopes: ['messages:send'], last4: token.slice(-4) });
+  assert.deepEqual({ name: key.name, scopes: key.scopes, last4: key.last4 }, { name: 'crm', scopes: ['messages:send'], last4: token.slice(-4) });
 
   const listed = await (await manage('GET', '')).json();
   const row = listed.keys.find(item => item.id === key.id);
@@ -173,13 +173,6 @@ test('a token belongs to one account: it sends from that account only, and anoth
   assert.equal(sentMessages()[before].accountId, ACCOUNT);
   assert.equal((await fetch(keysUrl(`/${key.id}/regenerate`, other), { method: 'POST', headers: { cookie } })).status, 404, 'the other account cannot rotate it');
   assert.equal((await (await fetch(keysUrl('', other), { headers: { cookie } })).json()).keys.length, 0, 'nor see it');
-});
-
-test('the key Gakai manages for n8n auto-connect is not listed or rotatable here', async () => {
-  const internal = await (await manage('POST', '/n8n')).json();
-  assert.ok(internal.token);
-  const listed = (await (await manage('GET', '')).json()).keys;
-  assert.equal(listed.some(item => item.name === 'n8n integration'), false);
 });
 
 test('an account is limited to 20 tokens', async () => {
@@ -338,9 +331,6 @@ test('copying is for the signed-in administrator and that account\'s own tokens 
   provider.__test.seedAccount(other);
   assert.equal((await copyToken(key.id, other)).status, 404, 'another account');
   assert.equal((await copyToken('does-not-exist')).status, 404);
-  await manage('POST', '/n8n');
-  const internal = store.keys.find(item => item.accountId === ACCOUNT && item.name === 'n8n integration');
-  assert.equal((await copyToken(internal.id)).status, 404, 'the key Gakai manages for n8n is not copyable here');
 });
 
 test('deleting a token removes its stored copy with it', async () => {
@@ -362,7 +352,6 @@ test('the workspace token list spans every profile and says which profile each t
   assert.equal(listed.find(item => item.id === a.key.id).accountId, ACCOUNT);
   assert.equal(listed.find(item => item.id === b.key.id).accountId, second);
   assert.equal(JSON.stringify(listed).includes(a.token), false, 'still never the secret');
-  assert.equal(listed.some(item => item.name === 'n8n integration'), false, 'nor Gakai\'s own n8n key');
 });
 
 test('a token can be created from the workspace page for a chosen profile, and it sends from that profile', async () => {
