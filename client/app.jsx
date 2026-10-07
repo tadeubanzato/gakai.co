@@ -11,6 +11,7 @@ import{AiProviderFields}from"./ai-responses.jsx";
 import{WorkspaceSettings}from"./workspace-settings.jsx";
 import{VoiceProfilesPanel}from"./voice-profiles.jsx";
 import{parseRoute,profilePath,accountSlug,findAccountBySlug}from"./routes.mjs";
+import{rememberChat,recallChat,pickChat}from"./last-chat.mjs";
 
 const maskSecret=(length,last4)=>last4?`${"•".repeat(Math.max(0,Number(length||0)-String(last4).length))}${last4}`:"Saved — leave blank to keep";
 
@@ -305,7 +306,7 @@ function App(){
       // A working inbox should open on a useful conversation, not a blank
       // "Select a conversation" placeholder. Keep the reader's existing chat
       // selected during refreshes, otherwise open the newest one.
-      setChat(current=>{if(current)return next.find(item=>item.id===current.id);if(suppressAutoSelectRef.current)return undefined;if(next[0])autoPickedRef.current=true;return next[0]});
+      setChat(current=>{if(current)return next.find(item=>item.id===current.id);if(suppressAutoSelectRef.current)return undefined;const picked=pickChat(next,id);if(picked)autoPickedRef.current=true;return picked});
       hydratePictures(id,version,next);
     }catch(x){if(chatsRequestRef.current===version)fail(x.message)}finally{if(chatsRequestRef.current===version)setChatsLoading(false)}
   },[fail,hydratePictures]);
@@ -447,8 +448,9 @@ function App(){
   const handleChatClick=useCallback(chatItem=>{
     suppressAutoSelectRef.current=false;
     setAutoOpened(false);
+    rememberChat(account?.id,chatItem?.id);
     setChat(chatItem);
-  },[]);
+  },[account?.id]);
   const handleSeen=useCallback(async(chatId,through)=>{
     if(!account)return;
     const version=(readVersionRef.current.get(chatId)||0)+1;
@@ -619,6 +621,7 @@ function App(){
       return next;
     });
     setChat(current=>current?.id===chatId?undefined:current);
+    if(account&&recallChat(account.id)===chatId)rememberChat(account.id,null);
     fail("Conversation deleted");
   },[account,fail]);
 
