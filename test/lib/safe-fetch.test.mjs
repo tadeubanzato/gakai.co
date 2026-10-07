@@ -27,7 +27,7 @@ test('validatePublicUrl rejects a hostname where any resolved address is private
   assert.equal(await validatePublicUrl('https://mixed.example/', { lookupImpl }), null);
 });
 
-test('validatePublicUrl requireHttps rejects http even for a public address (n8n webhook rigor)', async () => {
+test('validatePublicUrl requireHttps rejects http even for a public address (webhook rigor)', async () => {
   const lookupImpl = async () => [{ address: '93.184.216.34' }];
   assert.equal(await validatePublicUrl('http://example.com/webhook', { requireHttps: true, lookupImpl }), null);
   assert.ok(await validatePublicUrl('https://example.com/webhook', { requireHttps: true, lookupImpl }));

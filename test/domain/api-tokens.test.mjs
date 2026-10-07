@@ -10,7 +10,7 @@ test('a new token is long, unguessable, prefixed, and different every time', () 
 });
 
 test('a token request needs a name and defaults to the least privilege (send only)', () => {
-  assert.deepEqual(validateTokenRequest({ name: '  n8n  ' }), { name: 'n8n', scopes: ['messages:send'] });
+  assert.deepEqual(validateTokenRequest({ name: '  crm  ' }), { name: 'crm', scopes: ['messages:send'] });
   assert.deepEqual(validateTokenRequest({ name: 'CRM', scopes: ['messages:read', 'messages:send', 'messages:send'] }), { name: 'CRM', scopes: ['messages:read', 'messages:send'] });
   assert.match(validateTokenRequest({ name: '   ' }).error, /name/i);
   assert.match(validateTokenRequest({ name: 'x'.repeat(81) }).error, /80/);
@@ -23,8 +23,8 @@ test('unknown or empty permissions are refused, so a token can never grant more 
 });
 
 test('publicToken never exposes the secret or its hash', () => {
-  const shown = publicToken({ id: 'k1', name: 'n8n', scopes: ['messages:send'], createdAt: 'c', lastUsedAt: null, last4: 'wxyz', hash: 'secret-hash', token: 'wh_live_secret' });
-  assert.deepEqual(shown, { id: 'k1', accountId: null, name: 'n8n', scopes: ['messages:send'], createdAt: 'c', lastUsedAt: null, rotatedAt: null, last4: 'wxyz', copyable: false, copyableUntil: null });
+  const shown = publicToken({ id: 'k1', name: 'crm', scopes: ['messages:send'], createdAt: 'c', lastUsedAt: null, last4: 'wxyz', hash: 'secret-hash', token: 'wh_live_secret' });
+  assert.deepEqual(shown, { id: 'k1', accountId: null, name: 'crm', scopes: ['messages:send'], createdAt: 'c', lastUsedAt: null, rotatedAt: null, last4: 'wxyz', copyable: false, copyableUntil: null });
   assert.equal(JSON.stringify(shown).includes('secret'), false);
 });
 
@@ -102,7 +102,7 @@ test('pruneExpiredTokens deletes the stored token of expired keys only', () => {
 });
 
 test('publicToken reports copyability but never the stored token', () => {
-  const key = { id: 'k', name: 'n8n', scopes: ['messages:send'], createdAt: issued, last4: 'wxyz', tokenEnc: 'cipher-secret', hash: 'h' };
+  const key = { id: 'k', name: 'crm', scopes: ['messages:send'], createdAt: issued, last4: 'wxyz', tokenEnc: 'cipher-secret', hash: 'h' };
   const open = publicToken(key, at(HOUR));
   assert.equal(open.copyable, true);
   assert.equal(open.copyableUntil, new Date(at(24 * HOUR)).toISOString());

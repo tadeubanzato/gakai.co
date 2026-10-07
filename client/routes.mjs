@@ -6,7 +6,7 @@
 //   /settings                      workspace settings: accounts, sign-in, API tokens
 //   /profile-settings/<name>       one WhatsApp account (profile); optional /<tab>
 //   /details/<name>                the old address — still understood, redirected
-export const ACCOUNT_TABS = ["connection", "ai", "voices", "automation"];
+export const ACCOUNT_TABS = ["connection", "ai", "voices"];
 // Tabs that were merged into another keep working from old links and bookmarks.
 const RENAMED_TABS = { people: "voices" };
 export const DEFAULT_ACCOUNT_TAB = "connection";

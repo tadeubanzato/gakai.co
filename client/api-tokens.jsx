@@ -66,7 +66,7 @@ function CopyTokenButton({ base, token, onNotice, onExpired }) {
 const accountBase = id => `/api/app/accounts/${encodeURIComponent(id)}`;
 
 // Application tokens (Settings): one per system that sends WhatsApp messages through
-// Gakai's API (n8n, a CRM, a script). For now each token names the one WhatsApp
+// Gakai's API (a CRM, a gateway, a script). For now each token names the one WhatsApp
 // profile it sends from. It can be copied for 24 hours, then regenerated or deleted
 // at any time. The card also carries the request to copy and paste.
 export function ApiTokensCard({ accounts, onNotice }) {
@@ -160,7 +160,7 @@ export function ApiTokensCard({ accounts, onNotice }) {
             <svg className="profile-chevron" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg>
           </button>
         </h3>
-        <p>Let other systems — n8n, a CRM, a script — send WhatsApp messages through the Gakai API.</p>
+        <p>Let other systems — a CRM, a gateway, a script — send WhatsApp messages through the Gakai API.</p>
       </div>
       <span className="token-count">{tokens === null ? "…" : `${count} ${count === 1 ? "token" : "tokens"}`}</span>
     </div>

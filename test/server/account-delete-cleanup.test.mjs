@@ -28,8 +28,8 @@ test('deleting an account removes its integration keys and message reactions, no
   provider.__test.seedAccount(accountId);
   provider.__test.seedMessage(accountId, 'demo@s.whatsapp.net', { id: 'demo-message', timestamp: Math.floor(Date.now() / 1000), fromMe: false, body: 'hi', text: 'hi', hasMedia: false });
 
-  const keyResponse = await fetch(`${base}/api/app/accounts/${accountId}/integration-keys/n8n`, { method: 'POST', headers: authed() });
-  assert.equal(keyResponse.status, 200);
+  const keyResponse = await fetch(`${base}/api/app/accounts/${accountId}/integration-keys`, { method: 'POST', headers: authed(), body: JSON.stringify({ name: 'crm', scopes: ['messages:send'] }) });
+  assert.equal(keyResponse.status, 201);
 
   const reactionResponse = await fetch(`${base}/api/app/accounts/${accountId}/messages/demo-message/reaction`, {
     method: 'POST', headers: authed(), body: JSON.stringify({ reaction: '\u{1F44D}' }),

@@ -1,6 +1,6 @@
 # Gakai API reference
 
-How another system — n8n, a CRM, a gateway, a script — talks to Gakai over HTTP. Everything here
+How another system — a CRM, a gateway, a script — talks to Gakai over HTTP. Everything here
 is under `/api/integrations/v1/` and authenticated with an **application token**.
 
 The browser dashboard uses a separate set of routes (`/api/app/…`) behind the administrator
@@ -87,7 +87,7 @@ curl https://your-gakai-host/api/integrations/v1/account \
 ```json
 {
   "account": { "id": "account-mtc6my6d", "label": "Tadeu", "phone": "18577075969", "status": "WORKING" },
-  "token":   { "name": "n8n", "scopes": ["messages:send", "messages:read"] }
+  "token":   { "name": "crm", "scopes": ["messages:send", "messages:read"] }
 }
 ```
 

@@ -25,7 +25,7 @@ process.env.HOME_DATA_DIR = scratch;
 process.env.PORT = '0';
 process.env.GAKAI_PROVIDER_KIND = 'mock';
 
-const { server, store, provider, dispatchAutomationEvent } = await import('../../server.mjs');
+const { server, store, provider, dispatchAutomationEvent, replyInstructions } = await import('../../server.mjs');
 after(() => { server.close(); mockLlm.close(); });
 if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
@@ -128,7 +128,7 @@ const incoming = async (chatId, extra = {}) => {
   return seen.slice(before)[0]?.[0]?.content ?? null;   // the system message the model received
 };
 
-test('each person and group is answered in the voice chosen for them, and everyone else in the default', async () => {
+test('each person and group is answered in the voice chosen for them, and everyone else in the built-in basic style', async () => {
   const mom = (await (await call('POST', '', { yaml: MOM })).json()).voice;
   const friends = (await (await call('POST', '', { yaml: FRIENDS })).json()).voice;
   await enableAi({ numbers: ['18577075969', '5511999777057', '15551230000'], groups: [GROUP] });
@@ -142,7 +142,7 @@ test('each person and group is answered in the voice chosen for them, and everyo
   assert.match(toFriend, /Close friends/);
   assert.equal(toFriend.includes('My mother'), false, 'a friend never gets the mom voice');
   const toStranger = await incoming('15551230000@s.whatsapp.net');
-  assert.match(toStranger, /WhatsApp assistant/, 'no voice chosen: the account default instructions');
+  assert.match(toStranger, /WhatsApp assistant/, 'no voice chosen: the built-in basic style');
   const inGroup = await incoming(GROUP, { mentionedJids: ['18577075969@s.whatsapp.net'] });
   assert.match(inGroup, /replying because the owner was tagged/);
   assert.match(inGroup, /Who you are talking to: My mother/);
@@ -158,7 +158,7 @@ test('a voice that does not exist is never saved as a choice, and deleting a voi
   assert.equal((await incoming('18577075969@s.whatsapp.net')).includes('Voice: warm'), true);
   await call('DELETE', `/${voice.id}`);
   assert.equal('assignments' in store.llmConfigs.find(item => item.accountId === ACCOUNT).replyRules, false, 'the choice is released');
-  assert.match(await incoming('18577075969@s.whatsapp.net'), /WhatsApp assistant/, 'back to the default instructions');
+  assert.match(await incoming('18577075969@s.whatsapp.net'), /WhatsApp assistant/, 'back to the built-in basic style');
 });
 
 test('deleting an account removes its voices', async () => {
@@ -168,4 +168,34 @@ test('deleting an account removes its voices', async () => {
   assert.equal(store.voiceProfiles.some(item => item.accountId === gone), true);
   await fetch(`${base}/api/app/accounts/${gone}`, { method: 'DELETE', headers: { cookie } });
   assert.equal(store.voiceProfiles.some(item => item.accountId === gone), false);
+});
+
+const clearVoices = async () => { for (const voice of (await list()).voices) await call('DELETE', `/${voice.id}`); };
+
+test('the instructions for a conversation are its voice, and the built-in basic style only when none is chosen', async () => {
+  await clearVoices();
+  const mom = (await (await call('POST', '', { yaml: MOM })).json()).voice;
+  await enableAi({ numbers: ['18577075969', '15551230000'], groups: [GROUP] });
+  await putRules({ numbers: ['18577075969', '15551230000'], groups: [GROUP], assignments: { '18577075969': mom.id, [GROUP]: mom.id } });
+  const event = (chatId, extra = {}) => ({ chat: { id: chatId, kind: chatId.endsWith('@g.us') ? 'group' : 'direct', ...extra } });
+
+  assert.match(replyInstructions(ACCOUNT, event('18577075969@s.whatsapp.net')), /Who you are talking to: My mother/);
+  assert.match(replyInstructions(ACCOUNT, event(GROUP)), /replying because the owner was tagged/);
+  assert.match(replyInstructions(ACCOUNT, event('15551230000@s.whatsapp.net')), /WhatsApp assistant/, 'nobody chose a voice for them: the built-in basic style');
+  await call('DELETE', `/${mom.id}`);
+});
+
+test('the settings test message uses the voice chosen for the number it is sent to', async () => {
+  await clearVoices();
+  const mom = (await (await call('POST', '', { yaml: MOM })).json()).voice;
+  await enableAi({ numbers: ['18577075969'], groups: [] });
+  await putRules({ numbers: ['18577075969'], groups: [], assignments: { '18577075969': mom.id } });
+  const test = phone => fetch(`${base}/api/app/accounts/${ACCOUNT}/llm/test`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ prompt: 'hi', phone }) });
+  let before = seen.length;
+  assert.equal((await test('+1 857 707 5969')).status, 200);
+  assert.match(seen.slice(before)[0][0].content, /Who you are talking to: My mother/);
+  before = seen.length;
+  assert.equal((await test('')).status, 200);
+  assert.match(seen.slice(before)[0][0].content, /WhatsApp assistant/, 'no number: the built-in basic style');
+  await call('DELETE', `/${mom.id}`);
 });

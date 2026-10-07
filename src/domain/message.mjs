@@ -143,8 +143,8 @@ export function resolveMentionLabels(text, labels) {
 }
 
 // Whether a message's mentioned-JID list includes the account's own
-// identity — used to scope the Gakai-managed n8n reply automation to DMs and
-// explicit @-mentions in a group, never every message in every group.
+// identity — used to limit replies to DMs and explicit @-mentions in a group,
+// never every message in every group.
 // True when any mentioned JID is this account. `ownJid` carries a device
 // suffix (`<number>:<device>@s.whatsapp.net`) that a mention never has, and a
 // group may tag the account by its LID instead of its phone number, so the

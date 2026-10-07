@@ -79,8 +79,7 @@ There is no separate WhatsApp provider process to run, configure, or pull. Gakai
 | Inbox filters — all / unread / groups / archived / starred | ✅ Live |
 | Media relay (images, documents, voice notes) | ✅ Live |
 | Open Graph and Instagram link previews | ✅ Live |
-| n8n one-click automation connect | ✅ Live |
-| Native AI auto-replies — OpenAI-compatible proxy or n8n AI Agent | ✅ Live |
+| AI auto-replies — OpenAI-compatible proxy, Claude or ChatGPT, in a per-person voice | ✅ Live |
 | Webhook automation subscriptions | ✅ Live |
 | scrypt password hashing (salted) | ✅ Live |
 | Direct, in-process Baileys WhatsApp integration — no provider process | ✅ Live |
@@ -223,36 +222,21 @@ Sessions persist across restarts. If a session expires, the dashboard prompts yo
 Gakai includes a built-in automation gateway. Each WhatsApp account has its own
 settings page (`/profile-settings/<account name>`), reached from the **⚙ icon next to
 the account** or from **Settings** (the gear at the top right of Home) → **Manage**.
-It has four tabs: **Connection**, **AI responses**, **AI Voice and Tone** and **n8n Automation**. Workspace-wide
+It has three tabs: **Connection**, **AI responses** and **AI Voice and Tone**. Workspace-wide
 things — the WhatsApp accounts list (and **Add account**), your sign-in details and the
 application tokens — live on the **Settings** page (`/settings`).
 
-The n8n reply paths (the n8n reply template and the n8n AI Agent) only fire for
-messages you would need to act on personally — direct messages, and group
-messages where the account is explicitly **@-tagged** — not every message in
-every group.
+AI replies only fire for messages you would need to act on personally — direct messages from
+people you listed, and group messages in groups you listed where the account is explicitly
+**@-tagged** — not every message in every group.
 
-### Connect n8n in one click
-
-1. Open the account's settings (⚙) → **n8n Automation** tab
-2. Paste your n8n instance URL and API key, then **Save and verify**
-3. Gakai creates the credentials and a starter workflow in n8n automatically
-4. Incoming messages start flowing to your n8n workflow immediately
-5. Optionally toggle **Enable n8n replies** to have that workflow reply back through WhatsApp
-
-Works with both self-hosted n8n and n8n Cloud. Use **Send test message** to fire a
-simulated event at the workflow without messaging a real contact.
-
-### Native AI replies
+### AI replies
 
 1. Open the account's settings (⚙) → **AI responses** tab
 2. Pick a provider — **LiteLLM** (your own proxy URL + key), **Claude**, or **ChatGPT** (your API key) — and enter the key. Gakai asks the provider which models that key can use and fills the **Model** dropdown from the answer
-3. Choose how replies are generated (then shape them in the **AI Voice and Tone** tab, described below):
-   - **Enable native AI replies** — Gakai sends the incoming message straight to the proxy and returns its response through WhatsApp, no n8n involved
-   - **Enable n8n AI Agent replies** — Gakai builds/updates an AI Agent workflow in n8n and replies through that (requires n8n connected)
+3. Turn on **Enable AI replies** — Gakai sends each incoming message to your provider and returns its response through WhatsApp. Then shape the replies in the **AI Voice and Tone** tab, described below
 
-The three reply paths (n8n replies, n8n AI Agent, native AI) are mutually
-exclusive — turning one on turns the others off.
+Voice profiles are the only instructions the AI gets: whoever you list is answered by their voice alone.
 
 ### Voice profiles (how the AI sounds, per person)
 
@@ -267,7 +251,7 @@ together.
 2. Each voice has its own card. Add the people and groups it should answer right on the card — one
    search finds both, and anyone already on another voice shows "In Friends — move here", so each person
    has exactly one voice. The AI only answers who is listed. Anyone listed without a voice sits in an
-   **Everyone else** card and gets the **Default instructions** from the AI responses tab
+   **Everyone else** card and gets Gakai's short built-in reply style until you move them into a voice
 
 ```yaml
 name: Mom
@@ -296,12 +280,12 @@ are tagged, uses the profile's `groups:` settings, and never shares private deta
 
 ### Send a message from another system (API tokens)
 
-Any system that can make an HTTP request — n8n, a CRM, a gateway, a script — can use Gakai through its
+Any system that can make an HTTP request — a CRM, a gateway, a script — can use Gakai through its
 HTTP API. **The full reference — every endpoint, object, error and recipe — is in
 [docs/api.md](docs/api.md).** This is the short version.
 
 1. Open **Settings** (the gear at the top right of Home) and expand **Application tokens**
-2. Enter the application's name (for example `n8n`), pick the WhatsApp account it belongs to (shown when you have more than one), and click **Create token**. A new token can only send; tick more permissions on it afterwards if it needs them
+2. Enter the application's name (for example `crm`), pick the WhatsApp account it belongs to (shown when you have more than one), and click **Create token**. A new token can only send; tick more permissions on it afterwards if it needs them
 3. Click the copy icon beside the token. A token can be copied for **24 hours** after it is created or
    regenerated; after that Gakai keeps only a one-way fingerprint of it and it can never be copied again (it
    keeps working — **Regenerate** to get a new one). Create one token per application and per account, so you
@@ -411,7 +395,7 @@ All variables are optional. The launcher sets safe defaults automatically.
 
 | Variable | Default | Description |
 |---|---|---|
-| `GAKAI_STATE_SECRET` | _(auto-generated)_ | Encrypts sensitive values Gakai stores locally (e.g. a connected n8n instance's API key) |
+| `GAKAI_STATE_SECRET` | _(auto-generated)_ | Encrypts sensitive values Gakai stores locally (e.g. application tokens) |
 | `GAKAI_PORT` | `3000` | Host port Gakai listens on |
 | `GAKAI_BIND_ADDRESS` | `0.0.0.0` | Network interface (`127.0.0.1` for local-only) |
 | `GAKAI_PUBLIC_URL` | _(auto-detected)_ | Overrides the URL the launcher prints, for a reverse proxy or domain name |
@@ -509,7 +493,7 @@ The launcher rebuilds the Gakai image and restarts the container. Data in `home-
 | Password storage | scrypt + random salt, stored as hex hash — never plaintext |
 | Session tokens | 32-byte cryptographically random, `HttpOnly; SameSite=Strict` cookie |
 | Timing attacks | `timingSafeEqual` for all credential comparisons |
-| Stored secrets (e.g. a connected n8n API key) | Encrypted at rest with AES-256-GCM, keyed by `GAKAI_STATE_SECRET` |
+| Stored secrets (e.g. application tokens) | Encrypted at rest with AES-256-GCM, keyed by `GAKAI_STATE_SECRET` |
 | Automation webhook delivery | Authenticated with a per-subscription secret header (`x-gakai-secret`), HTTPS-only |
 | Media relay | Served only through Gakai's own on-demand endpoint (`/api/app/media`), never a raw provider URL; SSRF guard on external fetches |
 | Browser isolation | The browser never receives WhatsApp session credentials or talks to Baileys directly — only Gakai's own `/api/app/*` endpoints |
@@ -644,6 +628,6 @@ MIT © [Tadeu Banzato](https://github.com/tadeubanzato)
 <details>
 <summary>Search keywords</summary>
 
-self-hosted whatsapp · whatsapp workspace · whatsapp dashboard · whatsapp web client · whatsapp docker · whatsapp docker compose · whatsapp multi-account · whatsapp automation · whatsapp webhook · whatsapp n8n integration · whatsapp open source · whatsapp self-hosted server · whatsapp inbox · whatsapp team dashboard · whatsapp api gateway · self-hosted messaging · gakai
+self-hosted whatsapp · whatsapp workspace · whatsapp dashboard · whatsapp web client · whatsapp docker · whatsapp docker compose · whatsapp multi-account · whatsapp automation · whatsapp webhook · whatsapp open source · whatsapp self-hosted server · whatsapp inbox · whatsapp team dashboard · whatsapp api gateway · self-hosted messaging · gakai
 
 </details>
