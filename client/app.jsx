@@ -40,11 +40,10 @@ function Pairing({account,onLinked,onCancel}){
 }
 
 function Settings({account,tab,onTab,onAllSettings,onReconnect,onClose,onDeleted,onNotice,onRenamed}){
-  const[llm,setLlm]=useState(null),[n8n,setN8n]=useState(null),[voices,setVoices]=useState({voices:[],limit:5,templates:[]}),[busy,setBusy]=useState(false),[testModal,setTestModal]=useState(null),[testResult,setTestResult]=useState(null);
+  const[llm,setLlm]=useState(null),[voices,setVoices]=useState({voices:[],limit:5,templates:[]}),[busy,setBusy]=useState(false),[testModal,setTestModal]=useState(null),[testResult,setTestResult]=useState(null);
   const base="/api/app/accounts/"+encodeURIComponent(account.id);
   const llmFormRef=useRef(null);
-  const[n8nWorkflowId,setN8nWorkflowId]=useState("");
-  const refresh=useCallback(()=>Promise.all([api(base+"/llm"),api(base+"/n8n/connect"),api(base+"/voices")]).then(x=>{setLlm(x[0]);setN8n(x[1]);setVoices(x[2])}).catch(x=>onNotice(x.message)),[base,onNotice]);
+  const refresh=useCallback(()=>Promise.all([api(base+"/llm"),api(base+"/voices")]).then(x=>{setLlm(x[0]);setVoices(x[1])}).catch(x=>onNotice(x.message)),[base,onNotice]);
   useEffect(()=>{refresh()},[refresh]);
   
   // Escape key to close
@@ -54,76 +53,42 @@ function Settings({account,tab,onTab,onAllSettings,onReconnect,onClose,onDeleted
     return()=>window.removeEventListener("keydown",onKey);
   },[onClose,testModal]);
 
-  const saveLlm=async e=>{e.preventDefault();const f=e.currentTarget;const enteredKey=f.apiKey.value.trim(),next={configured:true,provider:f.provider.value,baseUrl:f.baseUrl.value.trim().replace(/\/+$/,"") ,model:f.model.value.trim(),systemPrompt:f.systemPrompt.value,nativeEnabled:llm?.nativeEnabled||false,apiKeyLast4:enteredKey?enteredKey.slice(-4):llm?.apiKeyLast4||""};setBusy(true);try{const result=await api(base+"/llm",{method:"POST",body:JSON.stringify({provider:next.provider,baseUrl:next.baseUrl,apiKey:enteredKey||"__keep__",model:next.model,systemPrompt:next.systemPrompt,n8nWorkflowId})});setLlm(next);await refresh();onNotice(result.n8nAgentExampleAdded?"AI Responses saved. Gakai added an AI Agent example to the selected n8n workflow—connect it where you need it.":"AI Responses saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
-  // Immediate "Enable native AI replies" toggle — matches setN8nAgentEnabled's
-  // immediacy so both mutually-exclusive reply paths behave the same way.
+  const saveLlm=async e=>{e.preventDefault();const f=e.currentTarget;const enteredKey=f.apiKey.value.trim(),next={configured:true,provider:f.provider.value,baseUrl:f.baseUrl.value.trim().replace(/\/+$/,"") ,model:f.model.value.trim(),nativeEnabled:llm?.nativeEnabled||false,apiKeyLast4:enteredKey?enteredKey.slice(-4):llm?.apiKeyLast4||""};setBusy(true);try{const result=await api(base+"/llm",{method:"POST",body:JSON.stringify({provider:next.provider,baseUrl:next.baseUrl,apiKey:enteredKey||"__keep__",model:next.model})});setLlm(next);await refresh();onNotice("AI Responses saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  // Immediate "Enable AI replies" toggle: flipping it needs no resubmit of the whole provider form.
   const setNativeEnabled=async enabled=>{
     setBusy(true);
     try{
-      const result=await api(base+"/llm/native",{method:"PATCH",body:JSON.stringify({nativeEnabled:enabled})});
+      await api(base+"/llm/native",{method:"PATCH",body:JSON.stringify({nativeEnabled:enabled})});
       await refresh();
-      onNotice(enabled&&result?.n8nWorkflowsDeactivated?"Native AI replies are on. Gakai will reply directly through your AI provider; both n8n reply workflows are inactive.":enabled?"Native AI replies enabled.":"Native AI replies disabled.");
+      onNotice(enabled?"AI replies enabled.":"AI replies disabled.");
     }catch(x){onNotice(x.message)}finally{setBusy(false)}
   };
-  const connectN8n=async e=>{e.preventDefault();const f=e.currentTarget;const n8nUrl=f.n8nUrl.value.trim().replace(/\/+$/,"");const enteredKey=f.n8nApiKey.value.trim();setBusy(true);try{const result=await api(base+"/n8n/connect",{method:"POST",body:JSON.stringify({n8nUrl,n8nApiKey:enteredKey||"__keep__"})});setN8n(current=>({...current,connected:true,n8nUrl,n8nApiKeyLength:enteredKey.length||current?.n8nApiKeyLength||0,n8nApiKeyLast4:enteredKey?enteredKey.slice(-4):current?.n8nApiKeyLast4||"",workflows:result.workflowId?[...(current?.workflows||[]).filter(workflow=>workflow.kind!=="standard"),{kind:"standard",workflowId:result.workflowId,workflowName:result.workflowName,workflowUrl:result.workflowUrl}]:current?.workflows||[]}));await refresh();onNotice(result.reused?"n8n connection verified.":"n8n workflow created and connected.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
   const saveName=async e=>{e.preventDefault();const label=e.currentTarget.label.value.trim();if(!label)return;setBusy(true);try{await api(base+"/label",{method:"PATCH",body:JSON.stringify({label})});onRenamed?.(account.id,label);onNotice("Account name saved.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
 
   const del=async()=>{if(!await confirmDialog({title:"Delete this account?",message:`${account.label} will be removed from Gakai and its linked WhatsApp session cleared. You can add and scan it again later.`,confirmLabel:"Delete account",danger:true}))return;setBusy(true);try{await api(base,{method:"DELETE"});onDeleted()}catch(x){onNotice(x.message)}finally{setBusy(false)}};
-  // "Enable n8n AI Agent replies": one action for both first-time setup
-  // (creates the n8n workflow) and re-enabling an existing one — the server
-  // route is idempotent either way and also turns native replies off,
-  // since only one reply path can be live at a time.
-  const setN8nAgentEnabled=async enabled=>{
-    setBusy(true);
-    try{
-      let result=null;
-      if(enabled){
-        result=await api(base+"/n8n/connect/ai",{method:"POST"});
-      }else if(agentWorkflow?.subscriptionId){
-        result=await api(base+"/automations/"+encodeURIComponent(agentWorkflow.subscriptionId),{method:"PATCH",body:JSON.stringify({enabled:false})});
-      }
-      await refresh();
-      onNotice(enabled?(result?.standardWorkflowUnpublished?"AI Agent replies are on. The standard workflow is now inactive.":result?.standardWorkflowMissing?"AI Agent replies are on. The old standard workflow no longer exists in n8n.":"AI Agent replies are on and the workflow is active."):result?.n8nWorkflowsDeactivated?"AI Agent replies are off. Both n8n workflows are inactive.":"AI Agent replies are off.");
-    }catch(x){onNotice(x.message)}finally{setBusy(false)}
-  };
-  // Shared by both the n8n and LLM Proxy "Send test message" buttons — same
-  // modal (phone number + message), routed to whichever endpoint the open
-  // modal's kind calls for. For n8n, the phone number is both the simulated
-  // sender and where the workflow's reply gets delivered. For the direct LLM
-  // proxy there's no simulated inbound message — the phone number, if given,
-  // is just where the proxy's reply gets delivered; left blank, it's a
-  // connectivity check only (proxy called, reply shown, nothing sent).
+  // The phone number, if given, is where the AI's reply gets delivered; left blank, it's a
+  // connectivity check only (provider called, reply shown, nothing sent).
   const sendTestMessage=async e=>{
     e.preventDefault();
     const f=e.currentTarget,phone=f.phone.value.trim(),text=f.text.value.trim();
     if(!text)return;
     setBusy(true);setTestResult(null);
     try{
-      if(testModal.kind==="n8n"){
-        const result=await api(base+"/automations/"+encodeURIComponent(testModal.subscriptionId)+"/test",{method:"POST",body:JSON.stringify({phone,text})});
-        setTestResult({ok:true,text:result.reply?`Reply from n8n: "${result.reply}"${phone?" — sent to "+phone:""}`:"Delivered to n8n, but the workflow sent back no reply — check your n8n execution log."});
-        await refresh();
-      }else{
-        const result=await api(base+"/llm/test",{method:"POST",body:JSON.stringify({prompt:text,phone})});
-        setTestResult({ok:true,text:result.delivered?`Reply from AI Responses: "${result.reply}" — sent to ${phone}`:`AI Responses replied: "${result.reply}" (enter a phone number above to actually deliver it to WhatsApp)`});
-      }
+      const result=await api(base+"/llm/test",{method:"POST",body:JSON.stringify({prompt:text,phone})});
+      setTestResult({ok:true,text:result.delivered?`Reply from AI Responses: "${result.reply}" — sent to ${phone}`:`AI Responses replied: "${result.reply}" (enter a phone number above to actually deliver it to WhatsApp)`});
     }catch(x){
       setTestResult({ok:false,text:x.message});
     }finally{
       setBusy(false);
     }
   };
-  const deleteIntegration=async kind=>{const label=kind==="n8n"?"n8n automation":"AI Responses";if(!await confirmDialog({title:`Delete ${label} integration?`,message:`The ${label} integration for ${account.label} will be removed.`,confirmLabel:"Delete integration",danger:true}))return;setBusy(true);try{await api(base+(kind==="n8n"?"/n8n/connect":"/llm"),{method:"DELETE"});await refresh();onNotice(`${label} integration deleted.`)}catch(x){onNotice(x.message)}finally{setBusy(false)}};
-  const toggleAutomation=async(subscriptionId,enabled,label)=>{if(!subscriptionId)return;setBusy(true);try{const result=await api(base+"/automations/"+encodeURIComponent(subscriptionId),{method:"PATCH",body:JSON.stringify({enabled})});await refresh();onNotice(enabled&&result.aiWorkflowUnpublished?"n8n replies are on. The AI Agent workflow is now inactive.":enabled&&result.aiWorkflowMissing?"n8n replies are on. The old AI Agent workflow no longer exists in n8n.":enabled&&result.standardWorkflowRecreated?"n8n replies are on. A new standard workflow was created and activated.":enabled?"n8n replies are on and the workflow is active.":result.n8nWorkflowsDeactivated?"n8n replies are off. Both n8n workflows are inactive.":"n8n replies are off.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
+  const deleteIntegration=async()=>{if(!await confirmDialog({title:"Delete AI Responses integration?",message:`The AI Responses integration for ${account.label} will be removed.`,confirmLabel:"Delete integration",danger:true}))return;setBusy(true);try{await api(base+"/llm",{method:"DELETE"});await refresh();onNotice("AI Responses integration deleted.")}catch(x){onNotice(x.message)}finally{setBusy(false)}};
 
   // The tab picks which panel shows; the two integration panels keep their existing content.
-  const service=tab==="ai"?"llm":tab==="automation"?"n8n":null;
-  const tabs=[{id:"connection",label:"Connection"},{id:"ai",label:"AI responses",ready:!!llm?.configured},{id:"voices",label:"AI Voice and Tone",ready:voices.voices.length>0},{id:"automation",label:"n8n Automation",ready:!!n8n?.connected}];
+  const service=tab==="ai"?"llm":null;
+  const tabs=[{id:"connection",label:"Connection"},{id:"ai",label:"AI responses",ready:!!llm?.configured},{id:"voices",label:"AI Voice and Tone",ready:voices.voices.length>0}];
   const goTab=id=>{setTestModal(null);setTestResult(null);onTab(id)};
-  const agentWorkflow=n8n?.workflows?.find(workflow=>workflow.kind==="agentic");
-  const standardWorkflow=n8n?.workflows?.find(workflow=>workflow.kind==="standard");
-  useEffect(()=>{if(agentWorkflow?.workflowId)setN8nWorkflowId(agentWorkflow.workflowId)},[agentWorkflow?.workflowId]);
-  const detail=service==="n8n"?<><h3>n8n Automation</h3><p>Create Gakai’s standard automation template in your n8n instance. It contains no AI node.</p>{standardWorkflow?<div className="workflow-links"><a href={standardWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`n8n workflow (${standardWorkflow.workflowId})`}</span><b>{standardWorkflow.workflowName||"Gakai"}</b><em>Open in n8n ↗</em></a></div>:null}{standardWorkflow?.subscriptionId?<label className="checkbox-field"><input type="checkbox" checked={!!standardWorkflow.active} disabled={busy} onChange={e=>toggleAutomation(standardWorkflow.subscriptionId,e.currentTarget.checked,"n8n replies")}/><span><b>Enable n8n replies</b><small>Route direct messages, and group messages where you're tagged, through this n8n automation. Turns off native AI replies and n8n AI Agent replies.</small></span></label>:null}{standardWorkflow?.subscriptionId?<button type="button" className="secondary n8n-test-action" onClick={()=>{setTestModal({kind:"n8n",subscriptionId:standardWorkflow.subscriptionId});setTestResult(null)}}>Send test message</button>:null}<form key={`n8n-${n8n?.n8nUrl||"new"}`} className="integration-form integration-form-stacked" onSubmit={connectN8n}><label>n8n URL<input name="n8nUrl" type="url" defaultValue={n8n?.n8nUrl||""} placeholder="https://yourname.app.n8n.cloud" required/></label><label>n8n API key<input name="n8nApiKey" type="password" placeholder="Paste a replacement n8n API key" required={!n8n?.connected}/>{n8n?.connected&&<small className="saved-key-mask">Saved key: ••••…••{n8n.n8nApiKeyLast4}</small>}</label><button className="primary integration-submit" disabled={busy}>{busy?"Verifying authorization…":"Save and verify authorization"}</button></form></>:service==="llm"?<><h3>AI Responses</h3><p>Choose who writes your replies: your own LiteLLM proxy, Claude, or ChatGPT. Enter a key and Gakai lists the models available to it.</p>{agentWorkflow?<div className="workflow-links"><a href={agentWorkflow.workflowUrl} target="_blank" rel="noreferrer"><span>{`AI Agent workflow (${agentWorkflow.workflowId})`}</span><b>{agentWorkflow.workflowName||"Gakai AI Agent"}</b><em>Open in n8n ↗</em></a></div>:null}{llm?.configured?<button type="button" className="secondary llm-test-action" onClick={()=>{const useAgent=!!agentWorkflow?.active&&!!agentWorkflow?.subscriptionId;setTestModal(useAgent?{kind:"n8n",subscriptionId:agentWorkflow.subscriptionId}:{kind:"llm"});setTestResult(null)}}>Send test message{agentWorkflow?.active?" (via n8n AI Agent)":""}</button>:null}<form key={`llm-${llm?.provider||"new"}-${llm?.baseUrl||""}-${llm?.model||""}`} className="integration-form integration-form-stacked" ref={llmFormRef} onSubmit={saveLlm}><AiProviderFields llm={llm} base={base} busy={busy} onCommit={()=>llmFormRef.current?.requestSubmit()}/><label>Default instructions<small className="field-hint">Used for anyone without a voice profile. A voice profile is the better way to shape replies.</small><textarea name="systemPrompt" rows="6" defaultValue={llm?.systemPrompt||""} onBlur={e=>{if(llm?.configured&&e.currentTarget.value.trim()!==String(llm.systemPrompt||"").trim())llmFormRef.current?.requestSubmit()}}/></label>{llm?.configured&&n8n?.connected?<label className="checkbox-field"><input type="checkbox" checked={!!agentWorkflow?.active} disabled={busy} onChange={e=>setN8nAgentEnabled(e.currentTarget.checked)}/><span><b>Enable n8n AI Agent replies</b><small>Creates or updates the n8n AI Agent workflow and replies through it — direct messages, and group messages where you're tagged. Turns off native AI replies and standard n8n replies.</small></span></label>:llm?.configured?<p className="hint-inline"><small>Connect n8n in the n8n Automation tab to enable AI Agent replies through n8n.</small></p>:null}</form>{llm?.configured?<div className="ai-next"><b>Next: shape the replies</b><p>Give the AI a voice for each kind of conversation, and choose who each voice answers, in AI Voice and Tone.</p><div className="ai-next-actions"><button type="button" className="secondary" onClick={()=>goTab("voices")}>AI Voice and Tone{voices.voices.length?` (${voices.voices.length})`:""}</button></div></div>:null}{llm?.configured?<label className="checkbox-field"><input type="checkbox" checked={!!llm?.nativeEnabled} disabled={busy} onChange={e=>setNativeEnabled(e.currentTarget.checked)}/><span><b>Enable native AI replies (no n8n)</b><small>Gakai sends the incoming message to your AI provider and returns its response straight through WhatsApp. It turns off and deactivates both n8n reply workflows.</small></span></label>:null}</>:<><h3>Select services</h3><p>Choose a service to configure it for <b>{account.label}</b>.</p></>;
+  const detail=service==="llm"?<><h3>AI Responses</h3><p>Choose who writes your replies: your own LiteLLM proxy, Claude, or ChatGPT. Enter a key and Gakai lists the models available to it.</p>{llm?.configured?<button type="button" className="secondary llm-test-action" onClick={()=>{setTestModal({kind:"llm"});setTestResult(null)}}>Send test message</button>:null}<form key={`llm-${llm?.provider||"new"}-${llm?.baseUrl||""}-${llm?.model||""}`} className="integration-form integration-form-stacked" ref={llmFormRef} onSubmit={saveLlm}><AiProviderFields llm={llm} base={base} busy={busy} onCommit={()=>llmFormRef.current?.requestSubmit()}/></form>{llm?.configured?<div className="ai-next"><b>Next: shape the replies</b><p>Give the AI a voice for each kind of conversation, and choose who each voice answers, in AI Voice and Tone.</p><div className="ai-next-actions"><button type="button" className="secondary" onClick={()=>goTab("voices")}>AI Voice and Tone{voices.voices.length?` (${voices.voices.length})`:""}</button></div></div>:null}{llm?.configured?<label className="checkbox-field"><input type="checkbox" checked={!!llm?.nativeEnabled} disabled={busy} onChange={e=>setNativeEnabled(e.currentTarget.checked)}/><span><b>Enable AI replies</b><small>Gakai sends each incoming message from the people and groups you listed to your AI provider and returns its response through WhatsApp.</small></span></label>:null}</>:<><h3>Select services</h3><p>Choose a service to configure it for <b>{account.label}</b>.</p></>;
 
   return <div className="details" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <header className="details-head">
@@ -147,13 +112,13 @@ function Settings({account,tab,onTab,onAllSettings,onReconnect,onClose,onDeleted
           <div className="details-delete"><div><h3>Delete account</h3><p>Remove this WhatsApp account from Gakai. You can add and scan it again later.</p></div><button type="button" className="danger" disabled={busy} onClick={del}>{busy?"Deleting…":"Delete account"}</button></div>
         </>}
         {tab==="voices"&&<VoiceProfilesPanel base={base} data={voices} llm={llm} onLlmSaved={result=>setLlm(current=>({...current,replyRules:result.replyRules,replyLabels:result.replyLabels}))} onOpenAi={()=>goTab("ai")} onChanged={refresh} onNotice={onNotice}/>}
-        {service&&<section className="details-card service-panel"><div className="service-detail">{detail}{service==="n8n"&&n8n?.connected?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("n8n")}>Delete integration</button>:null}{service==="llm"&&llm?.configured?<button type="button" className="integration-delete danger" disabled={busy} onClick={()=>deleteIntegration("llm")}>Delete integration</button>:null}</div></section>}
+        {service&&<section className="details-card service-panel"><div className="service-detail">{detail}{service==="llm"&&llm?.configured?<button type="button" className="integration-delete danger" disabled={busy} onClick={deleteIntegration}>Delete integration</button>:null}</div></section>}
       </div>
     </main>
     {testModal&&<div className="modal-overlay" role="presentation" onClick={()=>setTestModal(null)}>
       <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="test-message-title" onClick={e=>e.stopPropagation()}>
         <h3 id="test-message-title">Send test message</h3>
-        <p>{testModal.kind==="n8n"?"Send a simulated WhatsApp message to your n8n automation.":"Send a test prompt to your AI provider. Add a phone number to also deliver the reply to WhatsApp."}</p>
+        <p>Send a test prompt to your AI provider. Add a phone number to also deliver the reply to WhatsApp, in the voice chosen for that number.</p>
         <form className="integration-form" onSubmit={sendTestMessage}>
           <label>Phone number<input name="phone" type="tel" placeholder="Optional — e.g. 15551234567"/></label>
           <label>Message<textarea name="text" rows="3" placeholder="This is a Gakai test event." required/></label>

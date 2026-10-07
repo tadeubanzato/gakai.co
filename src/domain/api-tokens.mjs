@@ -1,4 +1,4 @@
-// Application tokens: how another system (n8n, a CRM, a script) authenticates to
+// Application tokens: how another system (a CRM, a gateway, a script) authenticates to
 // Gakai's HTTP API to send a WhatsApp message from one connected account.
 import { randomBytes } from 'node:crypto';
 import { normalizePhone } from './phone.mjs';
@@ -11,9 +11,6 @@ export const MAX_MESSAGE_LENGTH = 4096;
 // A token can be copied back out of Gakai for this long after it is created or
 // regenerated. After that only its one-way hash is kept, so it can never be read again.
 export const COPY_WINDOW_MS = 24 * 60 * 60 * 1000;
-// Keys Gakai manages for itself (the n8n auto-connect); they are not listed or
-// rotated from the tokens card.
-export const INTERNAL_KEY_NAMES = new Set(['n8n integration']);
 
 export const newToken = () => `wh_live_${randomBytes(24).toString('base64url')}`;
 export const tokenLast4 = token => String(token).slice(-4);

@@ -1,6 +1,6 @@
 // "Who should the AI reply to?" as one box per voice. Each person or group sits in exactly one
 // box — the voice they are answered in — and everyone without a voice sits in "Everyone else",
-// which uses the account's default instructions. This is only how the list is arranged on screen;
+// which gets Gakai's built-in basic reply style. This is only how the list is arranged on screen;
 // what is saved is still the flat list of numbers and groups plus who uses which voice.
 export const DEFAULT_BOX_NAME = "Everyone else";
 

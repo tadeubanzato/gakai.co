@@ -7,8 +7,7 @@ import http from 'node:http';
 
 // The "Send test message" button on the LLM Proxy panel used to only ever
 // call the proxy and show the reply — it never delivered anything to
-// WhatsApp, unlike the n8n test button, which round-trips through the real
-// WhatsApp-sending pipeline. This exercises the fix: /llm/test now takes an
+// WhatsApp. This exercises the fix: /llm/test now takes an
 // optional phone number and, when given, actually sends the proxy's reply
 // via the same provider.sendText() call the real native-reply dispatch path
 // (dispatchLLMReply) makes.
