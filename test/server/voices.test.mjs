@@ -179,9 +179,9 @@ test('the instructions for a conversation are its voice, and the built-in basic 
   await putRules({ numbers: ['18577075969', '15551230000'], groups: [GROUP], assignments: { '18577075969': mom.id, [GROUP]: mom.id } });
   const event = (chatId, extra = {}) => ({ chat: { id: chatId, kind: chatId.endsWith('@g.us') ? 'group' : 'direct', ...extra } });
 
-  assert.match(replyInstructions(ACCOUNT, event('18577075969@s.whatsapp.net')), /Who you are talking to: My mother/);
-  assert.match(replyInstructions(ACCOUNT, event(GROUP)), /replying because the owner was tagged/);
-  assert.match(replyInstructions(ACCOUNT, event('15551230000@s.whatsapp.net')), /WhatsApp assistant/, 'nobody chose a voice for them: the built-in basic style');
+  assert.match(await replyInstructions(ACCOUNT, event('18577075969@s.whatsapp.net')), /Who you are talking to: My mother/);
+  assert.match(await replyInstructions(ACCOUNT, event(GROUP)), /replying because the owner was tagged/);
+  assert.match(await replyInstructions(ACCOUNT, event('15551230000@s.whatsapp.net')), /WhatsApp assistant/, 'nobody chose a voice for them: the built-in basic style');
   await call('DELETE', `/${mom.id}`);
 });
 
@@ -198,4 +198,31 @@ test('the settings test message uses the voice chosen for the number it is sent 
   assert.equal((await test('')).status, 200);
   assert.match(seen.slice(before)[0][0].content, /WhatsApp assistant/, 'no number: the built-in basic style');
   await call('DELETE', `/${mom.id}`);
+});
+
+test('the AI is told who it is replying to, and sees the recent conversation, with every reply', async () => {
+  await clearVoices();
+  const chat = '5511977776666@s.whatsapp.net';   // its own chat: earlier tests' AI replies are stored in the others
+  await enableAi({ numbers: ['5511977776666'], groups: [] });
+  const now = Math.floor(Date.now() / 1000);
+  provider.__test.seedMessage(ACCOUNT, chat, { id: 'h1', timestamp: now - 300, fromMe: false, body: 'Já almoçou?', text: 'Já almoçou?', hasMedia: false });
+  provider.__test.seedMessage(ACCOUNT, chat, { id: 'h2', timestamp: now - 200, fromMe: true, body: 'Já sim! E você?', text: 'Já sim! E você?', hasMedia: false });
+  const before = seen.length;
+  await dispatchAutomationEvent({ accountId: ACCOUNT, chatId: chat, message: { id: 'h3', timestamp: now, fromMe: false, body: 'Também. Vai vir domingo?', text: 'Também. Vai vir domingo?', hasMedia: false, sender: { id: chat, name: 'Mom' }, mentionedJids: [] } });
+  const sent = seen.slice(before)[0];
+  assert.equal(sent[0].role, 'system');
+  assert.match(sent[0].content, /You are replying to: Mom \(\+5511977776666\)\./);
+  assert.match(sent[0].content, /recent conversation, oldest first/);
+  assert.deepEqual(sent.slice(1), [
+    { role: 'user', content: 'Já almoçou?' },
+    { role: 'assistant', content: 'Já sim! E você?' },
+    { role: 'user', content: 'Também. Vai vir domingo?' },
+  ]);
+});
+
+test('a photo or voice note with no caption gets no AI reply, because the AI cannot see or hear it', async () => {
+  await enableAi({ numbers: ['5511977776666'], groups: [] });
+  const before = seen.length;
+  await dispatchAutomationEvent({ accountId: ACCOUNT, chatId: '5511977776666@s.whatsapp.net', message: { id: 'media-only', timestamp: Math.floor(Date.now() / 1000), fromMe: false, body: '', text: '', hasMedia: true, media: { mimetype: 'image/jpeg' }, sender: null, mentionedJids: [] } });
+  assert.equal(seen.length, before, 'no request reached the AI');
 });

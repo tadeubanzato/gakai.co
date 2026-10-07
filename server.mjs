@@ -16,6 +16,7 @@ import { callingCodeOf } from './src/domain/phone.mjs';
 import { clampPageSize } from './src/domain/conversation-list.mjs';
 import { MAX_TOKENS_PER_ACCOUNT, isCopyable, newToken, pruneExpiredTokens, publicToken, sendTarget, tokenLast4, validMessageText, validateScopes, validateTokenRequest } from './src/domain/api-tokens.mjs';
 import { normalizeReplyRules, shouldAiReply, isChatListed, setChatListed, voiceIdFor } from './src/domain/ai-reply-rules.mjs';
+import { conversationContext, conversationTurns, MAX_TURNS } from './src/domain/reply-context.mjs';
 import { MAX_VOICES_PER_ACCOUNT, TEMPLATES as VOICE_TEMPLATES, compileVoicePrompt, parseVoiceYaml } from './src/domain/voice-profile.mjs';
 import { searchPeople, searchGroups, resolveRuleLabels } from './src/domain/reply-targets.mjs';
 import { AI_PROVIDER_IDS, FIXED_BASE_URLS, usesFixedBaseUrl, listModels as listAiModels, complete as aiComplete } from './src/lib/ai-provider.mjs';
@@ -474,15 +475,34 @@ function withKnownVoices(accountId,rules){
   const {assignments:_dropped,...rest}=normalized;
   return Object.keys(assignments).length?{...rest,assignments}:rest;
 }
-// How the AI must answer this conversation: the voice chosen for it. Voices are the only instructions an account has.
-function replyInstructions(accountId,event){return voiceSystemPrompt(accountId,event)||fallbackInstructions;}
+// The name of a group chat, for telling the AI which group it is in.
+async function groupName(accountId,chatId){
+  const contact=await provider.getContact(accountId,chatId,{namesOnly:true}).catch(()=>null);
+  if(contact?.name)return contact.name;
+  return (await provider.getChatsOverview(accountId).catch(()=>[])).find(item=>item.id===chatId)?.name||null;
+}
+// What the AI is told before it replies: the voice chosen for this conversation (Gakai's short built-in
+// style when none is) plus who it is replying to. That context goes with every reply.
+async function replyInstructions(accountId,event,{withHistory=false}={}){
+  const isGroup=event.chat?.kind==='group',chatId=event.chat?.id;
+  const phone=event.chat?.phone||(!isGroup&&String(chatId||'').endsWith('@s.whatsapp.net')?bareJidUser(chatId):null);
+  const chat={kind:isGroup?'group':'direct',name:isGroup?await groupName(accountId,chatId):event.chat?.name,phone};
+  return `${voiceSystemPrompt(accountId,event)||fallbackInstructions}\n\n${conversationContext({chat,sender:event.message?.sender||{},withHistory})}`;
+}
+// The recent conversation as chat turns, ending with the message being answered. If the history cannot
+// be read the AI still gets that message.
+async function replyTurns(accountId,event){
+  const past=await provider.getMessages(accountId,event.chat.id,{limit:MAX_TURNS+4}).catch(()=>[]);
+  return conversationTurns({messages:past,incoming:event.message,group:event.chat?.kind==='group'});
+}
 async function dispatchLLMReply(accountId,event){
   const config=llmConfig(accountId);if(!config||!config.nativeEnabled)return;
+  // A photo, video, voice note or document with no caption is skipped: the AI cannot see or hear it, so any reply would be a guess.
   const chatId=event.chat?.id;const userText=event.message?.body||event.message?.text||'';if(!chatId||!userText)return;
   // The voice chosen for this person or group.
-  const systemPrompt=replyInstructions(accountId,event);
+  const systemPrompt=await replyInstructions(accountId,event,{withHistory:true});
   try{
-    const reply=await llmChat(config,[{role:'system',content:systemPrompt},{role:'user',content:userText}]);
+    const reply=await llmChat(config,[{role:'system',content:systemPrompt},...await replyTurns(accountId,event)]);
     if(!reply.trim())return;
     await provider.sendText(accountId,chatId,reply.trim());
   }catch(err){console.error('Native LLM reply failed:',err.message);}
@@ -1077,7 +1097,7 @@ async function enrichMessage(session,view){
     const phone=String(input.phone||'').replace(/[^0-9]/g,'');
     if(phone.length>30)return send(res,400,{message:'Invalid test phone number'});
     let reply;
-    try{reply=await llmChat(cfg,[{role:'system',content:replyInstructions(id,{chat:{id:`${phone}@s.whatsapp.net`,kind:'direct',phone:phone||null}})},{role:'user',content:prompt}]);}
+    try{reply=await llmChat(cfg,[{role:'system',content:await replyInstructions(id,{chat:{id:`${phone}@s.whatsapp.net`,kind:'direct',phone:phone||null}})},{role:'user',content:prompt}]);}
     catch(error){return send(res,502,{message:error.message||'LLM test failed'});}
     // A phone number is opt-in delivery: same provider.sendText() call
     // dispatchLLMReply makes for a real inbound message, so this actually
