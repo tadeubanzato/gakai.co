@@ -4,6 +4,7 @@ import { api } from "./app-helpers.mjs";
 import { aspectOf, compensation, distanceFromBottom, entryNeedsCorrection, followsIncoming, isAtBottom, modeAfterIntent, modeAfterScroll, settlesToBottom } from "./thread-scroll.mjs";
 import { Avatar, Menu, MenuItem } from "./ui-helpers.jsx";
 import { confirmDialog } from "./confirm.jsx";
+import { ChatInfoModal } from "./chat-info.jsx";
 
 function mediaSrc(message) {
   const raw = message?.mediaUrl || message?.media?.url;
@@ -23,9 +24,12 @@ function mediaKind(message) {
   if (type.startsWith("audio/") ) return "audio";
   return "document";
 }
-function Sender({ sender }) {
+function Sender({ sender, onInfo }) {
   const label = sender?.name || sender?.id || "Unknown sender";
-  return <span className="message-sender"><Avatar className="sender-avatar" picture={sender?.picture} label={label}/><span>{label}</span></span>;
+  const inner = <><Avatar className="sender-avatar" picture={sender?.picture} label={label}/><span>{label}</span></>;
+  return onInfo && sender?.id
+    ? <button type="button" className="message-sender sender-link" onClick={() => onInfo(sender.id)} title="View details">{inner}</button>
+    : <span className="message-sender">{inner}</span>;
 }
 function mediaTime(value) {
   if (!Number.isFinite(value) || value < 0) return "0:00";
@@ -217,7 +221,7 @@ function messageBody(text, mentions) {
   const parts=String(text).split(pattern);
   return parts.map((part,index)=>index%2?<mark key={index} className="own-mention">@{part}</mark>:part);
 }
-function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, accountPicture, onMediaResolved, onReply, onReact, onForward, onEdit, onStar, onDelete, reaction }) {
+function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, accountPicture, onMediaResolved, onReply, onReact, onForward, onEdit, onStar, onDelete, onInfo, reaction }) {
   const body = message?.body || message?.text || message?.caption || "";
   const previewUrl = message?.linkPreview?.url || String(body).match(/https?:\/\/[^\s]+/i)?.[0];
   const visibleBody = previewUrl ? String(body).replace(previewUrl, "").trim() : body;
@@ -230,7 +234,7 @@ function MessageCard({ message, accountId, chatId, chatPicture, accountLabel, ac
   // is suppressed inside the thread.
   const structured = Boolean(message?.location || message?.poll || message?.contacts?.length);
   const bubble = <article className={`message ${message.fromMe ? "mine" : ""}${message.pending ? " pending" : ""}${message.mentions?.some(mention=>mention.isMe)?" mentioned-me":""}`}>
-    {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} />}
+    {!message.fromMe && message.sender && <Sender sender={{...message.sender,picture:message.sender.picture||chatPicture}} onInfo={onInfo} />}
     {message.fromMe && <Sender sender={{id:accountId,name:accountLabel||"You",picture:accountPicture}} />}
     {message?.replyTo && <div className={`reply-context${message.replyTo.thumbnail ? " has-thumb" : ""}`}><div className="reply-text"><b>Replying to</b><span>{String(label).slice(0,140)}</span>{replyCaption && <em>{String(replyCaption).slice(0,140)}</em>}</div>{message.replyTo.thumbnail && <img className="reply-thumb" src={message.replyTo.thumbnail} alt="" width="44" height="44" loading="lazy"/>}</div>}
     {message?.viewOnce && <span className="view-once-badge">👁 View once</span>}
@@ -334,6 +338,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   const fileInputRef = useRef(null);
   const [reactionOverrides, setReactionOverrides] = useState({});
   const [remoteTyping, setRemoteTyping] = useState(false);
+  const [infoFor, setInfoFor] = useState(null);   // a person or group id while the details window is open
   const [newMessageCount, setNewMessageCount] = useState(0);
   const [atBottom, setAtBottom] = useState(true); // the newest message is in view
   const messagesOwnerRef = useRef(null);             // the chat the messages in state belong to
@@ -952,7 +957,7 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
   return <div className="conversation-react-root" aria-label={name} onPointerDownCapture={() => onEngage?.()} onKeyDownCapture={() => onEngage?.()}>
     <header className="conversation-head">
       {onBack && <button type="button" className="back" onClick={onBack} aria-label="Back to conversations">‹</button>}
-      <Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small title={chatId || undefined}>{chat?.kind === "group" ? "Group" : chat?.phone && chat.phone !== name ? chat.phone : chat?.phone ? "WhatsApp contact" : `Chat ID: ${chatId || "Unavailable"}`}</small></span>
+      <button type="button" className="chat-identity" onClick={() => chatId && setInfoFor(chatId)} aria-label={`View details for ${name}`}><Avatar picture={chat?.picture} label={name}/><span className="chat-title"><b>{name}</b><small title={chatId || undefined}>{chat?.kind === "group" ? "Group" : chat?.phone && chat.phone !== name ? chat.phone : chat?.phone ? "WhatsApp contact" : `Chat ID: ${chatId || "Unavailable"}`}</small></span></button>
       <Menu label="Conversation actions" className="conversation-menu">
         {onAiToggle && chat && <MenuItem toggled={!!chat.aiReply} onSelect={()=>onAiToggle(chat)}>AI replies - {chat.aiReply ? "On" : "Off"}</MenuItem>}
         {onChatState && chat && <>
@@ -968,11 +973,12 @@ export function ChatPanel({ accountId, accountLabel, accountPicture, chat, chats
         <MenuItem onSelect={deleteConversation} danger disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</MenuItem>
       </Menu>
     </header>
+    {infoFor && <ChatInfoModal accountId={accountId} startId={infoFor} onClose={() => setInfoFor(null)} />}
     <div className="messages" ref={paneRef} onScroll={maybeLoadOlder} onWheel={event => { onEngage?.(); stopFollowingOnWheel(event); }} onPointerDown={event => { onEngage?.(); holdPointer(event); }} onKeyDown={() => onEngage?.()} onTouchStart={trackTouch} onTouchMove={stopFollowingOnTouch}>
       <div className="history-control" role="status">{olderLoading ? "Loading earlier messages…" : exhausted ? "Beginning of this conversation" : "Scroll up for earlier messages"}</div>
       {error && <p className="chat-error" role="alert">{error}</p>}
       {loading && !messages.length ? <p className="chat-loading loading-hint" role="status"><span className="spinner" aria-hidden="true"/>Loading messages…</p> : <div className="message-list">
-        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onForward={setForwarding} onEdit={beginEdit} onStar={toggleStar} onDelete={deleteMessage} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
+        {messages.map((message,index) => <div key={idFor(message,index)} data-message-key={idFor(message,index)} className={`message-row ${message.fromMe ? "mine" : ""}`}><MessageCard message={message} accountId={accountId} chatId={chatId} chatPicture={!/@g\.us$/i.test(chatId||"")?chat?.picture:null} accountLabel={accountLabel} accountPicture={accountPicture} onMediaResolved={resolveMedia} onReply={setReplyingTo} onReact={reactToMessage} onForward={setForwarding} onEdit={beginEdit} onStar={toggleStar} onDelete={deleteMessage} onInfo={setInfoFor} reaction={reactionOverrides[serializedId(message.id)] ?? message.reaction}/></div>)}
       </div>}
       {/* Zero-height slot: showing or hiding these controls must never change the thread's height, or the scroll position would move under the reader. */}
       <div className="thread-jump">

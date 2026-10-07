@@ -876,6 +876,12 @@ async function enrichMessage(session,view){
       return send(res,200,{ok:true});
     }
   }
+  // Details window: about a person, or a group's description and members. Read-only, and only fetched
+  // when the reader opens it, so it never adds provider calls on its own.
+  if (req.method==='GET' && parts[4]==='chats' && parts[5] && parts[6]==='info') {
+    try{return send(res,200,await provider.getChatInfo(id,decodeURIComponent(parts[5])));}
+    catch(error){return send(res,error.status||502,{message:error.message||'Could not load the details'});}
+  }
   if (req.method==='GET' && parts[4]==='chats' && parts[5] && parts[6]==='participants') {
     const chatId=decodeURIComponent(parts[5]);
     return send(res,200,{participants:await provider.getGroupParticipants(id,chatId)});

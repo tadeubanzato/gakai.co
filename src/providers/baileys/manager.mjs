@@ -19,7 +19,8 @@ import { createMediaStore } from './media.mjs';
 import { freshPictureUrl, createPictureRefresher } from './picture.mjs';
 import { createBoundedCache } from '../../lib/lru-cache.mjs';
 import { planMessageDelete, keysFromDeleteEvent, chatDeleteRange } from '../../domain/message-delete.mjs';
-import { isDisplayableConversation } from '../../domain/jid.mjs';
+import { isDisplayableConversation, classifyJid, JID_KIND } from '../../domain/jid.mjs';
+import { groupInfoView, personInfoView } from '../../domain/chat-info.mjs';
 import { resolveConversationIdentity } from '../../domain/identity.mjs';
 import { thumbnailOfRawMessage, messageView, chatOverview as domainChatOverview, reactionView, revokeView, editView, ackStatusRank, bareJidUser, isGroupChatId, isLidJid, isSameIdentity } from '../../domain/message.mjs';
 
@@ -629,6 +630,39 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     return participants;
   }
 
+  // The details window for a person or a group. Each WhatsApp lookup is bounded and may fail on its own
+  // (a hidden About, a profile that is not a business, a group the account has left) without taking the
+  // rest down; what WhatsApp would not tell us is simply absent.
+  async function getChatInfo(accountId, chatId) {
+    chatId = canonicalChatId(accountId, chatId);
+    const kind = classifyJid(chatId);
+    if (kind !== JID_KIND.INDIVIDUAL && kind !== JID_KIND.GROUP) throw Object.assign(new Error('Details are only available for people and groups'), { status: 400 });
+    const entry = accounts.get(accountId);
+    if (!entry) throw Object.assign(new Error('This WhatsApp account is not connected'), { status: 409 });
+    const within = (promise, ms = 8000) => Promise.race([Promise.resolve(promise).catch(() => null), new Promise(resolve => setTimeout(() => resolve(null), ms))]);
+    const known = store.getContact(accountId, chatId);
+    const picture = (await within(entry.sock.profilePictureUrl(chatId, 'image'))) || freshPictureUrl(known?.picture) || null;
+    const ownJid = entry.me?.id || null;
+
+    if (kind === JID_KIND.GROUP) {
+      const metadata = await within(entry.sock.groupMetadata(chatId));
+      if (!metadata) throw Object.assign(new Error("Details aren't available for this group"), { status: 404 });
+      const describe = rawId => {
+        const resolvedId = isLidJid(rawId) ? resolveLid(accountId, rawId) : rawId;
+        const contact = store.getContact(accountId, resolvedId) || store.getContact(accountId, rawId);
+        const number = jidDecode(resolvedId)?.server === 's.whatsapp.net' ? bareJidUser(resolvedId) : bareJidUser(rawId);
+        const isMe = Boolean(ownJid && (isSameIdentity(rawId, ownJid) || isSameIdentity(resolvedId, ownJid)));
+        return { id: resolvedId, number, name: isMe ? 'You' : contact?.name || (number ? `+${number}` : bareJidUser(rawId)), isMe };
+      };
+      return groupInfoView(metadata, describe, picture);
+    }
+
+    const [statusList, business] = await Promise.all([within(entry.sock.fetchStatus(chatId)), within(entry.sock.getBusinessProfile(chatId))]);
+    const status = statusList?.[0]?.status;
+    const phone = known?.phone || (jidDecode(chatId)?.server === 's.whatsapp.net' ? bareJidUser(chatId) : null);
+    return personInfoView({ id: chatId, name: known?.name, phone, picture, about: status?.status, aboutSetAt: status?.setAt, business: business || null });
+  }
+
   // Best-effort: WhatsApp's LID (linked-device anonymous id) → phone-number
   // jid mapping is only available once Gakai has actually observed it
   // (a contact/message event carrying both forms). Without a stored mapping
@@ -772,7 +806,7 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
     startAccount, restartAccount, deleteAccount, listAccounts, getAccount, getQr,
     sendText, sendMedia, forwardMessage, editMessage, setReaction, deleteMessage, deleteChat, markChatRead, setChatState, setBlocked, setDisappearing,
     subscribePresence, publishPresence,
-    getContact, getContacts, resolveLid, getGroupParticipants,
+    getContact, getContacts, resolveLid, getGroupParticipants, getChatInfo,
     checkOnWhatsApp, startConversation,
     setMessageStar, getStarredMessages,
     getChatsOverview, getChatsPage, getMessages, getMessage, downloadMedia,
