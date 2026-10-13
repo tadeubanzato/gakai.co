@@ -230,7 +230,27 @@ export function createBaileysProvider({ db, sessionsDir, mediaCacheDir, logLevel
   function canonicalChatId(accountId, jid) {
     const raw = String(jid || '');
     if (!raw || isGroupChatId(raw) || !isLidJid(raw)) return raw;
-    return store.resolveLid(accountId, normJid(raw)) || raw;
+    // A LID can arrive with a linked-device suffix ("<n>:43@lid"); strip it so one person is
+    // one chat key even while the phone number is still unknown.
+    const lid = normJid(raw);
+    const pn = store.resolveLid(accountId, lid);
+    if (pn) return pn;
+    resolveLidInBackground(accountId, lid);
+    return lid;
+  }
+
+  // The mapping is not known yet: ask Baileys (which keeps its own LID<->PN table) once per LID,
+  // then fold the LID chat into the phone-number chat. Without this the split only healed at the
+  // next reconnect, so a second account's chat sat duplicated under "<n>@lid".
+  const lidLookups = new Set();
+  function resolveLidInBackground(accountId, lid) {
+    const key = `${accountId}|${lid}`;
+    if (lidLookups.has(key)) return;
+    lidLookups.add(key);
+    const lookup = accounts.get(accountId)?.sock?.signalRepository?.lidMapping?.getPNForLID?.(lid);
+    Promise.resolve(lookup).then(pn => { if (pn) learnLidPn(accountId, pn, lid, { silent: true }); })
+      .catch(() => {})
+      .finally(() => setTimeout(() => lidLookups.delete(key), 60_000));
   }
 
   // Record a lid<->phone-number pairing (order-agnostic) and immediately fold
